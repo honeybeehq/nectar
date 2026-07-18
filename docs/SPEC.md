@@ -37,8 +37,9 @@ Agents of any harness call it directly; the packet carries only strings.
 ## 3. Vocabulary and system overview
 
 - **env** — one published test environment: a checkout + artifacts + (maybe) a serving
-  process + a record. Identified per-machine by **name** `<app>--<branch-slug>` and a short
-  random **eid** (`e7f3`). One env per (app, branch, mode) per machine; republish upserts.
+  process + a record. Identified per-machine by the mode-qualified **name**
+  `<app>--<branch-slug>--<mode>` and a short random **eid** (`e7f3`). One env per
+  (app, branch, mode) per machine; republish upserts.
 - **app** — the repo's short name, from the recipe (`name` in `nectar.toml`), else the repo
   directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
@@ -47,7 +48,14 @@ Agents of any harness call it directly; the packet carries only strings.
   `code`: a `code` packet is precisely one with **no** nectar env.
 - **ref** — the canonical cross-machine handle: `nectar://<host>/<env-name>`, where `<host>`
   is the machine's tailnet hostname (`trmd-metal-1`). Refs are resolved by `nectar resolve`
-  and consumed by `nectar open` / `nectar shell` on any mesh machine.
+  and consumed by `nectar open` / `nectar shell` on any mesh machine. Emitted refs are
+  always mode-qualified. `nectar resolve <app>--<branch-slug>` accepts the mode-less base
+  name as a discovery form and returns every mode record for that pair.
+
+**v0 amendment · 2026-07-18:** the reviewed `<app>--<branch-slug>` identity could not
+represent simultaneous web and desktop records, which `embed_url = "web"` requires. The
+coordinator ruled that mode is part of the storage identity, file key, and emitted ref now,
+while the greenfield format has no compatibility burden.
 - **testpack** — the standard packaged desktop build (§6.2).
 - **recipe** — the checked-in `nectar.toml` telling nectar *how* to serve/pack/seed this
   repo (§5).
@@ -89,7 +97,7 @@ servers surface honestly as `status: crashed` with a log tail.
 
 ```text
 ~/.nectar/
-  envs/<name>.json          # one env record per env — the source of truth
+  envs/<name>.json          # <name> includes --web/--desktop; source of truth
   work/<name>/              # nectar-owned git worktree/clone of the branch
   packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
     kontiki-desktop--agent-coupons-stack.testpack.zip
@@ -104,18 +112,22 @@ State is **one JSON file per env**, written atomically (temp + rename). No SQLit
 are tiny, single-machine, and file-per-env means concurrent publishing agents never contend
 on a shared writer (DECISIONS D5). `nectar ls` is a readdir.
 
+**v0 amendment · 2026-07-18:** `<name>` is `<app>--<branch-slug>--<mode>`. An embedded
+desktop publish creates/updates two independent files (web and desktop), each with its own
+lifecycle, and composes the publish envelope's packet fields from both.
+
 ### 4.3 The env record
 
 ```json
 {
   "eid": "e7f3",
-  "name": "kontiki--agent-coupons-stack",
+  "name": "kontiki--agent-coupons-stack--web",
   "mode": "web",
   "app": "kontiki",
   "repo": "/Users/tormodhaugland/Projects/kontiki/repos/kontiki",
   "branch": "agent/coupons-stack",
   "commit": "8f3ab21d",
-  "worktree": "/Users/tormodhaugland/.nectar/work/kontiki--agent-coupons-stack",
+  "worktree": "/Users/tormodhaugland/.nectar/work/kontiki--agent-coupons-stack--web",
   "status": "serving",
   "serve": {
     "cmd": "pnpm dev",
@@ -129,13 +141,13 @@ on a shared writer (DECISIONS D5). `nectar ls` is a readdir.
     "local": "https://agent-coupons-stack.kontiki.localhost",
     "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444"
   },
-  "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack",
+  "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack--web",
   "published_at": "2026-07-18T12:04:11Z",
   "expires_at": "2026-07-21T12:04:11Z",
   "last_touched_at": "2026-07-18T12:04:11Z",
   "publisher": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "user": "tormodhaugland" },
   "packet_hint": "fp-0244",
-  "evidence": ["evidence/kontiki--agent-coupons-stack/smoke-20260718T1204.txt"]
+  "evidence": ["evidence/kontiki--agent-coupons-stack--web/smoke-20260718T1204.txt"]
 }
 ```
 
@@ -289,9 +301,7 @@ kontiki-desktop--agent-coupons-stack--darwin-arm64.testpack/
     "url": "https://trmd-metal-1.tailca9707.ts.net:8444"
   },
   "built_at": "2026-07-18T12:04:11Z",
-  "built_by": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "host": "trmd-metal-1" },
-  "sha256": "9c0f…",
-  "size_bytes": 182348011
+  "built_by": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "host": "trmd-metal-1" }
 }
 ```
 
@@ -303,7 +313,14 @@ kontiki-desktop--agent-coupons-stack--darwin-arm64.testpack/
   "open the real build" one click away. Produced when the recipe sets `embed_url` (with
   `"web"`, publish spins up the `[web]` env alongside the pack and links it). Non-Electron
   or no embed: field absent, desk shows only "open".
-- `sha256` — of the zip; `nectar open` verifies before first launch.
+- The manifest deliberately contains no digest. After the zip is finalized, Nectar computes
+  its whole-zip SHA-256, stores it in the desktop env record, emits it from `publish --json`
+  and `resolve --json`, and makes `open` verify fetched bytes against that value before launch.
+
+**v0 amendment · 2026-07-18:** the earlier manifest `sha256` field was self-referential: a
+zip cannot carry its own final digest without changing the bytes being digested. The
+authoritative value is therefore the post-zip digest in the env record/resolve result. The
+manifest contains no digest; a payload-only digest would add nothing to whole-zip integrity.
 
 **Signing / updates posture** (DECISIONS D6): testpacks are **ad-hoc signed**
 (`codesign --sign -` on darwin — the recipe's pack step is expected to do this; nectar
@@ -316,14 +333,22 @@ wrote, moving only inside the tailnet — notarization would add minutes and an 
 dependency for zero threat-model gain.
 
 **Distribution.** The pack store `~/.nectar/packs` is served read-only to the tailnet on the
-well-known port **8440** (`tailscale serve --bg --https=8440 <dir>`, set up by
-`nectar doctor --fix` once per machine). The packet's `testpack_ref` is the `nectar://` ref;
+well-known port **8440**, set up by `nectar doctor --fix` once per machine. The packet's
+`testpack_ref` is the `nectar://` ref;
 `nectar resolve` maps it to the concrete
 `https://<host>.tailca9707.ts.net:8440/<name>/<file>.testpack.zip`, and `nectar open <ref>`
 on any mesh machine fetches (cached in its own pack store by sha256), verifies, and launches
 `entry`. Cross-platform: `nectar open` errors with `E_PLATFORM` if the pack's platform
 doesn't match — publishing multi-platform packs is one publish per platform (usually the
 build machine's own).
+
+**v0 amendment · 2026-07-18:** the sandboxed macOS Tailscale distribution rejects directory
+targets. Nectar therefore runs its own detached, read-only static server bound only to
+`127.0.0.1`, with no directory listings and traversal/symlink rejection, then configures
+`tailscale serve --bg --https=8440 http://127.0.0.1:<pack-port>`. `doctor` verifies the
+static server PID + loopback port, the `:8440` proxy entry, and that Funnel is off;
+`doctor --fix` idempotently repairs the local server and proxy links. This is also used on
+non-sandboxed machines so the external contract is uniform.
 
 ### 6.3 cli
 
@@ -432,11 +457,11 @@ nectar doctor [--fix]
   "command": "publish",
   "result": {
     "eid": "e7f3",
-    "env": "kontiki--agent-coupons-stack",
+    "env": "kontiki--agent-coupons-stack--web",
     "mode": "web",
     "branch": "agent/coupons-stack",
     "commit": "8f3ab21d",
-    "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack",
+    "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack--web",
     "urls": { "local": "https://agent-coupons-stack.kontiki.localhost",
               "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444" },
     "packet_fields": {
@@ -597,3 +622,8 @@ Genuinely unresolved — flagged here rather than hedged inline:
 6. **Republish vs. reviewer mid-session.** Re-publish restarts the serve process under a
    reviewer's feet (same URL, brief blip). Acceptable; if it isn't in practice, add
    `--drain` (new env, atomic port swap).
+7. **Content-pinned testpack refs.** v0 refs identify the mode-qualified env and therefore
+   resolve to its latest publish. Long-lived packets may eventually need an exact-build
+   digest in the ref so later republishes cannot move their artifact. The v0.1 design must
+   preserve direct browser URLs for web while adding content pinning where `open` is the
+   consumer.

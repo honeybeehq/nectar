@@ -16,13 +16,13 @@ $ nectar publish --json
   "ok": true,
   "command": "publish",
   "result": {
-    "env": "kontiki--coupons-stack",
+    "env": "kontiki--coupons-stack--web",
     "mode": "web",
     "urls": {
       "local": "https://coupons-stack.kontiki.localhost",
       "mesh":  "https://trmd-metal-1.tailca9707.ts.net:8444"
     },
-    "ref": "nectar://trmd-metal-1/kontiki--coupons-stack",
+    "ref": "nectar://trmd-metal-1/kontiki--coupons-stack--web",
     "expires_at": "2026-07-21T12:04:11Z"
   }
 }
@@ -42,11 +42,24 @@ nothing about packets beyond emitting reference strings shaped to fit them.
 
 ## Status
 
-**Specification — nothing built.** 2026-07-18. The spec is decisive and buildable; v0 is cut.
+**v0 implemented.** 2026-07-18. Web publish/lifecycle, Darwin desktop testpacks,
+cross-machine resolution/open, atomic file state, doctor, and GC are built and covered by
+unit plus fixture-backed integration tests. Real same-machine mesh and macOS `:8440` doctor
+smokes pass; the two-machine and live review-desk procedures are recorded in
+[docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 - [docs/SPEC.md](docs/SPEC.md) — the full specification
 - [docs/V0.md](docs/V0.md) — the thinnest end-to-end slice, with acceptance criteria
 - [docs/DECISIONS.md](docs/DECISIONS.md) — every contested choice, alternatives, and why
+
+Build and link locally:
+
+```bash
+pnpm install
+pnpm build
+pnpm link --global
+nectar doctor --fix --json
+```
 
 ## On the name
 

@@ -44,6 +44,11 @@ portless changes before nectar works at all. Port-per-env is dumb, debuggable
 proxy owns local 443 ⇒ tailscale serve must always bind ≥8440) is encoded in the allocator
 and `doctor`.
 
+**v0 amendment · 2026-07-18:** the sandboxed macOS Tailscale client cannot serve a directory
+target. For the pack store only, `doctor --fix` starts a read-only loopback static server
+and makes tailnet `:8440` proxy to it. The process binds `127.0.0.1` only; Tailscale remains
+the sole mesh exposure and Funnel remains forbidden.
+
 ## D4 — `preview_url` is always the tailnet URL; refs are machine-bound
 
 **Chose:** the packet's `preview_url` carries `https://<host>.tailca9707.ts.net:<port>`;
@@ -71,6 +76,12 @@ readdir. Files are `cat`-able during incident debugging, diffable, and concurren
 of different envs can't contend. If events/history are ever needed, that's Forum's job —
 nectar deliberately keeps no history beyond evidence files.
 
+**v0 amendment · 2026-07-18:** `<name>` is mode-qualified as
+`<app>--<branch-slug>--<mode>`. The original mode-less file key contradicted the stated
+one-record-per-(app, branch, mode) model and collided immediately for desktop webview
+publishes. A mode-less base name remains only a `resolve` discovery input returning all
+matching mode records.
+
 ## D6 — Testpacks: ad-hoc signed, never notarized, immutable, zip+manifest
 
 **Chose:** `*.testpack.zip` containing `testpack.json` + `app/`; ad-hoc codesign; no
@@ -84,6 +95,12 @@ imply installation; testpacks are launch-and-discard, and a zip is scriptable ev
 including a future windows path. (c) update channels are for products; a review build must
 be *immutably* the commit the packet references — "the app updated under me mid-review" is
 evidence corruption. Republish = new pack, old one LRU-pruned.
+
+**v0 amendment · 2026-07-18:** `testpack.json` contains no SHA-256. Embedding the hash of
+the containing zip is self-referential: writing the hash changes the zip. Nectar instead
+computes the authoritative whole-zip digest after finalization, stores it in the desktop
+env record, emits it from publish/resolve, and verifies fetched bytes against it in `open`.
+Content-pinned refs are deferred to v0.1.
 
 ## D7 — One ref scheme (`nectar://`) for testpacks and shells; raw URL only for web
 

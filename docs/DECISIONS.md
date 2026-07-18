@@ -185,3 +185,30 @@ that points the hive at the source), taster (most literal), forage (the gatherin
 **Why:** README makes the cases; nectar wins on family resonance (hive/comb/honey/bee) and
 the tagline. Rename cost is near-zero until v0 ships a binary; decision expires the day the
 CLI is linked on a second machine.
+
+## D14 — iOS: simulator-only, streamed via serve-sim; simpacks reuse the testpack format
+
+*Added 2026-07-18, post-v0, on Tormod's request for iOS testing packages.*
+
+**Chose:** `--mode ios` builds a **simulator** `.app` into a testpack-format **simpack**
+(`platform: ios-sim-arm64`, new `bundle_id` manifest field), and — the hero — boots it in a
+dedicated per-env simulator on the publishing Mac and streams it interactively to the mesh
+with [serve-sim](https://github.com/EvanBacon/serve-sim) (MJPEG/WS video + touch/keyboard
+control in a browser). `preview_url` = the stream; `testpack_ref` = the simpack. Degrades
+to simpack-only when serve-sim is unavailable. Device builds are out of scope.
+**Alternatives:** (a) device builds — ad-hoc provisioning or TestFlight; (b) simpack-only —
+reviewer runs it in their own local simulator, no streaming; (c) cloud simulators
+(appetize.io-style); (d) build our own streamer on `simctl io` / idb.
+**Why:** (a) buys nothing for review — provisioning profiles, signing identities, per-device
+UDID registration, and TestFlight review latency, when the streamed simulator already puts
+the app under the reviewer's fingers in seconds; device-specific behavior (camera, push,
+performance) is the rare case and can be a manual-test note on the packet. (b) demands
+Xcode + matching runtimes on every reviewing machine and excludes reviewing from an iPad or
+phone — the stream needs only a browser, which also makes the desk's Test tab embed
+identical to web. (c) sends branch code outside the tailnet, violating the not-public
+non-goal, for a fee. (d) is re-writing serve-sim, which is maintained, arm64-native, and
+already speaks gesture/log/camera-injection. Accepted constraint: ios publishes require an
+Apple-Silicon Mac host with Xcode — that's what the mini fleet is for; `E_PLATFORM`
+elsewhere keeps the failure honest. The simpack deliberately reuses the testpack format
+(one manifest, one pack store, one digest story) rather than inventing a second package
+kind — `kind: "ios-sim"` + `bundle_id` is the entire delta.

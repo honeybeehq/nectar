@@ -44,8 +44,10 @@ Agents of any harness call it directly; the packet carries only strings.
   directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
   lowercased, `[a-z0-9-]` only.
-- **mode** — `web | desktop | cli | backend`. Matches the packet `kind` vocabulary except
-  `code`: a `code` packet is precisely one with **no** nectar env.
+- **mode** — `web | desktop | cli | backend | ios`. Matches the packet `kind` vocabulary
+  except `code`: a `code` packet is precisely one with **no** nectar env. (`ios` does not
+  exist in the desk contract's kind vocabulary yet — coordination item, see §6.5 and open
+  question 9.)
 - **ref** — the canonical cross-machine handle: `nectar://<host>/<env-name>`, where `<host>`
   is the machine's tailnet hostname (`trmd-metal-1`). Refs are resolved by `nectar resolve`
   and consumed by `nectar open` / `nectar shell` on any mesh machine. Emitted refs are
@@ -207,6 +209,13 @@ bin = "dist/bin/kontiki"        # file or dir prepended to PATH in provisioned s
 seed = "pnpm db:seed:review"    # idempotent; runs in the env worktree
 smoke = "pnpm test:smoke"       # output captured as evidence
 
+[ios]
+pack = "pnpm ios:sim-release"   # must place the built *simulator* .app at $NECTAR_PACK_OUT
+bundle_id = "no.kontrol.kontiki"
+device = "iPhone 16"            # simctl device type for the streamed simulator
+runtime = "latest"              # iOS runtime pin; default: newest installed
+stream = true                   # false = simpack-only publish (no serve-sim stream)
+
 [secrets]                       # optional; resolved via `hem get` at publish time (§9.2)
 STRIPE_KEY = "project/kontiki/stripe-test"
 ```
@@ -222,7 +231,7 @@ which surface kind*; `nectar.toml` is the only owner of *how to produce that sur
 Apiary recipe's "test surface" line is descriptive (`nectar publish` + the mode), never a
 second command definition (DECISIONS D8).
 
-## 6. The four modalities
+## 6. The five modalities
 
 ### 6.1 web
 
@@ -393,6 +402,77 @@ Packet: no `preview_url`/`testpack_ref`; the agent puts the smoke summary lines 
 (`nectar://trmd-metal-1/kontiki-api--agent-rate-limit · seeded env, `nectar shell` to poke`).
 The desk renders backend packets diff-first, exactly as designed.
 
+### 6.5 ios — the simpack + the streamed simulator
+
+*Added 2026-07-18, post-v0. Targets v0.1 (V0.md).*
+
+iOS review is **simulator-only, streamed-first**. Two artifacts per publish:
+
+1. **The simpack** — the iOS testing package: a build for the iOS *Simulator*, in the
+   existing testpack format. Simulator builds need no code signing, no provisioning
+   profiles, no TestFlight — they build wherever Xcode runs and launch on any Mac with a
+   matching runtime. Device builds are explicitly out of scope (DECISIONS D14).
+2. **The streamed simulator** — the hero surface. On the publishing Mac, nectar boots the
+   app in a dedicated simulator and streams it interactively to the mesh via
+   [serve-sim](https://github.com/EvanBacon/serve-sim) ("the `npx serve` of Apple
+   Simulators"): 60 fps video over MJPEG/WS with touch, keyboard, and rotation control in
+   a plain web page. `preview_url` therefore embeds in the desk's Test tab *exactly like a
+   web env* — the reviewer taps through the app from any tailnet device, including an
+   iPad, with zero Xcode anywhere on the review side.
+
+**Host requirement.** Publishing `--mode ios` requires a macOS Apple-Silicon host with
+Xcode + simulator runtimes (serve-sim is arm64-only). Non-Mac hosts fail fast with
+`E_PLATFORM` — iOS publishes route to the Mac fleet (the `trmd-*-mini*` machines are the
+intended publish hosts). Every other mode stays platform-agnostic.
+
+**Publish sequence** (`nectar publish --mode ios`):
+
+1. Worktree + deps as usual (§6.1 step 1).
+2. Run recipe `pack`, which must place the built simulator `.app` (arm64 sim slice) at
+   `$NECTAR_PACK_OUT`. For Expo/RN repos the script typically wraps
+   `xcodebuild -sdk iphonesimulator` or `expo run:ios --configuration Release`; nectar
+   doesn't care, per the not-a-build-system rule.
+3. Finalize the simpack into the pack store — testpack format with
+   `platform: "ios-sim-arm64"`, `kind: "ios-sim"`, `entry: "app/Kontiki.app"`, and the
+   ios-kind-required manifest field `bundle_id` (simctl launches by bundle id, not path).
+   Post-zip digest in the env record per §6.2. Emits `testpack_ref`.
+4. Stream (default, `stream = true`): create a **dedicated simulator per env**
+   (`xcrun simctl create nectar-<eid> "<device>" <runtime>`), boot it headless, `simctl
+   install` the `.app`, `simctl launch <bundle_id>`; then start `serve-sim` against that
+   device on an allocated upstream port and expose it with
+   `tailscale serve --bg --https=<tport>` like any web env. `preview_url` = the mesh URL
+   of the stream. The dedicated device means parallel branch envs never fight over one
+   simulator, and GC is clean.
+5. Ready-poll the stream URL; write the env record (`serve` gains `sim_udid`,
+   `bundle_id`, `serve_sim_pid`).
+
+**Degradation.** serve-sim missing/unsupported (Intel Mac) or failing to start degrades
+the publish to **simpack-only**: `testpack_ref` present, `preview_url: null`, loud warning
+— same philosophy as F1. A stream that dies post-publish is F3 (`crashed`, log tail,
+republish restores the same URL).
+
+**`nectar open <ref>`** on a reviewer's Mac: fetch + digest-verify the simpack, pick or
+create a scratch simulator matching `device`/`runtime` (`nectar-open` device, reused),
+`simctl install` + `launch`. No Mac / no matching runtime → `E_PLATFORM` with the hint
+that `preview_url` needs no install at all. On non-Mac machines `open` just opens the
+stream URL.
+
+**Stop/GC** extends the standard lifecycle: kill the serve-sim process group, `simctl
+shutdown` then `simctl delete` the nectar-created device (never touches devices nectar
+didn't create). Booted nectar simulators count against their own quota (§10.1) — they are
+RAM-heavy.
+
+**Evidence.** `simctl io <udid> screenshot` makes screenshots nearly free; v0.1 wires
+`nectar evidence add` to accept them, and a later `nectar snap <env>` can capture from the
+serving simulator directly. serve-sim's gesture/log APIs are a future hook for scripted
+walkthroughs recorded as evidence.
+
+**Packet mapping.** `packet_fields` emits `preview_url` (stream) + `testpack_ref`
+(simpack) — both fit the existing Forum schema unchanged. The desk-side
+`ReviewPacketKind` vocabulary (`web | desktop | cli | code`) has no `ios` yet; until
+Apiary adds one (open question 9), ios packets will render acceptably as `web` (the
+stream embeds), but the kind glyph and "open the simpack" affordance want the real kind.
+
 ## 7. CLI surface
 
 Global flags: `--json` (envelope output, exact shape below), `--repo <path>` (default: cwd's
@@ -406,12 +486,13 @@ runs. Envelope matches Forum's shape so every harness already knows how to read 
 
 Non-zero exit iff `ok: false`. Error codes are part of the contract: `E_NO_RECIPE`,
 `E_NO_MODE`, `E_CHECKOUT`, `E_INSTALL`, `E_SERVE_TIMEOUT`, `E_SMOKE_FAILED`, `E_PORTS`,
-`E_TAILNET_DOWN`, `E_PLATFORM`, `E_NOT_FOUND`, `E_QUOTA`.
+`E_TAILNET_DOWN`, `E_PLATFORM`, `E_NOT_FOUND`, `E_QUOTA`, `E_SIM` (simctl
+create/boot/install/launch failures, with the simctl stderr in `error.log_tail`).
 
 ### Commands
 
 ```bash
-nectar publish [--mode web|desktop|cli|backend] [--branch <b>] [--ttl 72h]
+nectar publish [--mode web|desktop|cli|backend|ios] [--branch <b>] [--ttl 72h]
                [--worktree <path>] [--packet <hint>] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
@@ -425,6 +506,7 @@ nectar show <env|ref> [--json]
 
 nectar open <env|ref>
     # web → open urls.mesh in the browser · desktop → fetch/verify/launch testpack ·
+    # ios → fetch/verify simpack, simctl install+launch (Mac) or open the stream URL ·
     # cli → alias for `nectar shell` · backend → print evidence + shell hint.
     # Always touches the env (TTL reset).
 
@@ -519,6 +601,10 @@ hive integration surface. No hive API calls, no harness detection.
 - Dev servers are dev servers: debug endpoints, sourcemaps, verbose errors. Acceptable
   inside the ACL boundary above; a nectar-side signed-token layer is the designated
   hardening step if the tailnet ever grows real second users (DECISIONS D9).
+- Streamed simulators (§6.5) are **interactive control surfaces** — anyone who can reach
+  the port can tap, type, and drive the app under test. Same ACL boundary, but it raises
+  the stakes of the ACL rule above from "can read a dev server" to "can operate a device";
+  the ios ports live in the same 8443–8542 block that rule already covers.
 
 ### 9.2 Secrets
 
@@ -549,6 +635,7 @@ noted future step, out of scope here.
 | knob | default | on exceed |
 | --- | --- | --- |
 | serving web envs | 12 | `E_QUOTA` — publish tells the bee to `nectar gc` or pick a victim (`--evict-oldest` flag does it) |
+| booted nectar simulators (ios) | 3 | `E_QUOTA` — simulators are RAM-heavy; same eviction advice |
 | tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
 | upstream ports | 4100–4199 | `E_PORTS` |
 | pack store size | 10 GB | LRU prune at `gc`, never mid-publish below 1 pack |
@@ -583,6 +670,10 @@ doctor` warns if `gc` hasn't run in 24 h.
 | F8 | testpack fetch sha mismatch | `open` deletes the download, retries once, then errors — never launches an unverified pack |
 | F9 | machine offline at review time | `resolve`/`open` report `host unreachable` with the host name — the desk shows it; references are machine-bound by design (DECISIONS D4) |
 | F10 | hem approval pending for a `[secrets]` ref | publish aborts with approval instructions in error envelope; human approves; bee retries |
+| F11 | `--mode ios` on a non-Mac / non-arm64 host | fails fast `E_PLATFORM` before any work — route the publish to a Mac host |
+| F12 | serve-sim missing or fails to start | ios publish **succeeds** simpack-only: `preview_url: null`, `testpack_ref` present, loud warning; stream death post-publish is F3 |
+| F13 | simctl failure (no runtime, boot timeout, install/launch error) | publish fails `E_SIM` with simctl stderr; env kept as `crashed`; nectar-created device cleaned up |
+| F14 | `open` on a Mac without a matching iOS runtime | `E_PLATFORM` with the `preview_url`-needs-nothing hint; non-Mac `open` goes straight to the stream URL |
 
 ## 11. Where the implementation lives
 
@@ -627,3 +718,14 @@ Genuinely unresolved — flagged here rather than hedged inline:
    digest in the ref so later republishes cannot move their artifact. The v0.1 design must
    preserve direct browser URLs for web while adding content pinning where `open` is the
    consumer.
+8. **serve-sim per-env isolation.** §6.5 assumes serve-sim can (a) target one specific
+   simulator by device name/udid while others are booted, and (b) run multiple instances
+   on distinct ports (its `--list`/`--kill` surface suggests multi-instance is supported).
+   Verify both on a mini before v0.1; if instance-per-device doesn't hold, fall back to
+   one streamed env per host (quota 1) until it does. Also: pin the serve-sim version as a
+   nectar dependency — `npx serve-sim@latest` drift inside a publish path is not
+   acceptable.
+9. **`ios` in the packet kind vocabulary.** The desk contract's `ReviewPacketKind` is
+   `web | desktop | cli | code`; ios packets need their own kind (glyph, "open simpack"
+   affordance, Test-tab sizing for a phone aspect ratio). Nectar's emitted fields already
+   fit the schema — this is an Apiary/Forum coordination item, not a nectar blocker.

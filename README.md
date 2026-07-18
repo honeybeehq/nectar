@@ -28,12 +28,13 @@ $ nectar publish --json
 }
 ```
 
-Four modalities, one grammar:
+Five modalities, one grammar:
 
 | kind | what nectar produces | what the packet carries |
 | --- | --- | --- |
 | **web** | branch dev server, named URL on the mesh (portless grammar) | `preview_url` — embeds in the Test tab |
 | **desktop** | a **testpack** — packaged build, one-click openable; Electron also embeds as webview | `testpack_ref` |
+| **ios** | a **simpack** (simulator build, testpack format) + an interactive streamed simulator via [serve-sim](https://github.com/EvanBacon/serve-sim) | `preview_url` (stream) + `testpack_ref` (simpack) |
 | **cli** | provisioned shell, branch build on PATH, session recorded to evidence | `shell_recipe` |
 | **backend** | no surface — seeded env + smoke evidence | evidence lines + env ref |
 

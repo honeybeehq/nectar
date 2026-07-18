@@ -1,0 +1,599 @@
+# Nectar — specification
+
+*v1 draft · 2026-07-18 · status: spec complete, nothing built. Companion docs:
+[V0.md](V0.md) (the first slice), [DECISIONS.md](DECISIONS.md) (why it's shaped this way).*
+
+## 1. Mission
+
+Reviewing agent work means **testing** it, and testing must cost seconds, not minutes.
+Nectar is the tool an agent calls once, at review-ready, that turns a branch into a
+tasteable surface on the mesh and returns small stable references. Everything downstream —
+the Forum packet, the Apiary review desk's Test tab, a reviewer bee, Tormod on any tailnet
+device — consumes those references without knowing how the surface was produced.
+
+The contract in one sentence: **`nectar publish` in a repo on any mesh machine produces a
+reference that `nectar open` (or a browser, or the desk) can consume from any other mesh
+machine, until it expires.**
+
+Nectar deliberately lives outside Apiary. Apiary renders; Forum records; Nectar serves.
+Agents of any harness call it directly; the packet carries only strings.
+
+## 2. Non-goals
+
+- **Not CI, not staging, not deploy.** Nectar environments are disposable review surfaces
+  with TTLs. Nothing nectar serves is ever the path to production.
+- **Not a packet ledger.** Nectar never writes to Forum, never creates packets, never knows
+  packet state. References flow through the publishing agent.
+- **Not a review UI.** No web dashboard, no queue. `nectar ls` is the whole "UI"; Apiary is
+  the surface.
+- **Not a build system.** Recipes name the repo's existing commands (`pnpm dev`,
+  `pnpm dist:testpack`); nectar orchestrates, it does not compile.
+- **Not multi-tenant infrastructure.** One operator's tailnet, machines that already run
+  agents with full user permissions. No sandboxing story in v0/v1 (§9.3 is honest about
+  this).
+- **Not public.** Nothing nectar serves ever leaves the tailnet. There is no `--public`, and
+  `tailscale funnel` is never invoked.
+
+## 3. Vocabulary and system overview
+
+- **env** — one published test environment: a checkout + artifacts + (maybe) a serving
+  process + a record. Identified per-machine by **name** `<app>--<branch-slug>` and a short
+  random **eid** (`e7f3`). One env per (app, branch, mode) per machine; republish upserts.
+- **app** — the repo's short name, from the recipe (`name` in `nectar.toml`), else the repo
+  directory name.
+- **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
+  lowercased, `[a-z0-9-]` only.
+- **mode** — `web | desktop | cli | backend`. Matches the packet `kind` vocabulary except
+  `code`: a `code` packet is precisely one with **no** nectar env.
+- **ref** — the canonical cross-machine handle: `nectar://<host>/<env-name>`, where `<host>`
+  is the machine's tailnet hostname (`trmd-metal-1`). Refs are resolved by `nectar resolve`
+  and consumed by `nectar open` / `nectar shell` on any mesh machine.
+- **testpack** — the standard packaged desktop build (§6.2).
+- **recipe** — the checked-in `nectar.toml` telling nectar *how* to serve/pack/seed this
+  repo (§5).
+- **pack store** — `~/.nectar/packs`, served read-only to the tailnet on port 8440.
+
+Flow:
+
+```text
+bee finishes work on branch
+  └─ nectar publish --json                    (on the machine where the bee runs)
+       ├─ checkout branch into nectar-owned worktree
+       ├─ run recipe step for the mode (serve / pack / provision / seed+smoke)
+       ├─ expose on mesh (tailnet port) + locally (portless name)
+       └─ emit { urls, ref, evidence } → agent puts strings on the Forum packet
+reviewer (desk or human, any machine)
+  └─ preview_url in an iframe / nectar open <ref> / nectar shell <ref>
+gc (hourly, pollinate-scheduled)
+  └─ expire → stop → cold → reap
+```
+
+## 4. Architecture
+
+### 4.1 CLI-first; the daemon is deferred
+
+`nectar` is a single CLI. There is **no daemon in v0/v1**. Long-running serve processes are
+spawned detached (own process group, stdio to log files); their PIDs live in the env record;
+liveness is checked lazily (`nectar ls`/`show`/`gc` verify PID + port). Periodic work (TTL
+enforcement, reaping) is `nectar gc`, scheduled externally via pollinate (§10.3).
+
+A supervisor daemon (`nectard`: restart crashed servers, push state, watch TTLs in real
+time) is a known later step — see DECISIONS D1. The CLI surface is designed so the daemon
+can slide in behind it without changing any command.
+
+Rationale: every capability the daemon would add (restart-on-crash, instant reaping) is a
+nice-to-have; every day without a daemon is a day nectar can't wedge itself. Crashed dev
+servers surface honestly as `status: crashed` with a log tail.
+
+### 4.2 On-disk layout (per machine)
+
+```text
+~/.nectar/
+  envs/<name>.json          # one env record per env — the source of truth
+  work/<name>/              # nectar-owned git worktree/clone of the branch
+  packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
+    kontiki-desktop--agent-coupons-stack.testpack.zip
+  evidence/<name>/          # shell recordings, smoke output, screenshots
+    shell-20260718T1204.cast
+    smoke-20260718T1204.txt
+  logs/<name>/serve.log     # dev-server stdout+stderr, rotated at 10 MB
+  nectar.json               # machine config: port ranges, quotas, tailnet name cache
+```
+
+State is **one JSON file per env**, written atomically (temp + rename). No SQLite: records
+are tiny, single-machine, and file-per-env means concurrent publishing agents never contend
+on a shared writer (DECISIONS D5). `nectar ls` is a readdir.
+
+### 4.3 The env record
+
+```json
+{
+  "eid": "e7f3",
+  "name": "kontiki--agent-coupons-stack",
+  "mode": "web",
+  "app": "kontiki",
+  "repo": "/Users/tormodhaugland/Projects/kontiki/repos/kontiki",
+  "branch": "agent/coupons-stack",
+  "commit": "8f3ab21d",
+  "worktree": "/Users/tormodhaugland/.nectar/work/kontiki--agent-coupons-stack",
+  "status": "serving",
+  "serve": {
+    "cmd": "pnpm dev",
+    "pid": 48213,
+    "pgid": 48213,
+    "upstream_port": 4117,
+    "portless_name": "agent-coupons-stack.kontiki",
+    "tailnet_port": 8444
+  },
+  "urls": {
+    "local": "https://agent-coupons-stack.kontiki.localhost",
+    "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444"
+  },
+  "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack",
+  "published_at": "2026-07-18T12:04:11Z",
+  "expires_at": "2026-07-21T12:04:11Z",
+  "last_touched_at": "2026-07-18T12:04:11Z",
+  "publisher": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "user": "tormodhaugland" },
+  "packet_hint": "fp-0244",
+  "evidence": ["evidence/kontiki--agent-coupons-stack/smoke-20260718T1204.txt"]
+}
+```
+
+`publisher` is stamped from `HIVE_BEE` / hive session env vars when present — lineage for
+free, no hive dependency. `packet_hint` is optional operator-supplied string; nectar never
+reads Forum.
+
+### 4.4 Env lifecycle
+
+```text
+publishing → serving → expired → cold → (reaped)
+                │
+                ├→ crashed          (serve process died; record + logs kept)
+                └→ stopped          (explicit nectar stop; worktree kept)
+```
+
+- **publishing** — checkout + build/pack running. Failure here → the publish command errors
+  and the partial env is recorded as `crashed` with logs (so a bee's failed publish is
+  inspectable, not vanished).
+- **serving** — process up (web/cli/backend-with-shell) or artifacts available (desktop).
+- **expired** — TTL passed. `gc` transition: stop process, remove tailscale-serve entry,
+  keep worktree + packs + evidence. Env is revivable with `nectar publish` (fast path:
+  worktree exists).
+- **cold** — 24 h after expiry: worktree deleted. Packs and evidence persist to their own
+  quotas (§10).
+- **reaped** — record deleted after 14 days cold. Evidence referenced from packets should be
+  copied out by then (Forum owns long-term evidence retention; nectar is not an archive).
+
+TTL default **72 h**, per-publish `--ttl 12h|7d`. Any `nectar open` / `nectar touch` /
+desk render (desk calls `nectar touch` on view) resets the clock. Active review never gets
+reaped mid-session: `gc` skips envs touched in the last 6 h.
+
+## 5. Recipes — `nectar.toml`
+
+Checked into the repo root. Names the repo's own commands; nectar adds no build logic.
+
+```toml
+name = "kontiki"                # app name; default: repo dir name
+
+[web]
+serve = "pnpm dev"              # must respect $PORT
+ready_path = "/"                # polled for HTTP 200 to declare "serving" (default "/")
+ready_timeout = "90s"
+env = { VITE_API_BASE = "http://127.0.0.1:$NECTAR_API_PORT" }   # extra env, literal or $-refs
+
+[desktop]
+pack = "pnpm dist:testpack"     # must produce the dir/zip named by $NECTAR_PACK_OUT
+kind = "electron"               # electron | native
+embed_url = "web"               # electron only: "web" = reuse this repo's [web] env as the
+                                # webview URL; or an explicit URL template; omit = no embed
+
+[cli]
+build = "pnpm build"
+bin = "dist/bin/kontiki"        # file or dir prepended to PATH in provisioned shells
+
+[backend]
+seed = "pnpm db:seed:review"    # idempotent; runs in the env worktree
+smoke = "pnpm test:smoke"       # output captured as evidence
+
+[secrets]                       # optional; resolved via `hem get` at publish time (§9.2)
+STRIPE_KEY = "project/kontiki/stripe-test"
+```
+
+Sections are independent; a repo declares only the modes it supports. **Fallback without a
+recipe**: a `dev` script in `package.json` ⇒ `[web] serve = "<pm> dev"`; everything else
+requires the recipe (publishing desktop/cli/backend without one is an error `E_NO_RECIPE`).
+`nectar publish` picks the mode: `--mode` flag > single declared section > `web` if
+inferable > error.
+
+Relation to Apiary's per-product review recipes: Apiary's recipe stores *who reviews and
+which surface kind*; `nectar.toml` is the only owner of *how to produce that surface*. The
+Apiary recipe's "test surface" line is descriptive (`nectar publish` + the mode), never a
+second command definition (DECISIONS D8).
+
+## 6. The four modalities
+
+### 6.1 web
+
+The easy, important case: embed a live branch build in the desk's Test tab.
+
+**Publish sequence** (`nectar publish --mode web`):
+
+1. Ensure worktree `~/.nectar/work/<name>` at the branch tip (clone-or-fetch from `--repo`,
+   local object sharing via `git worktree` when the repo is local, else a shallow clone).
+   Install deps if the lockfile hash changed (`pnpm install --frozen-lockfile` / npm / yarn
+   detected from lockfile).
+2. Allocate an **upstream port** from the machine's range (default 4100–4199) and spawn the
+   recipe's `serve` with `PORT=<p>`, detached, logs to `logs/<name>/serve.log`.
+3. Register the **local name** with portless so the same-machine URL follows portless
+   grammar: `agent-coupons-stack.kontiki.localhost`. Nectar runs the serve command itself
+   and points portless at the already-allocated port; if portless is absent or its proxy is
+   down, the local URL degrades to `http://127.0.0.1:<p>` with a warning in the envelope —
+   never a failure (DECISIONS D3, F1).
+4. Expose to the mesh: allocate a **tailnet port** from 8443–8542 and run
+   `tailscale serve --bg --https=<tport> http://127.0.0.1:<p>`.
+   **The 443 caveat is load-bearing**: port 443 on nectar machines belongs to the portless
+   proxy (launchd), so tailscale serve must always bind non-443 — nectar never allocates
+   443 and `nectar doctor` flags any existing 443 serve entry as a portless-breaker.
+5. Poll `ready_path` until 200 (or `ready_timeout` → status `crashed`, envelope error with
+   log tail).
+6. Write the env record; emit the envelope.
+
+**URLs.** `urls.mesh` (`https://<host>.tailca9707.ts.net:<tport>`) is the primary reference
+— valid from every tailnet device including the publishing machine (tailscaled hairpins).
+`urls.local` is the portless nicety for same-machine humans. **`preview_url` on the packet
+is always `urls.mesh`** so the desk never cares where the env lives (DECISIONS D4). One
+tailnet port per env — no path prefixes (SPAs break), no subdomains (ts.net has no
+per-machine wildcards) (DECISIONS D3).
+
+**Auth.** Two layers, both honest:
+
+- *Transport*: tailnet-only. Reachability is governed by tailscale ACLs (§9.1). No nectar
+  login in v0/v1.
+- *App-level*: branch apps that need a logged-in user follow Forum's preview contract
+  ladder (PRD R5): the recipe's `env`/`secrets` inject demo-account or seeded-tenant
+  credentials, and the app's own dev auto-login does the rest. Nectar's job ends at
+  environment variables; it does not proxy-inject sessions.
+
+**Per-branch names.** The portless grammar `<branch-slug>.<app>.localhost` is exactly
+portless's worktree convention, produced deliberately so a human running portless by hand
+and a nectar env are indistinguishable locally.
+
+### 6.2 desktop — the testpack
+
+Desktop review needs a *standard, packet-referenceable, one-click-openable* build. That
+standard is the **testpack**.
+
+**Layout** — a zip, name `<app>--<branch-slug>--<platform>.testpack.zip`:
+
+```text
+kontiki-desktop--agent-coupons-stack--darwin-arm64.testpack/
+  testpack.json            # manifest — see below
+  app/
+    Kontiki.app/           # darwin: the .app bundle
+                           # (win: app/Kontiki/Kontiki.exe · linux: app/kontiki.AppImage)
+```
+
+**Manifest** — `testpack.json`:
+
+```json
+{
+  "testpack": 1,
+  "app": "kontiki-desktop",
+  "branch": "agent/coupons-stack",
+  "commit": "8f3ab21d",
+  "platform": "darwin-arm64",
+  "kind": "electron",
+  "entry": "app/Kontiki.app",
+  "embed": {
+    "mode": "webview",
+    "url": "https://trmd-metal-1.tailca9707.ts.net:8444"
+  },
+  "built_at": "2026-07-18T12:04:11Z",
+  "built_by": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "host": "trmd-metal-1" },
+  "sha256": "9c0f…",
+  "size_bytes": 182348011
+}
+```
+
+- `testpack: 1` — format version; consumers must reject unknown majors.
+- `entry` — what `nectar open` launches, relative to the pack root.
+- `embed` — **Electron webview mode**: when the app's renderer can run against a served
+  URL, the manifest carries it and the desk embeds that URL as a webview *instead of*
+  launching the binary — desktop review collapses into web review for the 80 % case, with
+  "open the real build" one click away. Produced when the recipe sets `embed_url` (with
+  `"web"`, publish spins up the `[web]` env alongside the pack and links it). Non-Electron
+  or no embed: field absent, desk shows only "open".
+- `sha256` — of the zip; `nectar open` verifies before first launch.
+
+**Signing / updates posture** (DECISIONS D6): testpacks are **ad-hoc signed**
+(`codesign --sign -` on darwin — the recipe's pack step is expected to do this; nectar
+verifies the bundle launches, it does not sign), **never notarized**, and **immutable** —
+no update channel, no Sparkle/Squirrel. A new publish is a new testpack; the old one ages
+out under quota. Gatekeeper: packs are fetched by the nectar CLI (no browser quarantine
+xattr) and, belt-and-braces, `nectar open` strips `com.apple.quarantine` from its own
+downloads into `~/.nectar/packs`. These are review builds of code the operator's own agents
+wrote, moving only inside the tailnet — notarization would add minutes and an Apple
+dependency for zero threat-model gain.
+
+**Distribution.** The pack store `~/.nectar/packs` is served read-only to the tailnet on the
+well-known port **8440** (`tailscale serve --bg --https=8440 <dir>`, set up by
+`nectar doctor --fix` once per machine). The packet's `testpack_ref` is the `nectar://` ref;
+`nectar resolve` maps it to the concrete
+`https://<host>.tailca9707.ts.net:8440/<name>/<file>.testpack.zip`, and `nectar open <ref>`
+on any mesh machine fetches (cached in its own pack store by sha256), verifies, and launches
+`entry`. Cross-platform: `nectar open` errors with `E_PLATFORM` if the pack's platform
+doesn't match — publishing multi-platform packs is one publish per platform (usually the
+build machine's own).
+
+### 6.3 cli
+
+Reviewing a CLI means *typing at the branch build*, and the typing should become evidence.
+
+**Publish** (`--mode cli`): worktree + recipe `build`; record `bin`. No serving process —
+the env is inert until a shell attaches. Packet field: `shell_recipe` = the `nectar://` ref.
+
+**`nectar shell <ref>`** provisions the review shell:
+
+1. Same-machine: spawn `$SHELL` in the worktree with `PATH=<env bin dir>:$PATH`,
+   `NECTAR_ENV=<name>` exported, and a `[nectar <name>]` prompt marker.
+   Cross-machine: `tailscale ssh <host> -t nectar shell <name>` — the ref makes this
+   transparent; the desk's terminal pane just runs `nectar shell <ref>`.
+2. **Recording is on by default**: the session runs under asciinema (`asciinema rec`) when
+   installed, else BSD/`util-linux` `script`, writing
+   `evidence/<name>/shell-<timestamp>.cast`. `--no-record` opts out; the desk never opts
+   out. On exit, the envelope (`--json` on the parent command) lists the new evidence file
+   so the agent/desk can attach it to the packet's `test_evidence`.
+3. Multiple concurrent shells are fine; each records separately.
+
+### 6.4 backend
+
+No surface to render — the deliverable is *evidence that the thing runs against seeded
+data*, plus a pokeable env for the skeptical reviewer.
+
+**Publish** (`--mode backend`):
+
+1. Worktree + deps as usual.
+2. Run recipe `seed` (idempotent, env-local — seeded stores live inside the worktree or in
+   per-env resources the seed script creates; nectar passes `NECTAR_ENV_DIR` so scripts can
+   scope databases/files under the env).
+3. Run recipe `smoke`; capture combined output to `evidence/<name>/smoke-<ts>.txt`;
+   non-zero smoke exit ⇒ publish **fails** (`E_SMOKE_FAILED`, evidence still written) — a
+   backend env whose smoke fails is not review-ready and the bee should know before the
+   packet exists.
+4. The env stays on disk until TTL: `nectar shell <ref>` works on backend envs too (seeded
+   state + branch code, for `curl`ing a locally-started server or inspecting the DB).
+
+Packet: no `preview_url`/`testpack_ref`; the agent puts the smoke summary lines into
+`test_evidence` and may append the env ref as a final evidence line
+(`nectar://trmd-metal-1/kontiki-api--agent-rate-limit · seeded env, `nectar shell` to poke`).
+The desk renders backend packets diff-first, exactly as designed.
+
+## 7. CLI surface
+
+Global flags: `--json` (envelope output, exact shape below), `--repo <path>` (default: cwd's
+repo). Everything an agent needs is a flag — no interactive prompts on any command an agent
+runs. Envelope matches Forum's shape so every harness already knows how to read it:
+
+```json
+{ "ok": true,  "command": "publish", "result": { … } }
+{ "ok": false, "command": "publish", "error": { "code": "E_SERVE_TIMEOUT", "message": "…", "log_tail": ["…"] } }
+```
+
+Non-zero exit iff `ok: false`. Error codes are part of the contract: `E_NO_RECIPE`,
+`E_NO_MODE`, `E_CHECKOUT`, `E_INSTALL`, `E_SERVE_TIMEOUT`, `E_SMOKE_FAILED`, `E_PORTS`,
+`E_TAILNET_DOWN`, `E_PLATFORM`, `E_NOT_FOUND`, `E_QUOTA`.
+
+### Commands
+
+```bash
+nectar publish [--mode web|desktop|cli|backend] [--branch <b>] [--ttl 72h]
+               [--worktree <path>] [--packet <hint>] [--json]
+    # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
+    # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
+    # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
+
+nectar ls [--json] [--mode <m>] [--status <s>]
+    # This machine's envs: name, mode, status, urls.mesh, expires-in, publisher bee.
+
+nectar show <env|ref> [--json]
+    # Full record + last 40 log lines when status is crashed.
+
+nectar open <env|ref>
+    # web → open urls.mesh in the browser · desktop → fetch/verify/launch testpack ·
+    # cli → alias for `nectar shell` · backend → print evidence + shell hint.
+    # Always touches the env (TTL reset).
+
+nectar shell <env|ref> [--no-record] [--json]
+nectar resolve <ref> [--json]
+    # ref → concrete consumables: { mode, urls, testpack_url, host, status } — this is the
+    # one command the desk needs beyond open/shell/touch.
+
+nectar touch <env|ref> [--ttl 72h]
+nectar stop <env>            # stop serve process, keep everything; status → stopped
+nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash)
+nectar gc [--dry-run] [--json]
+    # Enforce §10: expire → stop; cold → delete worktrees; reap old records; prune pack
+    # store to quota (LRU). Prints a reap report. Safe to run concurrently (per-env locks).
+
+nectar evidence add <env> <file...>   # copy files into evidence/, print refs
+nectar evidence ls <env> [--json]
+
+nectar doctor [--fix]
+    # Checks: portless present + proxy up · tailscale up + this host's serve entries ·
+    # port-range availability · pack store served on 8440 · no 443 tailscale serve entry
+    # (portless killer) · quota headroom. --fix applies the mechanical ones.
+```
+
+### `publish --json` result (web example)
+
+```json
+{
+  "ok": true,
+  "command": "publish",
+  "result": {
+    "eid": "e7f3",
+    "env": "kontiki--agent-coupons-stack",
+    "mode": "web",
+    "branch": "agent/coupons-stack",
+    "commit": "8f3ab21d",
+    "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack",
+    "urls": { "local": "https://agent-coupons-stack.kontiki.localhost",
+              "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444" },
+    "packet_fields": {
+      "preview_url": "https://trmd-metal-1.tailca9707.ts.net:8444",
+      "testpack_ref": null,
+      "shell_recipe": null
+    },
+    "evidence": [],
+    "expires_at": "2026-07-21T12:04:11Z",
+    "warnings": ["portless proxy not running — local URL degraded to http://127.0.0.1:4117"]
+  }
+}
+```
+
+`result.packet_fields` is the ergonomic core: **the exact strings to copy onto the Forum
+packet**, keyed with Forum's snake_case names. Desktop publish fills `testpack_ref`
+(+ `preview_url` when the manifest has `embed`); cli publish fills `shell_recipe`; backend
+fills none and returns `evidence` lines instead.
+
+## 8. How agents invoke it — hive/harness ergonomics
+
+The review-ready ritual, harness-agnostic (bash + jq only):
+
+```bash
+out=$(nectar publish --json --packet "$PACKET_ID")
+prev=$(jq -r '.result.packet_fields.preview_url // empty' <<<"$out")
+ref=$(jq -r '.result.ref' <<<"$out")
+# put $prev / testpack_ref / shell_recipe on the packet via forum's CLI; append
+# .result.evidence lines to test_evidence. Then flip the session to review-ready.
+```
+
+Rules of engagement for bees (goes into project AGENTS.md snippets):
+
+- Publish **before** declaring review-ready; a packet whose kind has a surface but whose
+  reference fields are empty is malformed.
+- Never hand-craft URLs — always pass through `packet_fields`.
+- A failed publish is a blocker, not a shrug: fix or escalate; the `crashed` env's
+  `nectar show` log tail is your first stop.
+- Re-publish after addressing review feedback — same command; URLs are stable, so the
+  packet's references keep working across iterations (successor packets inherit them).
+
+Nectar reads `HIVE_BEE` and the hive session env to stamp `publisher` — that is the entire
+hive integration surface. No hive API calls, no harness detection.
+
+## 9. Security model
+
+### 9.1 What the tailnet sees
+
+- Exposure = tailnet-only, on ports **8440** (pack store, read-only static) and
+  **8443–8542** (web envs). Nothing binds public interfaces; funnel is never used.
+- Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
+  a shared external node (`kontikicms`, user `mbtz@`). Deploy rule (ops task, not code):
+  ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`
+  reminds; it cannot verify ACLs.
+- Dev servers are dev servers: debug endpoints, sourcemaps, verbose errors. Acceptable
+  inside the ACL boundary above; a nectar-side signed-token layer is the designated
+  hardening step if the tailnet ever grows real second users (DECISIONS D9).
+
+### 9.2 Secrets
+
+- Serve/pack/seed/smoke commands run with a **scrubbed environment**: `PATH`, `HOME`,
+  `SHELL`, locale, `PORT`/`NECTAR_*`, plus exactly what the recipe declares. Agent-session
+  variables (API keys, hive tokens, `VALHALL_HEM_TOKEN`) are **not** inherited.
+- `[secrets]` entries resolve via `hem get <ref>` at publish time and must be test-scoped
+  refs (`project/<p>/*-test` convention); values go into the child env only, never the env
+  record, never logs. A pending-approval response from hem aborts publish with the
+  approval instructions in the error envelope — the bee escalates to the human.
+- Env records, envelopes, and evidence are secret-free by construction; `nectar show` is
+  always safe to paste into a packet.
+
+### 9.3 Untrusted branch code
+
+Branch code executed by nectar (serve/build/seed) runs as the operator's user on the
+publishing machine — the same code the agent just wrote, built, and tested in the same
+account. **Nectar adds no sandbox and claims none.** The honest statement: nectar's trust
+boundary equals the existing agent-execution trust boundary; the scrubbed env (9.2) removes
+the *casual* exfiltration surface (inherited tokens), nothing more. If agent code ever runs
+with less trust, publishes belong in that same jail — a dedicated runner user/VM is the
+noted future step, out of scope here.
+
+## 10. Resource limits, GC, failure modes
+
+### 10.1 Limits (machine config `~/.nectar/nectar.json`, defaults shown)
+
+| knob | default | on exceed |
+| --- | --- | --- |
+| serving web envs | 12 | `E_QUOTA` — publish tells the bee to `nectar gc` or pick a victim (`--evict-oldest` flag does it) |
+| tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
+| upstream ports | 4100–4199 | `E_PORTS` |
+| pack store size | 10 GB | LRU prune at `gc`, never mid-publish below 1 pack |
+| evidence per env | 500 MB | oldest recordings pruned at `gc` |
+| serve log | 10 MB × 2 | rotate |
+
+### 10.2 GC policy
+
+`nectar gc` (idempotent, per-env lockfiles): expire past-TTL envs (stop process group,
+remove tailscale-serve entry) → cold at expiry+24 h (delete worktree) → reap records at
+cold+14 d → prune pack store/evidence to quota. Grace: envs touched within 6 h are never
+transitioned, so an open review can't be reaped underneath the reviewer (open/resolve/touch
+all bump `last_touched_at`).
+
+### 10.3 Scheduling
+
+Hourly `nectar gc --json` per machine via a pollinate schedule (action: shell). That is
+pollinate's entire involvement. Machines without pollinate: cron/launchd line; `nectar
+doctor` warns if `gc` hasn't run in 24 h.
+
+### 10.4 Failure modes (contract, not aspiration)
+
+| # | failure | behavior |
+| --- | --- | --- |
+| F1 | portless missing / proxy down | web publish **succeeds**; `urls.local` degrades to `http://127.0.0.1:<p>`; warning in envelope; mesh URL unaffected |
+| F2 | tailscale down / logged out | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`) |
+| F3 | serve crashes post-publish | lazy detection → `status: crashed`; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
+| F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; env kept as `crashed` for inspection |
+| F5 | port collision (stale external process) | allocator probes before binding, skips occupied, records leaks in `doctor` |
+| F6 | checkout conflict / dirty nectar worktree | worktree is nectar-owned ⇒ `git reset --hard` + clean is always legal; borrowed `--worktree` is never reset — publish fails `E_CHECKOUT` instead |
+| F7 | smoke fails (backend) | publish fails `E_SMOKE_FAILED`; evidence written; no packet fields emitted |
+| F8 | testpack fetch sha mismatch | `open` deletes the download, retries once, then errors — never launches an unverified pack |
+| F9 | machine offline at review time | `resolve`/`open` report `host unreachable` with the host name — the desk shows it; references are machine-bound by design (DECISIONS D4) |
+| F10 | hem approval pending for a `[secrets]` ref | publish aborts with approval instructions in error envelope; human approves; bee retries |
+
+## 11. Where the implementation lives
+
+**Own repo — this one.** TypeScript CLI (Node ≥ 20), shipped like `hive` and `portless`
+as a globally-linked binary; single package until proven otherwise.
+
+Why not a hive capability: nectar must be invocable by *any* harness and by humans, with a
+lifecycle (serving processes, TTLs, per-machine state, doctor) that is nothing like hive's
+session model; welding it in couples release cadences and forces non-hive callers through
+hive. Why not pollinate: pollinate triggers things — it is nectar's *scheduler* (one gc
+schedule), not its home. The couplings that remain are deliberately thin: hive = env-var
+stamping; pollinate = one schedule; portless = optional local nicety; tailscale = the mesh;
+forum/apiary = consume strings. Each degrades independently (F1/F2).
+
+## 12. Open questions
+
+Genuinely unresolved — flagged here rather than hedged inline:
+
+1. **Portless introspection.** Registering an externally-managed port under a portless name
+   (step 6.1.3) assumes portless can adopt a port it didn't allocate, or expose the port it
+   did (`portless list` machine-readably). Portless was not installed on the spec machine to
+   verify; if it can't, v0 ships the F1 degraded local URL unconditionally and portless
+   grows an `adopt <name> <port>` (it's our tool). Owner: whoever builds v0, day 1.
+2. **`tailscale serve` per-port ceiling.** The 100-port range assumes tailscale serve
+   handles ~15 concurrent `--bg` entries per node without degradation. Believed fine;
+   unverified at that count.
+3. **Cross-machine `nectar shell` UX in the desk.** `tailscale ssh` from an Electron
+   terminal pane needs key/auth plumbing on each host pair. Works for humans in a terminal
+   today; the desk integration may want a nectar-side PTY relay instead. Defer until the
+   desk's terminal pane exists.
+4. **Windows testpacks.** `kontrol-build-ovh` (windows) will eventually publish packs;
+   entry-launch and quarantine semantics there are unspecified. Darwin-only until a real
+   windows desktop packet appears.
+5. **Forum `validation_runs` linkage.** Should reviewer bees' nectar envs (e2e-agent
+   opening a preview) stamp their `run_` id into the env record for cost attribution?
+   Cheap to add; waiting for Forum v2's validation runner to exist.
+6. **Republish vs. reviewer mid-session.** Re-publish restarts the serve process under a
+   reviewer's feet (same URL, brief blip). Acceptable; if it isn't in practice, add
+   `--drain` (new env, atomic port swap).

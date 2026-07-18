@@ -217,7 +217,7 @@ requires the second machine and a live desk packet.
 | AC5 | pass-simulated | F1/F2/F4/F8 integration coverage and exact envelopes |
 | AC6 | pass-simulated | expiry/revive/touch/cold transitions with controlled fixture time |
 | AC7 | pass | real detached serve kill, lazy crash detection, same-URL recovery |
-| AC8 | needs-second-machine | run the bee procedure on publishing host A |
+| AC8 | pass | Hive bee `CO.543` published from the disposable repo and returned emitted fields/ref without correction |
 | AC9 | pass | real macOS doctor repair + idempotence; 443 fixture simulation |
 | AC10 | pass | real `lsof` loopback-only bind and empty Serve status after cleanup |
 

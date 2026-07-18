@@ -1,0 +1,144 @@
+export type Mode = "web" | "desktop";
+
+export type EnvStatus =
+  | "publishing"
+  | "serving"
+  | "expired"
+  | "cold"
+  | "crashed"
+  | "stopped";
+
+export interface WebRecipe {
+  serve: string;
+  readyPath: string;
+  readyTimeoutMs: number;
+  env: Record<string, string>;
+}
+
+export interface DesktopRecipe {
+  pack: string;
+  kind: "electron" | "native";
+  embedUrl?: string;
+}
+
+export interface Recipe {
+  name: string;
+  source: "nectar.toml" | "package.json";
+  web?: WebRecipe;
+  desktop?: DesktopRecipe;
+}
+
+export interface ServeRecord {
+  cmd: string;
+  pid: number;
+  pgid: number;
+  upstream_port: number;
+  tailnet_port: number;
+}
+
+export interface EnvUrls {
+  local: string | null;
+  mesh: string | null;
+}
+
+export interface Publisher {
+  hive_bee?: string;
+  hive_session?: string;
+  user: string;
+}
+
+export interface TestpackManifest {
+  testpack: 1;
+  app: string;
+  branch: string;
+  commit: string;
+  platform: string;
+  kind: "electron" | "native";
+  entry: string;
+  embed?: {
+    mode: "webview";
+    url: string;
+  };
+  built_at: string;
+  built_by: {
+    hive_bee?: string;
+    hive_session?: string;
+    host: string;
+  };
+}
+
+export interface TestpackRecord {
+  file: string;
+  sha256: string;
+  size_bytes: number;
+  platform: string;
+  entry: string;
+  url: string | null;
+}
+
+export interface EnvRecord {
+  eid: string;
+  name: string;
+  mode: Mode;
+  app: string;
+  repo: string;
+  branch: string;
+  commit: string;
+  worktree: string;
+  borrowed_worktree: boolean;
+  status: EnvStatus;
+  serve?: ServeRecord;
+  urls: EnvUrls;
+  ref: string;
+  published_at: string;
+  expires_at: string;
+  last_touched_at: string;
+  publisher: Publisher;
+  packet_hint?: string;
+  evidence: string[];
+  install_hash?: string;
+  testpack?: TestpackRecord;
+}
+
+export interface MachineConfig {
+  upstream_port_start: number;
+  upstream_port_end: number;
+  tailnet_port_start: number;
+  tailnet_port_end: number;
+  serving_web_limit: number;
+  pack_quota_bytes: number;
+  evidence_quota_bytes: number;
+  log_max_bytes: number;
+  pack_server_port: number;
+  pack_server_pid?: number;
+  pack_server_pgid?: number;
+  tailnet_host?: string;
+  tailnet_dns_name?: string;
+  last_gc_at?: string;
+}
+
+export interface ResolveResult {
+  env: string;
+  mode: Mode;
+  urls: EnvUrls;
+  testpack_url: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  platform: string | null;
+  entry: string | null;
+  host: string;
+  status: EnvStatus;
+  log_tail?: string[];
+}
+
+export interface MultiResolveResult {
+  env: string;
+  host: string;
+  resolutions: ResolveResult[];
+}
+
+export interface PacketFields {
+  preview_url: string | null;
+  testpack_ref: string | null;
+  shell_recipe: string | null;
+}

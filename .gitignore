@@ -1,2 +1,6 @@
+node_modules/
+dist/
+coverage/
+*.log
 RESULT.json
 .DS_Store

@@ -1,0 +1,6 @@
+name = "nectar-real-smoke"
+
+[web]
+serve = "node server.mjs"
+ready_path = "/"
+ready_timeout = "10s"

@@ -17,6 +17,12 @@ supervises only web serves — desktop/cli/backend still need nectar-owned lifec
 surface is daemon-shaped (stop/touch/gc are verbs a daemon can implement behind unchanged
 commands), so the upgrade path is clean.
 
+**v0 amendment · 2026-07-19:** runtime creation is transactional even without a daemon.
+After ports are allocated, any publish failure independently attempts process-group
+termination and Tailscale Serve removal, then clears `serve`/URLs so the crashed record no
+longer claims ports. The record remains by design, with structured failure metadata and a
+log tail; deleting it would contradict the inspectable-failure state model.
+
 ## D2 — Nectar owns its checkouts; borrowing is explicit
 
 **Chose:** publish clones/worktrees the branch into `~/.nectar/work/<name>`; the agent's
@@ -49,6 +55,13 @@ target. For the pack store only, `doctor --fix` starts a read-only loopback stat
 and makes tailnet `:8440` proxy to it. The process binds `127.0.0.1` only; Tailscale remains
 the sole mesh exposure and Funnel remains forbidden.
 
+**v0 amendment · 2026-07-19:** readiness probes both `127.0.0.1` and `::1`, then Tailscale
+Serve targets the origin that actually answered. The rejected alternative was an
+IPv4-only recipe contract: several current dev servers choose IPv6 loopback by default,
+and treating a healthy process as timed out is needless fragility when probing two local
+addresses is cheap. Exposure is configured only after readiness; failure cleanup still
+issues an idempotent Serve-off for the allocated port.
+
 ## D4 — `preview_url` is always the tailnet URL; refs are machine-bound
 
 **Chose:** the packet's `preview_url` carries `https://<host>.tailca9707.ts.net:<port>`;
@@ -58,13 +71,20 @@ on their publishing machine.
 (b) a mesh-wide nectar registry with location-transparent refs (`nectar://kontiki--branch`)
 and per-machine resolution.
 **Why:** (a) only works when reviewer and publisher share a machine — the actual fleet is a
-Mac reviewing work from linux/mini hosts. Tailnet URLs work from every device including the
-publisher (tailscaled hairpins), so one string serves all consumers, which is what a
-single-string schema field demands. (b) is a distributed system (sync, conflict, partition
-behavior) bought before there's ever been a single cross-machine collision; the host in the
-ref costs nothing today (packets already know their machine implicitly via the bee) and F9
-makes offline hosts a visible, attributable failure instead of a registry mystery. Revisit
-if envs ever need to migrate hosts.
+Mac reviewing work from linux/mini hosts. The mesh URL is the only location-independent
+string for a packet. (b) is a distributed system (sync, conflict, partition behavior)
+bought before there's ever been a single cross-machine collision; the host in the ref costs
+nothing today (packets already know their machine implicitly via the bee) and F9 makes
+offline hosts a visible, attributable failure instead of a registry mystery. Revisit if
+envs ever need to migrate hosts.
+
+**v0 amendment · 2026-07-19:** live use disproved the same-node hairpin assumption: a
+publishing machine calling its own Tailscale Serve URL sends no Tailscale identity and gets
+HTTP 403. The packet field remains the mesh URL because the packet can later be opened on
+any device. Instead, `resolve --json` exposes `is_self`, based on case-insensitive full and
+short Tailscale hostname comparison; consumers prefer `urls.local` only when it is true.
+Changing `preview_url` at publish time was rejected because publisher location says nothing
+about the eventual reviewer location.
 
 ## D5 — State is file-per-env JSON, not SQLite
 

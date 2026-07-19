@@ -12,7 +12,9 @@ export const DEFAULT_CONFIG: MachineConfig = {
   tailnet_port_start: 8443,
   tailnet_port_end: 8542,
   serving_web_limit: 12,
-  serving_sim_limit: 3,
+  // One streamed simulator per host: starting a second serve-sim instance kills the
+  // first one's encoder (observed on 0.1.45). Raise once upstream multi-instance works.
+  serving_sim_limit: 1,
   pack_quota_bytes: 10 * 1024 * 1024 * 1024,
   evidence_quota_bytes: 500 * 1024 * 1024,
   log_max_bytes: 10 * 1024 * 1024,

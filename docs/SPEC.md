@@ -497,6 +497,17 @@ own accessibility identifier (RN `testID` → AX id). House rule for reviewable 
 `testID` on interactive elements. serve-sim also defines an unavailability error for
 sims without AX — treat `/ax` as best-effort, never gate publish on it.
 
+**Desktop parity (implemented 2026-07-19).** Testpacks get the same channel: `nectar
+open` on a desktop env launches the build, finds its pid, and starts a loopback **AX
+bridge** — a swiftc-compiled helper (`assets/ax-dump.swift`, cached per source hash under
+`~/.nectar/bin`) walks the macOS Accessibility tree (with the `AXManualAccessibility`
+handshake Electron requires) and emits snapshots in the exact serve-sim schema; a small
+SSE server (`src/ax-bridge.ts`) relays them at the `ax_url`/`ax_pid` returned in the open
+envelope (`--no-ax` opts out). Loopback-only by design: the bridge serves the machine
+doing the reviewing, and dies with the app. Requires Accessibility permission for the
+process running nectar; without it `/health` reports `ax-not-trusted` with instructions,
+and the open still succeeds with `ax_warning`.
+
 **Packet mapping.** `packet_fields` emits `preview_url` (stream) + `testpack_ref`
 (simpack) — both fit the existing Forum schema unchanged. The desk-side
 `ReviewPacketKind` vocabulary (`web | desktop | cli | code`) has no `ios` yet; until
@@ -665,7 +676,7 @@ noted future step, out of scope here.
 | knob | default | on exceed |
 | --- | --- | --- |
 | serving web envs | 12 | `E_QUOTA` — publish tells the bee to `nectar gc` or pick a victim (`--evict-oldest` flag does it) |
-| booted nectar simulators (ios) | 3 | `E_QUOTA` — simulators are RAM-heavy; same eviction advice |
+| streamed nectar simulators (ios) | 1 | `E_QUOTA` — serve-sim 0.1.45 cannot run two encoder instances (OQ8); raise when upstream fixes multi-instance |
 | tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
 | upstream ports | 4100–4199 | `E_PORTS` |
 | pack store size | 10 GB | LRU prune at `gc`, never mid-publish below 1 pack |
@@ -755,12 +766,13 @@ Genuinely unresolved — flagged here rather than hedged inline:
    one streamed env per host (quota 1) until it does. Also: pin the serve-sim version as a
    nectar dependency — `npx serve-sim@latest` drift inside a publish path is not
    acceptable.
-   *Partially validated 2026-07-19 (serve-sim 0.1.45, macbook-pro-1):* (a) holds — the
-   full manual chain (dedicated `nectar-ios-poc` device on iOS 26.5 → Release build pinned
-   to its UDID → `simctl install/launch` → `serve-sim <device> -p 3210` →
-   `tailscale serve --https=8460`) streamed an interactive simulator to the tailnet;
-   serve-sim binds loopback by default, which fits the exposure model. (b) multi-instance
-   remains unverified.
+   *Resolved 2026-07-19 (serve-sim 0.1.45, macbook-pro-1):* (a) holds — device-targeted
+   streaming works and binds loopback by default, fitting the exposure model. (b) is
+   **refuted**: starting a second serve-sim instance killed the first one's encoder
+   (`error encoding frame: encodingFailed`, then exit). The planned fallback shipped:
+   `serving_sim_limit` defaults to **1** streamed env per host, so a second ios publish
+   fails loudly with `E_QUOTA` instead of silently breaking the first packet's
+   `preview_url`. Raise the default when upstream multi-instance is verified.
 9. **`ios` in the packet kind vocabulary.** The desk contract's `ReviewPacketKind` is
    `web | desktop | cli | code`; ios packets need their own kind (glyph, "open simpack"
    affordance, Test-tab sizing for a phone aspect ratio). Nectar's emitted fields already

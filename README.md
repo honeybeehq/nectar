@@ -43,11 +43,13 @@ nothing about packets beyond emitting reference strings shaped to fit them.
 
 ## Status
 
-**v0 implemented.** 2026-07-18. Web publish/lifecycle, Darwin desktop testpacks,
+**v0 implemented + ios/AX (2026-07-19).** Web publish/lifecycle, Darwin desktop testpacks,
 cross-machine resolution/open, atomic file state, doctor, and GC are built and covered by
-unit plus fixture-backed integration tests. Real same-machine mesh and macOS `:8440` doctor
-smokes pass; the two-machine and live review-desk procedures are recorded in
-[docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
+unit plus fixture-backed integration tests. `--mode ios` ships: simpacks + a dedicated
+per-env simulator streamed to the tailnet via pinned serve-sim, with `/ax` (the
+accessibility snapshot channel) on every stream. Desktop testpacks get the same AX channel
+via a swiftc-compiled bridge started by `nectar open` (`ax_url` in the envelope). Live
+smokes recorded in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 - [docs/SPEC.md](docs/SPEC.md) — the full specification
 - [docs/V0.md](docs/V0.md) — the thinnest end-to-end slice, with acceptance criteria

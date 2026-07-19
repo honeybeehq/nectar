@@ -222,3 +222,29 @@ requires the second machine and a live desk packet.
 | AC10 | pass | real `lsof` loopback-only bind and empty Serve status after cleanup |
 
 The final real Forum/Apiary desk taste remains `needs-second-machine`.
+
+## ios mode + AX channel (2026-07-19)
+
+Implemented post-v0 (SPEC §6.5, D14) and live-smoked on macbook-pro-1:
+
+- **ios publish, real chain**: `/tmp/nectar-dummy-ios` (the swiftc dummy fixture as a repo
+  with `[ios]` recipe) → `nectar publish --mode ios --json` exited 0 with zero warnings:
+  simpack built and digested, dedicated device `nectar-nectar-dummy--main--ios` created on
+  iOS 26.5, app installed + launched, serve-sim 0.1.45 streamed on the tailnet
+  (`preview_url` :8444), `ax_url` = stream + `/ax` returned live SSE snapshots of the
+  running app. `packet_fields` carried both `preview_url` and `testpack_ref`.
+- **serve-sim multi-instance refuted**: launching the nectar stream killed a concurrently
+  running manual serve-sim instance (`error encoding frame: encodingFailed`). Consequence
+  shipped: `serving_sim_limit` defaults to 1; a second streamed ios publish fails
+  `E_QUOTA` loudly instead of silently breaking the first packet's stream.
+- **desktop AX bridge, real chain**: `nectar open nectar://macbook-pro-1/flyt--main--desktop`
+  launched the cached testpack, compiled `ax-dump` via swiftc, and returned
+  `ax_url`/`ax_pid`; `/health` reported trusted, `/ax` streamed Flyt's real macOS
+  accessibility tree (Electron `AXManualAccessibility` handshake) in the serve-sim schema.
+- **Automated coverage**: `test/ios.test.ts` (fake simctl + fake serve-sim: full stream
+  publish, F12 degrade, scratch-sim open, desktop AX plumb), `test/sim.test.ts` (runtime/
+  devicetype selection, pinned serve-sim command), `test/ax-bridge.test.ts` (SSE relay,
+  trust-error surfacing). Suite: 36/36.
+
+Remaining manual checks: an ios open on a second Mac (scratch-sim path over the mesh), and
+an AX-anchored feedback round-trip once the desk's composer overlay exists (Apiary side).

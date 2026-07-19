@@ -34,6 +34,12 @@ Agents of any harness call it directly; the packet carries only strings.
 - **Not public.** Nothing nectar serves ever leaves the tailnet. There is no `--public`, and
   `tailscale funnel` is never invoked.
 
+  *v0.2 amendment · 2026-07-19 (D19):* softened from absolute to **not public by default**.
+  `nectar expose <env>` is a designed explicit, per-env, gated-by-default escalation through
+  operator-configured targets (cloudflare-tunnel / ssh-tunnel / vercel-deploy — see
+  [V0.2.md §5](V0.2.md)). Publishing itself remains tailnet-only, and `tailscale funnel`
+  remains forbidden — exposure never rides funnel, so the doctor invariant stands.
+
 ## 3. Vocabulary and system overview
 
 - **env** — one published test environment: a checkout + artifacts + (maybe) a serving

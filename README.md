@@ -53,6 +53,8 @@ smokes recorded in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 - [docs/SPEC.md](docs/SPEC.md) — the full specification
 - [docs/V0.md](docs/V0.md) — the thinnest end-to-end slice, with acceptance criteria
+- [docs/V0.2.md](docs/V0.2.md) — the review-experience wave (scenarios/auto-login, deps,
+  taste, drops, expose) — design, not yet built
 - [docs/DECISIONS.md](docs/DECISIONS.md) — every contested choice, alternatives, and why
 
 Build and link locally:

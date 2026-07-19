@@ -232,3 +232,131 @@ Apple-Silicon Mac host with Xcode — that's what the mini fleet is for; `E_PLAT
 elsewhere keeps the failure honest. The simpack deliberately reuses the testpack format
 (one manifest, one pack store, one digest story) rather than inventing a second package
 kind — `kind: "ios-sim"` + `bundle_id` is the entire delta.
+
+## D15 — Login: app-cooperated magic link, minted at resolve time
+
+**Chose:** recipes declare a `login` command per scenario; nectar runs it on the publishing
+host at *resolve/open time* and returns a short-lived authenticated `entry_url`. The app
+enables a dev-only token-login route when `NECTAR_ENV` is set (convention + a tiny
+middleware package, Apiary-side). Packets carry only the token-free `review_entry_url`.
+**Alternatives:** (a) mint at publish time and put the authenticated URL on the packet;
+(b) Playwright storage-state injection (record cookies once, inject into the consumer);
+(c) nectar-side session forgery (write cookies/JWTs directly).
+**Why:** (a) bakes a credential into a document that lives for days and is pasted around —
+the packet must stay secret-free (SPEC §9.2); resolve is already the desk's read path, so
+freshness is free. (b) only works for consumers that can inject browser state — the desk
+webview and taste, but not a plain browser tab on any device, which is half the point of
+mesh URLs; it survives as the fallback for uncooperative third-party apps. (c) requires
+nectar to know every app's session format — a per-app coupling that rots. The cost of (chosen)
+is a one-line route in our own apps, which we control. Login failure degrades to a warning,
+never an unresolvable env.
+
+## D16 — Preview deps: provision/teardown commands are the primitive
+
+**Chose:** `[deps.<name>]` with a `provision`/`teardown` command pair as the fundamental
+contract (stdout returns injected env vars); `compose = "…"` delegates wholesale to docker
+compose under a nectar-owned project name; image `kind` shorthands are sugar added on
+demand. Instances are per-env (`nectar-<env>-<dep>`), lifecycle-bound (publish/republish/
+stop/rm/gc), volumes deleted only under the `nectar-` prefix guard.
+**Alternatives:** (a) docker-only integration (nectar drives the docker API directly);
+(b) no deps — repos script their own in `serve`; (c) shared long-lived services per machine
+(one postgres, one redis) with per-env databases/namespaces.
+**Why:** (a) couples nectar to docker's API and still can't provision the genuinely remote
+cases (buckets, third-party sandboxes) — commands cover both containers and everything
+else with one contract. (b) is what happens today and it leaks: `serve` scripts that spawn
+databases leave them running after gc kills the process group, and nothing ties data
+lifetime to env lifetime. (c) saves RAM but shares failure domains and makes `--fresh` and
+teardown semantics murky; per-env instances make isolation the default and cost only
+containers we already GC. Compose-first keeps nectar's own surface thin: naming, lifecycle,
+env wiring, seeding hook, GC.
+
+## D17 — Taste: Playwright optional, evidence as files, DPC by shell-out
+
+**Chose:** `nectar taste` drives Playwright chromium as an *optional* dependency (absent →
+`E_TASTE` with install hint); all outputs (screenshots, video, taste.json, diffs) are plain
+files in the env's existing evidence store, served over :8440; visual diffing shells out to
+DPC (`NECTAR_DPC_BIN`), never a bundled JS pixel-diff.
+**Alternatives:** (a) bundle Playwright as a hard dependency; (b) a bespoke CDP driver to
+avoid the dependency entirely; (c) structured evidence in the env record instead of files;
+(d) pixelmatch/resemble.js for diffs.
+**Why:** (a) drags a browser download into every `pnpm link` of a CLI whose core job
+doesn't need one. (b) re-implements the hard 20% of Playwright (waiting, network-idle,
+video) for zero user benefit. (c) records must stay tiny and secret-free; files over :8440
+give the desk rendering for free and GC already prunes evidence. (d) the team already owns
+DPC — one diff tool, one score scale, everywhere it's used; external-binary degradation
+(skip + warn) matches the portless/tailscale pattern.
+
+## D18 — Drops ride the pack store
+
+**Chose:** `nectar drop` stores content-addressed static directories under
+`packs/.drops/…` and serves them through the existing :8440 read-only server (extended
+only to serve `index.html` for trailing-slash requests under `/drops/`); TTL + LRU via the
+existing gc; no process, no worktree, no new port.
+**Alternatives:** (a) drops as a sixth env mode; (b) a separate drops server/port;
+(c) skip drops — use gists/pastebins.
+**Why:** (a) an env carries checkout/serve/recipe machinery that a static snippet doesn't
+have — wrong abstraction, and mode vocabulary leaks into the desk contract. (b) another
+port, another serve entry, another doctor check, to serve files a working static server
+already serves. (c) sends team content to third parties and off the tailnet by default —
+drops exist precisely so agent-written artifacts have a zero-friction home with our
+lifecycle and ACLs. Internet-visible drops reuse D19's targets as static copies.
+
+## D19 — Internet exposure: explicit per-env escalation, machine-config targets
+
+**Chose:** amend SPEC §2's "Not public": publishing remains tailnet-only; `nectar expose
+<env> --to <target>` is an explicit, per-env, gated-by-default escalation (`--gate none`
+additionally requires `--public`). Targets live in machine config (`exposures`: 
+cloudflare-tunnel | ssh-tunnel | vercel-deploy), never in repo recipes. Password gating is
+one nectar-side fronting proxy shared by tunnel kinds. `tailscale funnel` stays forbidden.
+**Alternatives:** (a) keep the non-goal absolute (no internet previews); (b) funnel — it's
+one flag; (c) per-repo exposure config in `nectar.toml`; (d) always-public publish mode.
+**Why:** (a) real review includes people off the tailnet (clients, phone tests) — the need
+exists and will otherwise be met by hand with worse hygiene. (b) funnel binds exposure to
+the tailscale identity/cert story, offers no auth gate of our own, and breaks the clean
+"funnel==never" doctor invariant that guards the rest of the surface. (c) exposure is
+infrastructure (which tunnel, which domain, which credentials) — repos say *what* to serve,
+machines say *where it can go*; a hostile branch must not be able to declare itself public.
+(d) dev servers stay dev servers (§9.1) — default-gated, loud warnings, TTL teardown.
+
+## D20 — Reviewer-facing UI lives in Apiary; nectar stays headless
+
+**Chose:** the review overlay, element-anchored feedback, and side-by-side compare are
+Apiary features consuming nectar's existing interfaces (`packet_fields`, `resolve`,
+evidence over :8440, the ax channel). Nectar adds no injected toolbars, no HTML rewriting,
+no compare surface. Taste receipts (who-opened-when telemetry) are dropped entirely.
+**Alternatives:** (a) nectar injects a review toolbar into web previews (proxy-side HTML
+rewriting); (b) a nectar compare page serving two envs in a split iframe; (c) receipts in
+the env record surfaced to packets.
+**Why:** (a) duplicates the element picker Apiary already has, and proxy HTML injection
+breaks CSPs, frameworks, and websockets in exactly the apps we review — the desk owns the
+chrome around the preview, nectar owns the preview. (b) is two resolves and a flexbox —
+desk-side, optional by ruling. (c) ruled not important; if audit ever matters it arrives
+with D9's token layer, where identity is real rather than inferred.
+
+## D21 — Exposure v1: the nctr.site relay — routing, not tunneling
+
+**Chose:** the first (and likely only load-bearing) exposure kind is `relay`: one operator
+VM with a dedicated public IP joins the tailnet and reverse-proxies
+`<sub>.nctr.site` to publishers' existing tailscale-serve URLs. Caddy with one DNS-01
+wildcard cert; routes are expiring files managed by a small `nectar-relay` command over
+Tailscale SSH; the D19 gate is basic-auth in the route blocks, built once, centrally.
+Host: `trmd-vps01` (already public-IP'd, tailnet-joined, Caddy-running). Cloudflare named
+tunnels are deliberately not built. exe.dev VMs cannot host the relay — they have no
+dedicated public IP (NAT behind exe.dev's proxy).
+**Alternatives:** (a) cloudflared named tunnels first (the codex and kimi panelists' pick);
+(b) sish / plain `ssh -R` reverse tunnels to a VM; (c) the exe.dev-native relay
+(`*.exe.xyz` + their login proxy, ~zero credentials); (d) a full managed control plane
+(database, leases, publisher credentials).
+**Why:** every publisher is already reachable inside the mesh, so public exposure is a
+routing problem, not a NAT-traversal problem — tunnels re-solve connectivity we already
+have. (a) costs a daemon plus a distributed credential on every publishing machine and
+4–6 build days versus 3–4 for the relay, which also delivers the generic-VM story and the
+nctr.site brand in the same build; Cloudflare's unique gifts (Access SSO, edge) remain
+one reversible config flip away — proxy the nctr.site DNS records in front of the relay,
+zero nectar code. (b) survives as the deferred fallback kind for a box that cannot join
+the tailnet. (c) is ~1 day and credential-free but binds reviewer-facing URLs to a
+seven-months-old dev preview — acceptable as an internal-only nicety, never the primary.
+(d) is 10–20 days of control plane that routes-as-files makes unnecessary until real
+external tenants exist. Panel research: docs/research/exposure-{codex,kimi,fable}.md
+(2026-07-19; three models, three emphases; disagreements resolved here — the kimi
+panelist's exe.dev NAT finding overruled the fable panelist's hosting suggestion).

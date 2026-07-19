@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# nectar-relay — the nctr.site public-preview relay control command (D21).
+#
+# Runs on the relay VM (a public-IP host that has joined the tailnet). Each exposed
+# env is one route file under $ROUTES; Caddy imports them all inside the *.nctr.site
+# wildcard site block. Publishing machines drive this over Tailscale SSH — they hold
+# no credentials and run no daemon. Routes carry their own expiry so a dead publisher
+# can never leak a public URL: `prune` (hourly cron) removes them regardless.
+#
+# Usage:
+#   nectar-relay add <sub> <upstream-url> <expires-epoch> [--password-hash <bcrypt> | --public]
+#   nectar-relay rm  <sub>
+#   nectar-relay prune
+#   nectar-relay ls   [--json]
+#   nectar-relay health [--json]
+set -euo pipefail
+
+ROUTES="${NECTAR_RELAY_ROUTES:-/etc/caddy/nctr-routes}"
+DOMAIN="${NECTAR_RELAY_DOMAIN:-nctr.site}"
+RELOAD="${NECTAR_RELAY_RELOAD:-systemctl reload caddy}"
+
+die() { echo "nectar-relay: $*" >&2; exit 1; }
+
+# Subdomain labels are the untrusted half of this interface (a publisher names them):
+# constrain hard so a route filename can never escape $ROUTES or inject Caddyfile.
+valid_sub() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+
+# Upstream is always an https tailnet URL (host[:port]); reject anything else so a
+# route can't be pointed at a surprise origin.
+valid_upstream() { [[ "$1" =~ ^https://[a-zA-Z0-9._-]+(:[0-9]+)?$ ]]; }
+
+reload() { $RELOAD >/dev/null 2>&1 || die "caddy reload failed (config left in place; run: caddy validate)"; }
+
+cmd_add() {
+  local sub="$1" upstream="$2" expires="$3"; shift 3
+  local pwhash="" public=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --password-hash) pwhash="$2"; shift 2;;
+      # Plaintext convenience: hash it here so callers never precompute bcrypt. The
+      # plaintext transits only this argv (briefly visible in ps) and is never stored.
+      --password) pwhash="$(caddy hash-password --plaintext "$2")" || die "add: caddy hash-password failed"; shift 2;;
+      --public) public=1; shift;;
+      *) die "add: unknown flag '$1'";;
+    esac
+  done
+  valid_sub "$sub"        || die "add: invalid subdomain '$sub'"
+  valid_upstream "$upstream" || die "add: upstream must be an https:// tailnet URL"
+  [[ "$expires" =~ ^[0-9]+$ ]] || die "add: expires must be a unix epoch"
+  [[ -z "$pwhash" && $public -eq 0 ]] && die "add: require --password-hash <bcrypt> or --public (gated by default)"
+
+  mkdir -p "$ROUTES"
+  local file="$ROUTES/$sub.caddy" tmp
+  tmp="$(mktemp "$ROUTES/.$sub.XXXXXX")"
+  {
+    echo "# nctr-relay route — do not edit by hand"
+    echo "# expires $expires"
+    echo "# upstream $upstream"
+    echo "@$sub host $sub.$DOMAIN"
+    echo "handle @$sub {"
+    if [[ -n "$pwhash" ]]; then
+      echo "    basic_auth {"
+      echo "        reviewer $pwhash"
+      echo "    }"
+    fi
+    # tailscale serve presents a cert for the mesh hostname, so proxy over TLS with
+    # that host as SNI/Host (Caddy's default when the upstream URL is https://<host>).
+    echo "    reverse_proxy $upstream {"
+    echo "        transport http {"
+    echo "            tls"
+    echo "        }"
+    echo "    }"
+    echo "}"
+  } > "$tmp"
+  # Caddy adapts config as the `caddy` user, so route files must be group-readable by
+  # it (they may carry a bcrypt gate hash — keep them off world-read where possible).
+  chgrp caddy "$tmp" 2>/dev/null && chmod 0640 "$tmp" || chmod 0644 "$tmp"
+  mv -f "$tmp" "$file"   # atomic swap; a concurrent reload sees old-or-new, never half
+  reload
+  echo "https://$sub.$DOMAIN"
+}
+
+cmd_rm() {
+  local sub="$1"
+  valid_sub "$sub" || die "rm: invalid subdomain '$sub'"
+  rm -f "$ROUTES/$sub.caddy"
+  reload
+  echo "removed $sub"
+}
+
+cmd_prune() {
+  local now removed=0
+  now="$(date +%s)"
+  shopt -s nullglob
+  for file in "$ROUTES"/*.caddy; do
+    local exp
+    exp="$(sed -n 's/^# expires \([0-9]\{1,\}\).*/\1/p' "$file" | head -1)"
+    if [[ -n "$exp" && "$exp" -lt "$now" ]]; then
+      rm -f "$file"; removed=$((removed + 1))
+    fi
+  done
+  [[ $removed -gt 0 ]] && reload
+  echo "pruned $removed expired route(s)"
+}
+
+cmd_ls() {
+  shopt -s nullglob
+  local json="${1:-}"
+  if [[ "$json" == "--json" ]]; then
+    local first=1; printf '['
+    for file in "$ROUTES"/*.caddy; do
+      local sub exp up
+      sub="$(basename "$file" .caddy)"
+      exp="$(sed -n 's/^# expires \([0-9]\{1,\}\).*/\1/p' "$file" | head -1)"
+      up="$(sed -n 's/^# upstream \(.*\)/\1/p' "$file" | head -1)"
+      [[ $first -eq 0 ]] && printf ','; first=0
+      printf '{"sub":"%s","expires":%s,"upstream":"%s"}' "$sub" "${exp:-0}" "$up"
+    done
+    printf ']\n'
+  else
+    for file in "$ROUTES"/*.caddy; do
+      local sub exp up
+      sub="$(basename "$file" .caddy)"
+      exp="$(sed -n 's/^# expires \([0-9]\{1,\}\).*/\1/p' "$file" | head -1)"
+      up="$(sed -n 's/^# upstream \(.*\)/\1/p' "$file" | head -1)"
+      printf '%-40s expires=%s upstream=%s\n' "$sub.$DOMAIN" "${exp:-?}" "${up:-?}"
+    done
+  fi
+}
+
+cmd_health() {
+  local active routes json="${1:-}"
+  active="$(systemctl is-active caddy 2>/dev/null || echo unknown)"
+  shopt -s nullglob; routes=("$ROUTES"/*.caddy)
+  if [[ "$json" == "--json" ]]; then
+    printf '{"caddy":"%s","routes":%d,"domain":"%s"}\n' "$active" "${#routes[@]}" "$DOMAIN"
+  else
+    echo "caddy=$active routes=${#routes[@]} domain=$DOMAIN"
+  fi
+  [[ "$active" == "active" ]] || exit 1
+}
+
+[[ $# -ge 1 ]] || die "usage: nectar-relay add|rm|prune|ls|health ..."
+sub="$1"; shift
+case "$sub" in
+  add)    [[ $# -ge 3 ]] || die "add <sub> <upstream> <expires-epoch> [--password-hash H | --public]"; cmd_add "$@";;
+  rm)     [[ $# -ge 1 ]] || die "rm <sub>"; cmd_rm "$@";;
+  prune)  cmd_prune;;
+  ls)     cmd_ls "${1:-}";;
+  health) cmd_health "${1:-}";;
+  *)      die "unknown command '$sub'";;
+esac

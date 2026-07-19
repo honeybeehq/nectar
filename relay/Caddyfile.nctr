@@ -1,0 +1,30 @@
+# nctr.site public-preview relay — the wildcard site block (D21).
+# Imported/appended into the relay VM's /etc/caddy/Caddyfile beside any other sites
+# (e.g. hooks.trmd.me). Needs a Caddy build with the caddy-dns/cloudflare module and
+# CLOUDFLARE_API_TOKEN in the environment (systemd EnvironmentFile=/etc/caddy/nctr.env).
+#
+# One wildcard cert (*.nctr.site) covers every ephemeral preview subdomain — DNS-01 is
+# used specifically so churning preview envs never hit Let's Encrypt per-name rate
+# limits. The DNS record is gray-cloud (DNS-only); TLS terminates here.
+
+*.nctr.site {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	# Per-env route files, each a `handle @<sub> { … }` matcher block, written by
+	# `nectar-relay add`. Atomic files: no database, survives reboot, greppable.
+	import /etc/caddy/nctr-routes/*.caddy
+
+	# Anything with no live route: an unrouted or expired preview.
+	handle {
+		respond "nctr.site — this preview has expired or does not exist" 404
+	}
+
+	# A routed subdomain whose publisher fell off the tailnet 502s here (same truth
+	# as F9: references are machine-bound). Caddy emits its default 502; the message
+	# is intentionally left to Caddy so upstream errors stay diagnosable.
+	handle_errors {
+		respond "nctr.site — the publishing machine for this preview is offline" {http.error.status_code}
+	}
+}

@@ -425,6 +425,15 @@ Xcode + simulator runtimes (serve-sim is arm64-only). Non-Mac hosts fail fast wi
 `E_PLATFORM` — iOS publishes route to the Mac fleet (the `trmd-*-mini*` machines are the
 intended publish hosts). Every other mode stays platform-agnostic.
 
+*Field notes (2026-07-19 spike, macbook-pro-1):* two failure modes observed that v0.1 must
+design around. (1) Xcode's destination matcher prefers *physical* devices when one is
+paired — builds must always pin `-destination` to the nectar-created simulator's UDID,
+never a device name. (2) Xcode/runtime skew is real: Xcode 26.6 refused the installed
+26.1/26.2 simulator runtimes outright ("iOS 26.5 is not installed"), listing zero eligible
+simulator destinations; `nectar doctor` on ios hosts must therefore check for an
+xcodebuild-eligible simulator runtime (not merely `simctl list runtimes`), and `E_SIM`
+must surface the `xcodebuild -downloadPlatform iOS` remedy.
+
 **Publish sequence** (`nectar publish --mode ios`):
 
 1. Worktree + deps as usual (§6.1 step 1).
@@ -729,3 +738,9 @@ Genuinely unresolved — flagged here rather than hedged inline:
    `web | desktop | cli | code`; ios packets need their own kind (glyph, "open simpack"
    affordance, Test-tab sizing for a phone aspect ratio). Nectar's emitted fields already
    fit the schema — this is an Apiary/Forum coordination item, not a nectar blocker.
+10. **Electron testpack profile isolation.** Observed 2026-07-19: a flyt testpack launched
+    via `nectar open` shares `user-data-dir` (`~/Library/Application Support/<app>`) with
+    the installed production app — a review build mutating real user data. Candidate fix:
+    `open` passes an env the app honors (`NECTAR_USER_DATA_DIR`) or launches Electron
+    entries with `--user-data-dir` under the pack cache. Needs a convention apps opt into;
+    decide before testpacks are used for apps with valuable local state.

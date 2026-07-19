@@ -131,6 +131,19 @@ export function statusHasProxyTarget(status: unknown, port: number, target: stri
   return statusHasPort(status, port) && scalarStrings(status).includes(target);
 }
 
+// Every port mentioned anywhere in the serve table ("host:8443" keys, bare "8440"
+// entries, proxy targets). Over-collecting is safe — callers only treat these as
+// reserved, never as free.
+export function statusPorts(status: unknown): Set<number> {
+  const ports = new Set<number>();
+  for (const value of scalarStrings(status)) {
+    if (/^\d{2,5}$/.test(value)) ports.add(Number(value));
+    const trailing = /:(\d{2,5})(?:$|\/)/.exec(value);
+    if (trailing !== null) ports.add(Number(trailing[1]));
+  }
+  return ports;
+}
+
 export function statusHasFunnel(status: unknown): boolean {
   if (typeof status !== "object" || status === null) return false;
   const entries = Object.entries(status as Record<string, unknown>);

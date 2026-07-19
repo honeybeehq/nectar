@@ -72,3 +72,66 @@ export async function packCandidates(packRoot: string, protectedFiles: Set<strin
     }),
   );
 }
+
+async function listDirectories(root: string): Promise<Dirent[]> {
+  try {
+    return (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+// `.staging-<pid>-<rand>` trees are trashed by their publish, but a killed
+// publish leaves them behind — extracted app bundles invisible to the zip-only
+// quota walk. Sweep any older than the cutoff.
+export async function findStaleStaging(packRoot: string, olderThanMs: number): Promise<string[]> {
+  const stale: string[] = [];
+  for (const envDir of await listDirectories(packRoot)) {
+    const full = path.join(packRoot, envDir.name);
+    for (const entry of await listDirectories(full)) {
+      if (!entry.name.startsWith(".staging-")) continue;
+      const dir = path.join(full, entry.name);
+      const info = await stat(dir).catch(() => undefined);
+      if (info !== undefined && info.mtimeMs < olderThanMs) stale.push(dir);
+    }
+  }
+  return stale;
+}
+
+async function walkFiles(directory: string): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const full = path.join(directory, entry.name);
+      return entry.isDirectory() ? walkFiles(full) : entry.isFile() ? [full] : [];
+    }),
+  );
+  return nested.flat();
+}
+
+// SPEC §10.1: evidence is quota'd per env; prune oldest files until under.
+export async function selectEvidencePrunes(evidenceRoot: string, quotaBytes: number): Promise<string[]> {
+  const prunes: string[] = [];
+  for (const envDir of await listDirectories(evidenceRoot)) {
+    const files = await Promise.all(
+      (await walkFiles(path.join(evidenceRoot, envDir.name))).map(async (file) => {
+        const info = await stat(file);
+        return { path: file, size: info.size, mtimeMs: info.mtimeMs };
+      }),
+    );
+    let total = files.reduce((sum, file) => sum + file.size, 0);
+    for (const file of files.sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path))) {
+      if (total <= quotaBytes) break;
+      prunes.push(file.path);
+      total -= file.size;
+    }
+  }
+  return prunes;
+}

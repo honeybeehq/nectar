@@ -16,7 +16,7 @@ import {
   stopProcessGroup,
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
-import { asNectarError, NectarError } from "./errors.js";
+import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import { envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, selectMode } from "./recipe.js";
 import { getPaths, type NectarPaths } from "./paths.js";
@@ -31,13 +31,14 @@ import {
   statusHasFunnel,
   statusHasPort,
   statusHasProxyTarget,
+  statusPorts,
   stopServe,
   tailnetIdentity,
   type ServeProxyEntry,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
-import { gcTransition, packCandidates, selectPackPrunes, type GcTransition } from "./gc.js";
+import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
   createSimDevice,
@@ -70,6 +71,10 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TTL = 72 * 60 * 60 * 1_000;
+
+// Machine-wide lock name for the allocate→spawn→record window; env names always
+// carry a --<mode> suffix, so this can never collide with a real env's lock.
+const PORTS_LOCK = "machine--ports";
 
 interface PublishOptions {
   repo?: string;
@@ -118,7 +123,10 @@ export class NectarService {
     const live = await tailnetIdentity();
     if (live !== undefined) {
       const updated = { ...config, tailnet_host: live.host, tailnet_dns_name: live.dnsName };
-      await this.store.writeConfig(updated);
+      // Rewriting on every call races doctor's pack-server registration writes.
+      if (config.tailnet_host !== live.host || config.tailnet_dns_name !== live.dnsName) {
+        await this.store.writeConfig(updated);
+      }
       return { host: live.host, dnsName: live.dnsName, online: true, config: updated };
     }
     const fallback = config.tailnet_host ?? (os.hostname().split(".")[0] || "localhost");
@@ -131,11 +139,13 @@ export class NectarService {
   }
 
   async publish(options: PublishOptions): Promise<Record<string, unknown>> {
+    // Validate caller input before touching the repo — a bad --ttl is a usage
+    // error, not a checkout problem.
+    const ttlMs = parseDuration(options.ttl ?? "72h", "ttl");
     const repo = await resolveRepo(options.repo ?? process.cwd());
     const branch = options.branch ?? (await currentBranch(repo));
     const recipe = await loadRecipe(repo);
     const mode = selectMode(recipe, options.mode);
-    const ttlMs = parseDuration(options.ttl ?? "72h", "ttl");
     const publishOptions = {
       repo,
       branch,
@@ -184,9 +194,13 @@ export class NectarService {
       last_touched_at: now.toISOString(),
       publisher: currentPublisher(),
       ...(options.packet === undefined ? {} : { packet_hint: options.packet }),
+      ttl_ms: options.ttlMs,
       evidence: old?.evidence ?? [],
       ...(old?.install_hash === undefined ? {} : { install_hash: old.install_hash }),
     };
+    // Stop the old runtime while its pid/pgid are still on disk — overwriting the
+    // record first would orphan the running server if we die before stopping it.
+    if (old !== undefined) await this.stopRuntime(old);
     await this.store.writeEnv(record);
     return { record, ...(old === undefined ? {} : { old }), identity };
   }
@@ -326,23 +340,84 @@ export class NectarService {
     const name = envName(options.recipe.name, options.branch, "web");
     return this.store.withLock(name, async () => {
       const records = await this.store.listEnvs();
-      const activeWeb = records.filter((record) => record.name !== name && record.status === "serving" && record.serve !== undefined);
+      // The quota counts live web envs only — not ios streams, not silently-dead
+      // servers a bee could never free by "running gc".
+      const activeWeb = (
+        await Promise.all(
+          records
+            .filter((record) => record.name !== name && record.mode === "web" && record.status === "serving" && record.serve !== undefined)
+            .map(async (record) => this.refreshLiveness(record)),
+        )
+      ).filter((record) => record.status === "serving");
       const config = await this.store.readConfig();
       if (activeWeb.length >= config.serving_web_limit) {
         throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
-      if (initial.old !== undefined) await this.stopRuntime(initial.old);
       const record = await this.checkout(initial.record, initial.old, options.worktree);
       try {
         const branchRecipe = await loadRecipe(record.worktree);
         const web = branchRecipe.web;
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
-        return await this.startWeb(record, web, initial.identity, initial.old, records);
+        return await this.startWeb(record, web, initial.identity, initial.old);
       } catch (error) {
         await this.rollbackRuntime(record, error);
         throw error;
       }
+    });
+  }
+
+  // Env locks are per-env, so two bees publishing different envs race the port
+  // allocator: both can probe the same free port before either has recorded a
+  // claim, and the loser's tailscale entry would proxy the wrong branch. The
+  // machine-wide PORTS_LOCK serializes allocate→spawn→record-write; the claim is
+  // on disk before the lock is released.
+  private async allocateAndSpawn(
+    record: EnvRecord,
+    identity: MachineIdentity,
+    old: EnvRecord | undefined,
+    spawnCommand: (upstreamPort: number) => { pid: number; pgid: number; cmd: string },
+  ): Promise<{ upstreamPort: number; tailnetPort: number }> {
+    return this.store.withLock(PORTS_LOCK, async () => {
+      const live = await this.store.listEnvs();
+      const others = live.filter((item) => item.name !== record.name);
+      const reservedUpstream = new Set(
+        others.map((item) => item.serve?.upstream_port).filter((port): port is number => port !== undefined),
+      );
+      reservedUpstream.add(identity.config.pack_server_port);
+      const reservedTailnet = new Set(
+        others.map((item) => item.serve?.tailnet_port).filter((port): port is number => port !== undefined),
+      );
+      // Port 443 belongs to the portless proxy, even if a bad machine config includes it.
+      reservedTailnet.add(443);
+      // Loopback probing says nothing about existing `tailscale serve` entries —
+      // consult the serve table so we never clobber one (F5). This env's own old
+      // entry stays claimable, or republish would lose its stable URL.
+      for (const port of statusPorts(await serveStatus())) reservedTailnet.add(port);
+      if (old?.serve?.tailnet_port !== undefined) reservedTailnet.delete(old.serve.tailnet_port);
+      const upstreamPort = await allocatePort({
+        start: identity.config.upstream_port_start,
+        end: identity.config.upstream_port_end,
+        reserved: reservedUpstream,
+        ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
+      });
+      const tailnetPort = await allocatePort({
+        start: identity.config.tailnet_port_start,
+        end: identity.config.tailnet_port_end,
+        reserved: reservedTailnet,
+        ...(old?.serve?.tailnet_port === undefined ? {} : { preferred: old.serve.tailnet_port }),
+      });
+      const spawned = spawnCommand(upstreamPort);
+      record.serve = {
+        cmd: spawned.cmd,
+        pid: spawned.pid,
+        pgid: spawned.pgid,
+        upstream_port: upstreamPort,
+        tailnet_port: tailnetPort,
+      };
+      record.urls.local = `http://127.0.0.1:${upstreamPort}`;
+      await this.store.writeEnv(record);
+      return { upstreamPort, tailnetPort };
     });
   }
 
@@ -351,45 +426,17 @@ export class NectarService {
     recipe: WebRecipe,
     identity: MachineIdentity,
     old: EnvRecord | undefined,
-    records: EnvRecord[],
   ): Promise<PublishedWeb> {
-    const reservedUpstream = new Set(
-      records.filter((item) => item.name !== record.name).map((item) => item.serve?.upstream_port).filter((port): port is number => port !== undefined),
-    );
-    reservedUpstream.add(identity.config.pack_server_port);
-    const reservedTailnet = new Set(
-      records.filter((item) => item.name !== record.name).map((item) => item.serve?.tailnet_port).filter((port): port is number => port !== undefined),
-    );
-    // Port 443 belongs to the portless proxy, even if a bad machine config includes it.
-    reservedTailnet.add(443);
-    const upstreamPort = await allocatePort({
-      start: identity.config.upstream_port_start,
-      end: identity.config.upstream_port_end,
-      reserved: reservedUpstream,
-      ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
-    });
-    const tailnetPort = await allocatePort({
-      start: identity.config.tailnet_port_start,
-      end: identity.config.tailnet_port_end,
-      reserved: reservedTailnet,
-      ...(old?.serve?.tailnet_port === undefined ? {} : { preferred: old.serve.tailnet_port }),
-    });
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
-    const childEnv = scrubbedEnvironment({
-      ...recipe.env,
-      PORT: String(upstreamPort),
-      NECTAR_ENV: record.name,
-      NECTAR_ENV_DIR: record.worktree,
+    const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
+      const childEnv = scrubbedEnvironment({
+        ...recipe.env,
+        PORT: String(port),
+        NECTAR_ENV: record.name,
+        NECTAR_ENV_DIR: record.worktree,
+      });
+      return { ...spawnDetached(recipe.serve, record.worktree, childEnv, log), cmd: recipe.serve };
     });
-    const processRecord = spawnDetached(recipe.serve, record.worktree, childEnv, log);
-    record.serve = {
-      cmd: recipe.serve,
-      pid: processRecord.pid,
-      pgid: processRecord.pgid,
-      upstream_port: upstreamPort,
-      tailnet_port: tailnetPort,
-    };
-    record.urls.local = `http://127.0.0.1:${upstreamPort}`;
     const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`];
     await this.store.writeEnv(record);
 
@@ -491,32 +538,37 @@ export class NectarService {
     const staging = path.join(packDirectory, `.staging-${process.pid}-${crypto.randomBytes(3).toString("hex")}`);
     const packOut = path.join(staging, `${base}.testpack`);
     await mkdir(staging, { recursive: true });
-    const env = scrubbedEnvironment({
-      NECTAR_ENV: record.name,
-      NECTAR_ENV_DIR: record.worktree,
-      NECTAR_PACK_OUT: packOut,
-      NECTAR_PACK_PLATFORM: platform,
-    });
-    const built = await runShell(packCmd, record.worktree, env);
-    if (built.exitCode !== 0) {
-      record.status = "crashed";
-      await this.store.writeEnv(record);
-      throw new NectarError("E_INSTALL", `Pack command failed: ${packCmd}`, {
-        log_tail: [...built.stdout.split("\n"), ...built.stderr.split("\n")].filter(Boolean).slice(-40),
+    try {
+      const env = scrubbedEnvironment({
+        NECTAR_ENV: record.name,
+        NECTAR_ENV_DIR: record.worktree,
+        NECTAR_PACK_OUT: packOut,
+        NECTAR_PACK_PLATFORM: platform,
       });
-    }
-
-    let packRoot = packOut;
-    if (!(await pathExists(packRoot))) {
-      const zipOut = `${packOut}.zip`;
-      if (!(await pathExists(zipOut))) {
+      const built = await runShell(packCmd, record.worktree, env);
+      if (built.exitCode !== 0) {
         record.status = "crashed";
         await this.store.writeEnv(record);
-        throw new NectarError("E_PLATFORM", `Pack command did not produce $NECTAR_PACK_OUT (${packOut}) or ${zipOut}`);
+        throw new NectarError("E_INSTALL", `Pack command failed: ${packCmd}`, {
+          log_tail: [...built.stdout.split("\n"), ...built.stderr.split("\n")].filter(Boolean).slice(-40),
+        });
       }
-      packRoot = await extractTestpack(zipOut, path.join(staging, "extracted"));
+
+      let packRoot = packOut;
+      if (!(await pathExists(packRoot))) {
+        const zipOut = `${packOut}.zip`;
+        if (!(await pathExists(zipOut))) {
+          record.status = "crashed";
+          await this.store.writeEnv(record);
+          throw new NectarError("E_NO_RECIPE", `Pack command did not produce $NECTAR_PACK_OUT (${packOut}) or ${zipOut}`);
+        }
+        packRoot = await extractTestpack(zipOut, path.join(staging, "extracted"));
+      }
+      return { staging, packRoot, base, packDirectory };
+    } catch (error) {
+      await trashPaths([staging], this.paths.root).catch(() => undefined);
+      throw error;
     }
-    return { staging, packRoot, base, packDirectory };
   }
 
   private manifestBase(record: EnvRecord, identity: MachineIdentity): Pick<TestpackManifest, "built_at" | "built_by"> {
@@ -543,7 +595,8 @@ export class NectarService {
     const digest = await sha256(temporaryZip);
     const size = await fileSize(temporaryZip);
     const finalZip = path.join(pack.packDirectory, `${pack.base}.testpack.zip`);
-    await trashPaths([finalZip], this.paths.root);
+    // rename replaces atomically — trashing first would leave a serving env's
+    // resolve pointing at a 404 if we die between the two.
     await rename(temporaryZip, finalZip);
     const encodedPath = `${encodeURIComponent(record.name)}/${encodeURIComponent(path.basename(finalZip))}`;
     record.testpack = {
@@ -567,27 +620,35 @@ export class NectarService {
   ): Promise<{ sha256: string; size: number }> {
     const platform = currentPlatform();
     const pack = await this.packArtifact(record, recipe.pack, platform);
-    const draft = await readAndValidateManifest(pack.packRoot);
-    const embedUrl =
-      recipe.embedUrl === "web"
-        ? embeddedWeb?.urls.mesh ?? embeddedWeb?.urls.local
-        : recipe.embedUrl;
-    const manifest: TestpackManifest = {
-      testpack: 1,
-      app: record.app,
-      branch: record.branch,
-      commit: record.commit,
-      platform,
-      kind: recipe.kind,
-      entry: draft.entry,
-      ...(embedUrl === undefined || embedUrl === null ? {} : { embed: { mode: "webview", url: embedUrl } }),
-      ...this.manifestBase(record, identity),
-    };
-    const result = await this.finalizePack(record, pack, manifest, identity);
-    record.status = "serving";
-    await this.store.writeEnv(record);
-    await trashPaths([pack.staging], this.paths.root);
-    return result;
+    try {
+      const draft = await readAndValidateManifest(pack.packRoot);
+      const embedCandidate =
+        recipe.embedUrl === "web"
+          ? embeddedWeb?.urls.mesh ?? embeddedWeb?.urls.local
+          : recipe.embedUrl;
+      // Never bake a publisher-loopback URL into a cross-machine artifact — the
+      // manifest is immutable, and that webview could only ever load on the
+      // publishing machine (F2 covers preview_url, not this).
+      const embedUrl =
+        typeof embedCandidate === "string" && embedCandidate.startsWith("http://127.0.0.1") ? undefined : embedCandidate;
+      const manifest: TestpackManifest = {
+        testpack: 1,
+        app: record.app,
+        branch: record.branch,
+        commit: record.commit,
+        platform,
+        kind: recipe.kind,
+        entry: draft.entry,
+        ...(embedUrl === undefined || embedUrl === null ? {} : { embed: { mode: "webview", url: embedUrl } }),
+        ...this.manifestBase(record, identity),
+      };
+      const result = await this.finalizePack(record, pack, manifest, identity);
+      record.status = "serving";
+      await this.store.writeEnv(record);
+      return result;
+    } finally {
+      await trashPaths([pack.staging], this.paths.root).catch(() => undefined);
+    }
   }
 
   private async publishIos(options: {
@@ -613,12 +674,10 @@ export class NectarService {
         throw new NectarError("E_QUOTA", `Serving simulator quota (${config.serving_sim_limit}) reached; run nectar gc or stop an ios env`);
       }
       const initial = await this.initialRecord({ ...options, mode: "ios" });
-      if (initial.old !== undefined) {
-        await this.stopRuntime(initial.old);
-        if (initial.old.sim_udid !== undefined) {
-          initial.record.sim_udid = initial.old.sim_udid;
-          initial.record.sim_device = initial.old.sim_device ?? `nectar-${name}`;
-        }
+      if (initial.old?.sim_udid !== undefined) {
+        initial.record.sim_udid = initial.old.sim_udid;
+        initial.record.sim_device = initial.old.sim_device ?? `nectar-${name}`;
+        await this.store.writeEnv(initial.record);
       }
       const record = await this.checkout(initial.record, initial.old, options.worktree);
       try {
@@ -626,40 +685,46 @@ export class NectarService {
         const ios = branchRecipe.ios;
         if (ios === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [ios]");
         const pack = await this.buildSimpack(record, ios, initial.identity);
-        const warnings: string[] = [];
-        let axUrl: string | null = null;
-        if (ios.stream) {
-          // simctl failures fail the publish (F13); serve-sim failures only degrade it (F12).
-          const sim = await this.ensureSimDevice(record, ios);
-          await installSimApp(sim.udid, pack.entryPath);
-          await launchSimApp(sim.udid, ios.bundleId);
-          try {
-            const stream = await this.startSimStream(record, sim.device, ios.readyTimeoutMs, initial.identity, initial.old, records);
-            warnings.push(...stream.warnings);
-            const streamUrl = record.urls.mesh ?? record.urls.local;
-            if (streamUrl !== null) axUrl = `${streamUrl}/ax`;
-          } catch (error) {
-            const cleanupErrors = await this.cleanupRuntime(record);
-            warnings.push(
-              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}${cleanupErrors.length === 0 ? "" : ` (cleanup: ${cleanupErrors.join("; ")})`}`,
-            );
+        try {
+          const warnings: string[] = [];
+          let axUrl: string | null = null;
+          if (ios.stream) {
+            // simctl failures fail the publish (F13); serve-sim failures only degrade it (F12).
+            const sim = await this.ensureSimDevice(record, ios);
+            await installSimApp(sim.udid, pack.entryPath);
+            await launchSimApp(sim.udid, ios.bundleId);
+            try {
+              const stream = await this.startSimStream(record, sim.device, ios.readyTimeoutMs, initial.identity, initial.old);
+              warnings.push(...stream.warnings);
+              const streamUrl = record.urls.mesh ?? record.urls.local;
+              if (streamUrl !== null) axUrl = `${streamUrl}/ax`;
+            } catch (error) {
+              // F12: keep the simpack, but never leak the stream process, its serve
+              // entry, or a booted RAM-heavy simulator that no longer streams.
+              const cleanupErrors = await this.cleanupRuntime(record);
+              if (record.sim_udid !== undefined) await shutdownSim(record.sim_udid).catch(() => undefined);
+              warnings.push(
+                `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}${cleanupErrors.length === 0 ? "" : ` (cleanup: ${cleanupErrors.join("; ")})`}`,
+              );
+            }
+          } else {
+            warnings.push("[ios].stream is false — simpack-only publish");
           }
-        } else {
-          warnings.push("[ios].stream is false — simpack-only publish");
+          record.status = "serving";
+          await this.store.writeEnv(record);
+          return this.publishResult(record, this.packetFields(record), warnings, {
+            sha256: pack.sha256,
+            size_bytes: pack.size,
+            ...(record.sim_udid === undefined ? {} : { sim_udid: record.sim_udid }),
+            ax_url: axUrl,
+          });
+        } finally {
+          await trashPaths([pack.staging], this.paths.root).catch(() => undefined);
         }
-        await trashPaths([pack.staging], this.paths.root);
-        record.status = "serving";
-        await this.store.writeEnv(record);
-        return this.publishResult(record, this.packetFields(record), warnings, {
-          sha256: pack.sha256,
-          size_bytes: pack.size,
-          ...(record.sim_udid === undefined ? {} : { sim_udid: record.sim_udid }),
-          ax_url: axUrl,
-        });
       } catch (error) {
-        await this.stopRuntime(record);
-        record.status = "crashed";
-        await this.store.writeEnv(record);
+        // F13: a crashed publish must not leak the nectar-created device.
+        await this.releaseSim(record).catch(() => undefined);
+        await this.rollbackRuntime(record, error);
         throw error;
       }
     });
@@ -672,20 +737,27 @@ export class NectarService {
   ): Promise<{ sha256: string; size: number; entryPath: string; staging: string }> {
     const platform = iosSimPlatform();
     const pack = await this.packArtifact(record, recipe.pack, platform);
-    const draft = await readAndValidateManifest(pack.packRoot);
-    const manifest: TestpackManifest = {
-      testpack: 1,
-      app: record.app,
-      branch: record.branch,
-      commit: record.commit,
-      platform,
-      kind: "ios-sim",
-      entry: draft.entry,
-      bundle_id: recipe.bundleId,
-      ...this.manifestBase(record, identity),
-    };
-    const result = await this.finalizePack(record, pack, manifest, identity);
-    return { ...result, entryPath: path.join(pack.packRoot, draft.entry), staging: pack.staging };
+    try {
+      const draft = await readAndValidateManifest(pack.packRoot);
+      const manifest: TestpackManifest = {
+        testpack: 1,
+        app: record.app,
+        branch: record.branch,
+        commit: record.commit,
+        platform,
+        kind: "ios-sim",
+        entry: draft.entry,
+        bundle_id: recipe.bundleId,
+        ...this.manifestBase(record, identity),
+      };
+      const result = await this.finalizePack(record, pack, manifest, identity);
+      // The staging tree stays alive on success — simctl installs entryPath from it;
+      // the publishIos caller trashes it when done.
+      return { ...result, entryPath: path.join(pack.packRoot, draft.entry), staging: pack.staging };
+    } catch (error) {
+      await trashPaths([pack.staging], this.paths.root).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async ensureSimDevice(record: EnvRecord, recipe: IosRecipe): Promise<{ udid: string; device: string }> {
@@ -714,40 +786,13 @@ export class NectarService {
     readyTimeoutMs: number,
     identity: MachineIdentity,
     old: EnvRecord | undefined,
-    records: EnvRecord[],
   ): Promise<{ warnings: string[] }> {
-    const reservedUpstream = new Set(
-      records.filter((item) => item.name !== record.name).map((item) => item.serve?.upstream_port).filter((port): port is number => port !== undefined),
-    );
-    reservedUpstream.add(identity.config.pack_server_port);
-    const reservedTailnet = new Set(
-      records.filter((item) => item.name !== record.name).map((item) => item.serve?.tailnet_port).filter((port): port is number => port !== undefined),
-    );
-    reservedTailnet.add(443);
-    const upstreamPort = await allocatePort({
-      start: identity.config.upstream_port_start,
-      end: identity.config.upstream_port_end,
-      reserved: reservedUpstream,
-      ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
-    });
-    const tailnetPort = await allocatePort({
-      start: identity.config.tailnet_port_start,
-      end: identity.config.tailnet_port_end,
-      reserved: reservedTailnet,
-      ...(old?.serve?.tailnet_port === undefined ? {} : { preferred: old.serve.tailnet_port }),
-    });
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
-    const command = serveSimCommand(deviceName, upstreamPort);
     const childEnv = scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree });
-    const processRecord = spawnDetached(command, record.worktree, childEnv, log);
-    record.serve = {
-      cmd: command,
-      pid: processRecord.pid,
-      pgid: processRecord.pgid,
-      upstream_port: upstreamPort,
-      tailnet_port: tailnetPort,
-    };
-    record.urls.local = `http://127.0.0.1:${upstreamPort}`;
+    const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
+      const command = serveSimCommand(deviceName, port);
+      return { ...spawnDetached(command, record.worktree, childEnv, log), cmd: command };
+    });
     const warnings: string[] = [];
     await this.store.writeEnv(record);
     const readyUrl = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
@@ -803,7 +848,16 @@ export class NectarService {
     if (record.status !== "serving" || record.serve === undefined) return record;
     if (!pidAlive(record.serve.pid) || !(await portOpen(record.serve.upstream_port))) {
       record.status = "crashed";
-      await this.store.writeEnv(record);
+      // Locked, best-effort: writing this stale snapshot back directly would
+      // clobber a concurrent republish's fresh serve block (a lost update that
+      // leaks the new detached server forever).
+      await this.store.updateEnv(
+        record.name,
+        (current) => {
+          if (current.status === "serving") current.status = "crashed";
+        },
+        { bestEffort: true },
+      );
     }
     return record;
   }
@@ -845,7 +899,7 @@ export class NectarService {
   }
 
   private isQualified(name: string): boolean {
-    return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios");
+    return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios") || name.endsWith("--cli") || name.endsWith("--backend");
   }
 
   private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
@@ -858,9 +912,20 @@ export class NectarService {
       const record = await this.refreshLiveness(original);
       if (touch) {
         const now = new Date();
-        record.last_touched_at = now.toISOString();
-        record.expires_at = expiresAt(now, DEFAULT_TTL);
-        await this.store.writeEnv(record);
+        // Touch re-arms the env's own TTL (SPEC §4.4), not the 72 h default; a
+        // busy lock means a publish is mid-flight — skip, the env is active anyway.
+        const touched = await this.store.updateEnv(
+          record.name,
+          (current) => {
+            current.last_touched_at = now.toISOString();
+            current.expires_at = expiresAt(now, current.ttl_ms ?? DEFAULT_TTL);
+          },
+          { bestEffort: true },
+        );
+        if (touched !== undefined) {
+          record.last_touched_at = touched.last_touched_at;
+          record.expires_at = touched.expires_at;
+        }
       }
       const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
       resolutions.push({
@@ -916,7 +981,10 @@ export class NectarService {
       throw new NectarError("E_NOT_FOUND", `Host '${host}' returned an invalid Nectar envelope`);
     }
     if (!envelope.ok || envelope.result === undefined) {
-      throw new NectarError("E_NOT_FOUND", envelope.error?.message ?? `Host '${host}' could not resolve the environment`);
+      // Keep the remote's semantic code when it has one — flattening E_QUOTA or
+      // E_PLATFORM into "not found" sends the caller down the wrong remediation.
+      const code = isErrorCode(envelope.error?.code) ? envelope.error.code : "E_NOT_FOUND";
+      throw new NectarError(code, envelope.error?.message ?? `Host '${host}' could not resolve the environment`);
     }
     return envelope.result as T;
   }
@@ -966,7 +1034,7 @@ export class NectarService {
   private async launch(target: string): Promise<void> {
     const launcher = process.env.NECTAR_LAUNCH_BIN ?? "open";
     const result = await runCommand(launcher, [target]);
-    if (result.exitCode !== 0) throw new NectarError("E_NOT_FOUND", result.stderr.trim() || `Could not open ${target}`);
+    if (result.exitCode !== 0) throw new NectarError("E_INTERNAL", result.stderr.trim() || `Could not open ${target}`);
   }
 
   private async fetchTestpack(resolved: ResolveResult): Promise<{ zip: string; cacheHit: boolean }> {
@@ -1104,36 +1172,50 @@ export class NectarService {
     if (names.length === 0) throw new NectarError("E_NOT_FOUND", `Environment '${input}' was not found`);
     const now = new Date();
     for (const name of names) {
-      const record = await this.store.readEnv(name);
-      record.last_touched_at = now.toISOString();
-      record.expires_at = expiresAt(now, ttlMs);
-      await this.store.writeEnv(record);
+      await this.store.updateEnv(name, (record) => {
+        record.last_touched_at = now.toISOString();
+        record.expires_at = expiresAt(now, ttlMs);
+        // An explicit touch re-arms with the requested TTL from here on.
+        record.ttl_ms = ttlMs;
+      });
     }
     return { envs: names, touched_at: now.toISOString(), expires_at: expiresAt(now, ttlMs) };
   }
 
   async stop(name: string): Promise<Record<string, unknown>> {
-    const record = await this.store.readEnv(validateEnvName(name));
-    await this.stopRuntime(record);
-    record.status = "stopped";
-    await this.store.writeEnv(record);
+    const record = await this.store.withLock(validateEnvName(name), async () => {
+      const current = await this.store.readEnv(name);
+      await this.stopRuntime(current);
+      // Only running-ish states collapse to stopped; expired/cold stay where gc
+      // put them so ls/resolve keep telling the truth.
+      if (current.status === "serving" || current.status === "publishing" || current.status === "crashed") {
+        current.status = "stopped";
+      }
+      await this.store.writeEnv(current);
+      return current;
+    });
     return { env: record.name, status: record.status };
   }
 
   async remove(name: string, force = false): Promise<Record<string, unknown>> {
-    const record = await this.store.readEnv(validateEnvName(name));
-    await this.stopRuntime(record);
-    await this.releaseSim(record);
-    const targets = [
-      path.join(this.paths.packs, record.name),
-      path.join(this.paths.evidence, record.name),
-      path.join(this.paths.logs, record.name),
-      this.store.envFile(record.name),
-    ];
-    if (!record.borrowed_worktree) targets.push(record.worktree);
-    await trashPaths(targets, this.paths.root);
-    await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
-    return { env: record.name, removed: true, forced: force, borrowed_worktree_preserved: record.borrowed_worktree };
+    return this.store.withLock(validateEnvName(name), async () => {
+      const record = await this.store.readEnv(name);
+      if (record.status === "serving" && !force) {
+        throw new NectarError("E_USAGE", `Environment '${name}' is serving; pass --force to stop and remove it`);
+      }
+      await this.stopRuntime(record);
+      await this.releaseSim(record);
+      const targets = [
+        path.join(this.paths.packs, record.name),
+        path.join(this.paths.evidence, record.name),
+        path.join(this.paths.logs, record.name),
+        this.store.envFile(record.name),
+      ];
+      if (!record.borrowed_worktree) targets.push(record.worktree);
+      await trashPaths(targets, this.paths.root);
+      await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+      return { env: record.name, removed: true, forced: force, borrowed_worktree_preserved: record.borrowed_worktree };
+    });
   }
 
   async gc(options: { dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
@@ -1151,6 +1233,7 @@ export class NectarService {
       });
     }
     const report: Array<{ env: string; action: GcTransition }> = [];
+    const skipped: Array<{ env: string; reason: string }> = [];
     for (const snapshot of await this.store.listEnvs()) {
       const action = gcTransition(snapshot, now);
       if (action === undefined) continue;
@@ -1158,30 +1241,44 @@ export class NectarService {
         report.push({ env: snapshot.name, action });
         continue;
       }
-      await this.store.withLock(snapshot.name, async () => {
-        const record = await this.store.readEnv(snapshot.name);
-        const currentAction = gcTransition(record, now);
-        if (currentAction === undefined) return;
-        report.push({ env: record.name, action: currentAction });
-        if (currentAction === "expire") {
-          await this.stopRuntime(record);
-          record.status = "expired";
-          await this.store.writeEnv(record);
-        } else if (currentAction === "cold") {
-          await this.stopRuntime(record);
-          await this.releaseSim(record);
-          if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
-          record.status = "cold";
-          await this.store.writeEnv(record);
-          await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
-        } else {
-          await this.stopRuntime(record);
-          await this.releaseSim(record);
-          if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
-          await trashPaths([this.store.envFile(record.name)], this.paths.root);
-          await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
-        }
-      });
+      // One busy or poisoned env must never abort the sweep — gc is hourly and
+      // contractually safe to run alongside publishes (SPEC §7).
+      try {
+        await this.store.withLock(snapshot.name, async () => {
+          const record = await this.store.readEnv(snapshot.name);
+          const currentAction = gcTransition(record, now);
+          if (currentAction === undefined) return;
+          report.push({ env: record.name, action: currentAction });
+          if (currentAction === "expire") {
+            await this.stopRuntime(record);
+            record.status = "expired";
+            await this.store.writeEnv(record);
+          } else if (currentAction === "cold") {
+            await this.stopRuntime(record);
+            await this.releaseSim(record);
+            if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
+            record.status = "cold";
+            await this.store.writeEnv(record);
+            await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+          } else {
+            // Reap removes everything the env ever owned, exactly like `rm`.
+            await this.stopRuntime(record);
+            await this.releaseSim(record);
+            const targets = [
+              path.join(this.paths.packs, record.name),
+              path.join(this.paths.evidence, record.name),
+              path.join(this.paths.logs, record.name),
+              this.store.envFile(record.name),
+            ];
+            if (!record.borrowed_worktree) targets.push(record.worktree);
+            await trashPaths(targets, this.paths.root);
+            await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+          }
+        });
+      } catch (error) {
+        const nectarError = asNectarError(error);
+        skipped.push({ env: snapshot.name, reason: nectarError.code === "E_BUSY" ? "busy" : nectarError.message });
+      }
     }
     const current = await this.store.listEnvs();
     const protectedPacks = new Set(
@@ -1191,15 +1288,23 @@ export class NectarService {
     );
     const candidates = await packCandidates(this.paths.packs, protectedPacks);
     const packPrunes = selectPackPrunes(candidates, config.pack_quota_bytes);
+    const staleStaging = await findStaleStaging(this.paths.packs, now.getTime() - 60 * 60_000);
+    const evidencePrunes = await selectEvidencePrunes(this.paths.evidence, config.evidence_quota_bytes);
     if (!options.dryRun) {
-      await trashPaths(packPrunes.map((file) => file.path), this.paths.root);
-      await this.store.writeConfig({ ...config, last_gc_at: now.toISOString() });
+      await trashPaths([...packPrunes.map((file) => file.path), ...staleStaging, ...evidencePrunes], this.paths.root);
+      // Re-read before stamping — doctor --fix may have registered the pack
+      // server while the sweep ran, and this snapshot would clobber it.
+      const fresh = await this.store.readConfig();
+      await this.store.writeConfig({ ...fresh, last_gc_at: now.toISOString() });
     }
     return {
       dry_run: options.dryRun ?? false,
       transitions: report,
       serve_orphans: orphanReport,
+      skipped,
       packs_pruned: packPrunes.map((file) => ({ file: path.relative(this.paths.root, file.path), size_bytes: file.size })),
+      staging_pruned: staleStaging.map((file) => path.relative(this.paths.root, file)),
+      evidence_pruned: evidencePrunes.map((file) => path.relative(this.paths.root, file)),
       ran_at: now.toISOString(),
     };
   }
@@ -1239,7 +1344,7 @@ export class NectarService {
     }
     if (!(await portOpen(port))) {
       await stopProcessGroup(child.pgid);
-      throw new NectarError("E_CHECKOUT", `Read-only pack server did not start on 127.0.0.1:${port}`, {
+      throw new NectarError("E_INTERNAL", `Read-only pack server did not start on 127.0.0.1:${port}`, {
         log_tail: await logTail(this.paths, "pack-store"),
       });
     }

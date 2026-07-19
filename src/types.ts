@@ -115,6 +115,7 @@ export interface EnvRecord {
   published_at: string;
   expires_at: string;
   last_touched_at: string;
+  ttl_ms?: number;
   publisher: Publisher;
   packet_hint?: string;
   evidence: string[];

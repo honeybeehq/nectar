@@ -28,6 +28,8 @@ async function execute<T>(command: string, action: () => Promise<T>): Promise<vo
 }
 
 const program = new Command();
+const explicitHelp = argv.some((arg) => arg === "--help" || arg === "-h") || argv[0] === "help";
+
 program
   .name("nectar")
   .description("Taste review-ready branches on the mesh")
@@ -39,6 +41,10 @@ program
   .configureOutput({
     writeErr: (text) => {
       if (!jsonRequested) process.stderr.write(text);
+    },
+    // Auto-displayed help (bare `nectar --json`) must not pollute the envelope stream.
+    writeOut: (text) => {
+      if (!jsonRequested || explicitHelp) process.stdout.write(text);
     },
   });
 
@@ -131,13 +137,19 @@ program
 try {
   await program.parseAsync(process.argv);
 } catch (error) {
-  if (error instanceof CommanderError && (error.code === "commander.helpDisplayed" || error.code === "commander.version")) {
+  const commanderCode = error instanceof CommanderError ? error.code : undefined;
+  const helpShown = commanderCode === "commander.helpDisplayed" || commanderCode === "commander.help";
+  if (commanderCode === "commander.version" || (helpShown && explicitHelp)) {
     process.exitCode = 0;
   } else {
+    // Argv-level failures are usage errors, not mode/checkout problems — a bee
+    // must be told to fix its invocation, not follow F-table remediation.
     const nectarError =
       error instanceof NectarError
         ? error
-        : new NectarError("E_NO_MODE", error instanceof Error ? error.message : String(error));
+        : helpShown
+          ? new NectarError("E_USAGE", "No command given; run nectar --help for the command list")
+          : new NectarError("E_USAGE", error instanceof Error ? error.message : String(error));
     if (jsonRequested) output(errorEnvelope(requestedCommand, nectarError), true);
     else process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);
     process.exitCode = 1;

@@ -25,6 +25,16 @@ function table(value: unknown, label: string): TomlTable {
   return value as TomlTable;
 }
 
+// A typo'd key silently falling back to a default (ready_timout → 90 s) is the
+// worst kind of recipe bug; unknown keys fail loudly instead.
+function rejectUnknownKeys(value: TomlTable, known: string[], label: string): void {
+  for (const key of Object.keys(value)) {
+    if (!known.includes(key)) {
+      throw new NectarError("E_NO_RECIPE", `Unknown key '${key}' in ${label}; expected one of: ${known.join(", ")}`);
+    }
+  }
+}
+
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new NectarError("E_NO_RECIPE", `${label} must be a non-empty string`);
@@ -35,6 +45,7 @@ function requiredString(value: unknown, label: string): string {
 function parseWeb(value: unknown): WebRecipe | undefined {
   if (value === undefined) return undefined;
   const web = table(value, "[web]");
+  rejectUnknownKeys(web, ["serve", "ready_path", "ready_timeout", "env"], "[web]");
   const envValue = web.env === undefined ? {} : table(web.env, "[web].env");
   const env: Record<string, string> = {};
   for (const [key, item] of Object.entries(envValue)) {
@@ -48,7 +59,8 @@ function parseWeb(value: unknown): WebRecipe | undefined {
     readyPath: web.ready_path === undefined ? "/" : requiredString(web.ready_path, "[web].ready_path"),
     readyTimeoutMs: parseDuration(
       web.ready_timeout === undefined ? "90s" : requiredString(web.ready_timeout, "[web].ready_timeout"),
-      "ready_timeout",
+      "[web].ready_timeout",
+      "E_NO_RECIPE",
     ),
     env,
   };
@@ -57,6 +69,7 @@ function parseWeb(value: unknown): WebRecipe | undefined {
 function parseDesktop(value: unknown): DesktopRecipe | undefined {
   if (value === undefined) return undefined;
   const desktop = table(value, "[desktop]");
+  rejectUnknownKeys(desktop, ["pack", "kind", "embed_url"], "[desktop]");
   const kind = desktop.kind;
   if (kind !== "electron" && kind !== "native") {
     throw new NectarError("E_NO_RECIPE", "[desktop].kind must be 'electron' or 'native'");
@@ -78,6 +91,7 @@ function parseDesktop(value: unknown): DesktopRecipe | undefined {
 function parseIos(value: unknown): IosRecipe | undefined {
   if (value === undefined) return undefined;
   const ios = table(value, "[ios]");
+  rejectUnknownKeys(ios, ["pack", "bundle_id", "device", "runtime", "stream", "ready_timeout"], "[ios]");
   const bundleId = requiredString(ios.bundle_id, "[ios].bundle_id");
   if (!/^[A-Za-z0-9.-]+$/.test(bundleId)) {
     throw new NectarError("E_NO_RECIPE", "[ios].bundle_id must be a reverse-DNS bundle identifier");
@@ -93,7 +107,8 @@ function parseIos(value: unknown): IosRecipe | undefined {
     stream: ios.stream === undefined ? true : ios.stream,
     readyTimeoutMs: parseDuration(
       ios.ready_timeout === undefined ? "90s" : requiredString(ios.ready_timeout, "[ios].ready_timeout"),
-      "ready_timeout",
+      "[ios].ready_timeout",
+      "E_NO_RECIPE",
     ),
   };
 }
@@ -108,6 +123,15 @@ export async function loadRecipe(repo: string): Promise<Recipe> {
     } catch (error) {
       throw new NectarError("E_NO_RECIPE", `Invalid nectar.toml: ${error instanceof Error ? error.message : String(error)}`);
     }
+    // A [secrets]/[cli]/[backend] section silently ignored means an app running
+    // without its declared secrets or a mode the caller believes exists — fail
+    // loudly until v0.1 implements them.
+    for (const section of ["secrets", "cli", "backend"]) {
+      if (value[section] !== undefined) {
+        throw new NectarError("E_NO_RECIPE", `[${section}] is deferred to v0.1 and would be silently ignored; remove it from nectar.toml`);
+      }
+    }
+    rejectUnknownKeys(value, ["name", "web", "desktop", "ios"], "nectar.toml");
     const name = value.name === undefined ? fallbackName : appSlug(requiredString(value.name, "name"));
     const web = parseWeb(value.web);
     const desktop = parseDesktop(value.desktop);
@@ -154,6 +178,9 @@ function detectPackageManager(repo: string, packageManager: unknown): "pnpm" | "
 
 export function selectMode(recipe: Recipe, requested?: string): Mode {
   if (requested !== undefined) {
+    if (requested === "cli" || requested === "backend") {
+      throw new NectarError("E_NO_MODE", `Mode '${requested}' is deferred to v0.1`);
+    }
     if (requested !== "web" && requested !== "desktop" && requested !== "ios") {
       throw new NectarError("E_NO_MODE", `Mode '${requested}' is not supported`);
     }

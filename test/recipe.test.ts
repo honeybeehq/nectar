@@ -81,6 +81,16 @@ embed_url = "web"
     const repo = await tempDir("recipe-missing");
     await expect(loadRecipe(repo)).rejects.toMatchObject({ code: "E_NO_RECIPE" });
     expect(() => selectMode({ name: "x", source: "nectar.toml", web: { serve: "x", readyPath: "/", readyTimeoutMs: 1, env: {} } }, "cli"))
+      .toThrow(/deferred to v0\.1/);
+    expect(() => selectMode({ name: "x", source: "nectar.toml", web: { serve: "x", readyPath: "/", readyTimeoutMs: 1, env: {} } }, "android"))
       .toThrow(/not supported/);
+  });
+
+  it("rejects deferred sections and typo'd keys instead of silently ignoring them", async () => {
+    const repo = await tempDir("recipe-strict");
+    await writeFile(path.join(repo, "nectar.toml"), `name = "x"\n[web]\nserve = "s"\n[secrets]\nAPI = "project/x/api-test"\n`);
+    await expect(loadRecipe(repo)).rejects.toMatchObject({ code: "E_NO_RECIPE" });
+    await writeFile(path.join(repo, "nectar.toml"), `name = "x"\n[web]\nserve = "s"\nready_timout = "5s"\n`);
+    await expect(loadRecipe(repo)).rejects.toThrow(/Unknown key 'ready_timout'/);
   });
 });

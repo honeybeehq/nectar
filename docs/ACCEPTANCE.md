@@ -210,7 +210,7 @@ requires the second machine and a live desk packet.
 
 | criterion | status | evidence |
 | --- | --- | --- |
-| AC1 | needs-second-machine | real A publish + IPv4 hairpin mesh fetch passed; B remains |
+| AC1 | pass | 2026-07-19: real publish of `landoy--main--web` (Next.js + migrated review DB, recipe committed in-repo); Tormod verified the mesh URL rendering from multiple tailnet devices. `nectar resolve` *on* a B machine remains unexercised (nectar not yet linked on a second machine) |
 | AC2 | pass-simulated | real republish stability plus two-branch fake-mesh integration |
 | AC3 | needs-second-machine | pack/verify/cache/launch adapter passed; real B + signed Electron app remains |
 | AC4 | needs-second-machine | two-record embed integration passed; remote browser remains |

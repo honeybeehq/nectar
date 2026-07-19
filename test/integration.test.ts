@@ -36,11 +36,18 @@ async function harness(): Promise<{
     packServer,
     `import http from "node:http"; http.createServer((_q, r) => { r.writeHead(404); r.end(); }).listen(Number(process.argv[3]), "127.0.0.1");`,
   );
-  // Own port range: the machine's real nectar (pack server on 4099, envs on 41xx)
-  // and the ios suite (43xx) must never contend with this suite's allocations.
+  // Own port ranges: the machine's real nectar (pack server on 4099, envs on
+  // 41xx, tailnet 8443+) and the ios suite (43xx/87xx) must never contend with
+  // this suite's allocations.
   await writeFile(
     path.join(state, "nectar.json"),
-    JSON.stringify({ upstream_port_start: 4500, upstream_port_end: 4599, pack_server_port: 4499 }),
+    JSON.stringify({
+      upstream_port_start: 4500,
+      upstream_port_end: 4599,
+      pack_server_port: 4499,
+      tailnet_port_start: 8600,
+      tailnet_port_end: 8699,
+    }),
   );
   vi.stubEnv("NECTAR_HOME", state);
   vi.stubEnv("NECTAR_TAILSCALE_BIN", tailscale.binary);
@@ -83,7 +90,7 @@ describe("fixture-backed web publish", () => {
     track(service, env);
     expect(env).toBe("fixture-web--main--web");
     expect(first.packet_fields).toEqual({
-      preview_url: "https://fixture.tailtest.ts.net:8443",
+      preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: null,
       shell_recipe: null,
     });
@@ -95,7 +102,7 @@ describe("fixture-backed web publish", () => {
     expect(second.env).toBe(env);
     expect((second.urls as { mesh: string }).mesh).toBe((first.urls as { mesh: string }).mesh);
     const serveCommands = await readFile(tailscaleLog, "utf8");
-    expect(serveCommands).toContain("--https=8443");
+    expect(serveCommands).toContain("--https=8600");
     expect(serveCommands).not.toMatch(/--https=443(?:\s|$)/);
     expect(serveCommands).not.toContain("funnel");
 
@@ -103,7 +110,7 @@ describe("fixture-backed web publish", () => {
     const otherBranch = await service.publish({ repo, branch: "agent/second", ttl: "1h" });
     track(service, otherBranch.env as string);
     expect(otherBranch.env).toBe("fixture-web--agent-second--web");
-    expect((otherBranch.urls as { mesh: string }).mesh).toBe("https://fixture.tailtest.ts.net:8444");
+    expect((otherBranch.urls as { mesh: string }).mesh).toBe("https://fixture.tailtest.ts.net:8601");
     expect(((await service.list()).envs as Array<{ status: string }>).filter((item) => item.status === "serving")).toHaveLength(2);
 
     const record = (await service.show(env)).env as { serve: { pgid: number } };
@@ -160,7 +167,7 @@ describe("fixture-backed web publish", () => {
     });
     expect(failed.serve).toBeUndefined();
     expect(pidAlive(processId)).toBe(false);
-    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8443 off");
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8600 off");
 
     const recoveryRepo = await initGitRepo({
       "package.json": JSON.stringify({ name: "fixture-recovery", scripts: { dev: "node server.mjs" } }),
@@ -171,7 +178,7 @@ describe("fixture-backed web publish", () => {
     const recoveredRecord = (await service.show(recovered.env as string)).env as {
       serve: { upstream_port: number; tailnet_port: number };
     };
-    expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500, tailnet_port: 8443 });
+    expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500, tailnet_port: 8600 });
   });
 
   it("accepts an IPv6-loopback server and routes Tailscale Serve to the healthy address", async () => {
@@ -185,7 +192,7 @@ describe("fixture-backed web publish", () => {
     const local = (result.urls as { local: string }).local;
     expect(local).toMatch(/^http:\/\/\[::1\]:45\d\d$/);
     expect(await fetch(local).then(async (response) => response.text())).toBe("scrubbed");
-    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8443 ${local}`);
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8600 ${local}`);
   });
 });
 
@@ -219,7 +226,7 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
     expect(result.env).toBe(desktopEnv);
     expect(result.web_env).toBe(webEnv);
     expect(result.packet_fields).toEqual({
-      preview_url: "https://fixture.tailtest.ts.net:8443",
+      preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: `nectar://fixture/${desktopEnv}`,
       shell_recipe: null,
     });
@@ -240,7 +247,7 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
       branch: "main",
       platform: "darwin-arm64",
       kind: "electron",
-      embed: { mode: "webview", url: "https://fixture.tailtest.ts.net:8443" },
+      embed: { mode: "webview", url: "https://fixture.tailtest.ts.net:8600" },
     });
 
     const firstOpen = await service.open(result.ref as string);
@@ -300,7 +307,7 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     const published = await service.publish({ repo });
     const env = published.env as string;
     track(service, env);
-    expect(published.packet_fields).toMatchObject({ preview_url: "https://fixture.tailtest.ts.net:8443" });
+    expect(published.packet_fields).toMatchObject({ preview_url: "https://fixture.tailtest.ts.net:8600" });
 
     const byFqdn = await service.resolve(`nectar://FIXTURE.TAILTEST.TS.NET/${env}`);
     expect(byFqdn).toMatchObject({ env, host: "fixture.tailtest.ts.net", is_self: true });
@@ -352,6 +359,42 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     await expect(service.store.readEnv(env)).rejects.toMatchObject({ code: "E_NOT_FOUND" });
   });
 
+  it("gc skips a busy env instead of aborting, and implicit touches keep the publish TTL", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-busy", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const published = await service.publish({ repo, ttl: "1m" });
+    const env = published.env as string;
+    track(service, env);
+
+    // A desk resolve touches the env but re-arms its own 1 m TTL — not 72 h.
+    await service.resolve(env);
+    const touched = await service.store.readEnv(env);
+    expect(new Date(touched.expires_at).getTime() - Date.now()).toBeLessThan(10 * 60_000);
+
+    const record = await service.store.readEnv(env);
+    record.published_at = new Date(Date.now() - 2 * 60_000).toISOString();
+    record.last_touched_at = record.published_at;
+    record.expires_at = new Date(Date.now() - 60_000).toISOString();
+    await service.store.writeEnv(record);
+
+    // Hold the env lock as a concurrent publish would: the hourly gc must report
+    // a skip and finish, not abort the sweep with E_BUSY.
+    let release: (() => void) | undefined;
+    const held = service.store.withLock(env, async () => new Promise<void>((resolve) => (release = resolve)));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const swept = await service.gc();
+    expect(swept.transitions).toEqual([]);
+    expect(swept.skipped).toEqual([{ env, reason: "busy" }]);
+    release?.();
+    await held;
+
+    const rerun = await service.gc();
+    expect(rerun.transitions).toEqual([{ env, action: "expire" }]);
+  });
+
   it("doctor fixes only 8440 and flags a planted 443 conflict", async () => {
     const { service, tailscaleLog } = await harness();
     const fixed = await service.doctor({ fix: true });
@@ -383,7 +426,7 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
       "FAKE_TS_SERVE_STATUS",
       JSON.stringify({
         Web: {
-          "fixture.tailtest.ts.net:8444": {
+          "fixture.tailtest.ts.net:8601": {
             Handlers: { "/": { Proxy: "http://127.0.0.1:4598" } },
           },
         },
@@ -394,13 +437,13 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     const diagnosedChecks = diagnosed.checks as Array<{ name: string; status: string; message: string }>;
     const orphanCheck = diagnosedChecks.find((check) => check.name === "serve-orphans");
     expect(orphanCheck).toMatchObject({ name: "serve-orphans", status: "fail" });
-    expect(orphanCheck?.message).toContain(":8444 -> http://127.0.0.1:4598");
+    expect(orphanCheck?.message).toContain(":8601 -> http://127.0.0.1:4598");
 
     const fixed = await service.doctor({ fix: true });
     expect(fixed.checks).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "serve-orphans", status: "pass", fixed: true })]),
     );
-    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8444 off");
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8601 off");
 
     const orphanEnv = record({
       name: "fixture-orphan--main--web",
@@ -409,16 +452,16 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
         pid: 999_999,
         pgid: 999_999,
         upstream_port: 4597,
-        tailnet_port: 8445,
+        tailnet_port: 8602,
       },
-      urls: { local: "http://127.0.0.1:4597", mesh: "https://fixture.tailtest.ts.net:8445" },
+      urls: { local: "http://127.0.0.1:4597", mesh: "https://fixture.tailtest.ts.net:8602" },
     });
     await service.store.writeEnv(orphanEnv);
     vi.stubEnv(
       "FAKE_TS_SERVE_STATUS",
       JSON.stringify({
         Web: {
-          "fixture.tailtest.ts.net:8445": {
+          "fixture.tailtest.ts.net:8602": {
             Handlers: { "/": { Proxy: "http://127.0.0.1:4597" } },
           },
         },
@@ -427,7 +470,7 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect(await service.gc()).toMatchObject({
       serve_orphans: [
         {
-          tailnet_port: 8445,
+          tailnet_port: 8602,
           target: "http://127.0.0.1:4597",
           env: orphanEnv.name,
           fixed: true,
@@ -440,9 +483,9 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
       urls: { local: null, mesh: null },
       failure: { code: "E_SERVE_ORPHAN" },
     });
-    expect(cleaned.failure?.message).toContain(":8445");
+    expect(cleaned.failure?.message).toContain(":8602");
     expect(cleaned.serve).toBeUndefined();
-    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8445 off");
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8602 off");
   });
 
   it("resolves a mode-qualified remote ref through tailscale ssh and reports F9", async () => {

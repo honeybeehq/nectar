@@ -45,7 +45,7 @@ describe("read-only loopback pack server", () => {
     expect(await rawGet(address.port, "/demo--main--desktop/demo.testpack.zip")).toEqual({ status: 200, body: "verified-pack" });
     expect((await rawGet(address.port, "/")).status).toBe(404);
     expect((await rawGet(address.port, "/demo--main--desktop/")).status).toBe(404);
-    expect((await rawGet(address.port, "/%2e%2e/outside/secret.txt")).body).not.toContain("must-not-serve");
+    expect(await rawGet(address.port, "/%2e%2e/outside/secret.txt")).toMatchObject({ status: 404 });
     expect((await rawGet(address.port, "/linked-secret")).status).toBe(404);
     expect((await rawGet(address.port, "/linked-directory/secret.txt")).status).toBe(404);
   });

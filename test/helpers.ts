@@ -1,11 +1,23 @@
 import path from "node:path";
 import os from "node:os";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { runCommand } from "../src/commands.js";
 import type { EnvRecord, Mode } from "../src/types.js";
 
+const createdTempDirs: string[] = [];
+
 export async function tempDir(prefix: string): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), `nectar-${prefix}-`));
+  const dir = await mkdtemp(path.join(os.tmpdir(), `nectar-${prefix}-`));
+  createdTempDirs.push(dir);
+  return dir;
+}
+
+// Registered as an afterAll in test/setup.ts — without it every run leaks
+// state/repo/fake-bin trees into os.tmpdir() forever.
+export async function cleanupTempDirs(): Promise<void> {
+  for (const dir of createdTempDirs.splice(0)) {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export function record(overrides: Partial<EnvRecord> = {}): EnvRecord {

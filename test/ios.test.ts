@@ -60,10 +60,17 @@ http.createServer((_request, response) => {
 }).listen(port, "127.0.0.1");
 `,
   );
-  // Own port range so this suite never contends with integration.test's 4099-41xx.
+  // Own port ranges so this suite never contends with integration.test (45xx/86xx),
+  // the machine's real nectar (4099/41xx/8443+), or anything else local.
   await writeFile(
     path.join(state, "nectar.json"),
-    JSON.stringify({ upstream_port_start: 4300, upstream_port_end: 4399, pack_server_port: 4299 }),
+    JSON.stringify({
+      upstream_port_start: 4300,
+      upstream_port_end: 4399,
+      pack_server_port: 4299,
+      tailnet_port_start: 8700,
+      tailnet_port_end: 8799,
+    }),
   );
   vi.stubEnv("NECTAR_HOME", state);
   vi.stubEnv("NECTAR_TAILSCALE_BIN", tailscale.binary);
@@ -111,12 +118,12 @@ describe("ios publish", () => {
     track(service, env);
     expect(result.env).toBe(env);
     expect(result.packet_fields).toEqual({
-      preview_url: "https://fixture.tailtest.ts.net:8443",
+      preview_url: "https://fixture.tailtest.ts.net:8700",
       testpack_ref: `nectar://fixture/${env}`,
       shell_recipe: null,
     });
     expect(result.sim_udid).toBe("FAKE-UDID-0001");
-    expect(result.ax_url).toBe("https://fixture.tailtest.ts.net:8443/ax");
+    expect(result.ax_url).toBe("https://fixture.tailtest.ts.net:8700/ax");
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/);
     // Fetch whatever upstream port the allocator picked — asserting a fixed port races
     // against anything else on the machine holding the low end of the range.
@@ -129,12 +136,15 @@ describe("ios publish", () => {
     expect(sim).toMatch(/simctl install FAKE-UDID-0001 .*app\/Dummy\.app/);
     expect(sim).toContain("simctl launch FAKE-UDID-0001 no.trmd.dummy");
 
+    // Resolving on the publishing host itself: is_self, and the local stream URL is
+    // preferred over the mesh URL (same-node hairpin 403s — DECISIONS D4 amendment).
+    // The port comes from the allocator, never a hardcoded low end of the range.
     const resolved = await service.resolve(`nectar://fixture/${env}`);
     expect(resolved).toMatchObject({
       mode: "ios",
       bundle_id: "no.trmd.dummy",
       is_self: true,
-      ax_url: "http://127.0.0.1:4300/ax",
+      ax_url: `http://127.0.0.1:${published.serve.upstream_port}/ax`,
       platform: "ios-sim-arm64",
     });
 
@@ -188,7 +198,10 @@ describe("ios publish", () => {
       vi.stubEnv("NECTAR_IOS_OPEN", "stream");
       return service.open(result.ref as string);
     })();
-    expect(streamed).toMatchObject({ surface: "stream", opened: "http://127.0.0.1:4300" });
+    // Same-node open prefers the local stream URL (is_self), on whatever upstream
+    // port the allocator picked.
+    const published = (await service.show(result.env as string)).env as { serve: { upstream_port: number } };
+    expect(streamed).toMatchObject({ surface: "stream", opened: `http://127.0.0.1:${published.serve.upstream_port}` });
   });
 });
 

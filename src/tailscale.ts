@@ -23,10 +23,10 @@ export async function tailnetIdentity(): Promise<TailnetIdentity | undefined> {
   }
 }
 
-export async function serveWeb(tailnetPort: number, upstreamPort: number): Promise<boolean> {
+export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<boolean> {
   const result = await runCommand(
     binary(),
-    ["serve", "--bg", "--yes", `--https=${tailnetPort}`, `http://127.0.0.1:${upstreamPort}`],
+    ["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl],
     { timeoutMs: 10_000 },
   );
   return result.exitCode === 0;
@@ -37,8 +37,13 @@ export async function servePackStore(target: string): Promise<{ ok: boolean; mes
   return { ok: result.exitCode === 0, message: result.stderr.trim() || result.stdout.trim() };
 }
 
-export async function stopServe(tailnetPort: number): Promise<void> {
-  await runCommand(binary(), ["serve", `--https=${tailnetPort}`, "off"], { timeoutMs: 10_000 }).catch(() => undefined);
+export async function stopServe(tailnetPort: number): Promise<boolean> {
+  try {
+    const result = await runCommand(binary(), ["serve", `--https=${tailnetPort}`, "off"], { timeoutMs: 10_000 });
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function serveStatus(): Promise<unknown> {

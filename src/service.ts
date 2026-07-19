@@ -16,7 +16,7 @@ import {
   stopProcessGroup,
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
-import { NectarError } from "./errors.js";
+import { asNectarError, NectarError } from "./errors.js";
 import { envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, selectMode } from "./recipe.js";
 import { getPaths, type NectarPaths } from "./paths.js";
@@ -204,10 +204,43 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      await stopProcessGroup(record.serve.pgid);
-      await stopServe(record.serve.tailnet_port);
+      await Promise.all([stopProcessGroup(record.serve.pgid), stopServe(record.serve.tailnet_port)]);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
+  }
+
+  private async cleanupRuntime(record: EnvRecord): Promise<string[]> {
+    const cleanupErrors: string[] = [];
+    if (record.serve !== undefined) {
+      const owned = record.serve;
+      const [processCleanup, serveCleanup] = await Promise.allSettled([
+        stopProcessGroup(owned.pgid),
+        stopServe(owned.tailnet_port),
+      ]);
+      if (processCleanup.status === "rejected") {
+        cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.reason)}`);
+      }
+      if (serveCleanup.status === "rejected" || !serveCleanup.value) {
+        cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+      }
+    }
+    delete record.serve;
+    record.urls = { local: null, mesh: null };
+    return cleanupErrors;
+  }
+
+  private async rollbackRuntime(record: EnvRecord, error: unknown): Promise<void> {
+    const failure = asNectarError(error);
+    const cleanupErrors = await this.cleanupRuntime(record);
+    record.status = "crashed";
+    record.failure = {
+      code: failure.code,
+      message: failure.message,
+      failed_at: new Date().toISOString(),
+      log_tail: await logTail(this.paths, record.name),
+      ...(cleanupErrors.length === 0 ? {} : { cleanup_errors: cleanupErrors }),
+    };
+    await this.store.writeEnv(record);
   }
 
   private async releaseSim(record: EnvRecord): Promise<void> {
@@ -247,9 +280,7 @@ export class NectarService {
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
         return await this.startWeb(record, web, initial.identity, initial.old, records);
       } catch (error) {
-        await this.stopRuntime(record);
-        record.status = "crashed";
-        await this.store.writeEnv(record);
+        await this.rollbackRuntime(record, error);
         throw error;
       }
     });
@@ -300,43 +331,46 @@ export class NectarService {
     };
     record.urls.local = `http://127.0.0.1:${upstreamPort}`;
     const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`];
+    await this.store.writeEnv(record);
+
+    const readyUrl = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
+    if (readyUrl === undefined) {
+      throw new NectarError("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${recipe.readyPath} within ${recipe.readyTimeoutMs}ms`, {
+        log_tail: await logTail(this.paths, record.name),
+      });
+    }
+    record.urls.local = readyUrl.origin;
+    warnings[0] = `portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`;
     let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, upstreamPort);
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
     if (meshReady && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
       warnings.push(`tailscale unavailable or logged out — mesh URL unavailable; preview_url fell back to ${record.urls.local}`);
     }
-    await this.store.writeEnv(record);
-
-    const ready = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
-    if (!ready) {
-      await this.stopRuntime(record);
-      record.status = "crashed";
-      await this.store.writeEnv(record);
-      throw new NectarError("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${recipe.readyPath} within ${recipe.readyTimeoutMs}ms`, {
-        log_tail: await logTail(this.paths, record.name),
-      });
-    }
     record.status = "serving";
+    delete record.failure;
     await this.store.writeEnv(record);
     return { record, warnings };
   }
 
-  private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<boolean> {
+  private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {
     const pathPart = readyPath.startsWith("/") ? readyPath : `/${readyPath}`;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}${pathPart}`, { signal: AbortSignal.timeout(1_000) });
-        if (response.status === 200) return true;
-      } catch {
-        // Process startup races are expected until the timeout.
+      for (const host of ["127.0.0.1", "[::1]"]) {
+        const url = new URL(`http://${host}:${port}${pathPart}`);
+        try {
+          const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+          if (response.status === 200) return url;
+        } catch {
+          // Process startup races are expected until the timeout.
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return false;
+    return undefined;
   }
 
   private async publishDesktop(options: {
@@ -545,10 +579,9 @@ export class NectarService {
             const streamUrl = record.urls.mesh ?? record.urls.local;
             if (streamUrl !== null) axUrl = `${streamUrl}/ax`;
           } catch (error) {
-            delete record.serve;
-            record.urls = { local: null, mesh: null };
+            const cleanupErrors = await this.cleanupRuntime(record);
             warnings.push(
-              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}`,
+              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}${cleanupErrors.length === 0 ? "" : ` (cleanup: ${cleanupErrors.join("; ")})`}`,
             );
           }
         } else {
@@ -656,8 +689,16 @@ export class NectarService {
     };
     record.urls.local = `http://127.0.0.1:${upstreamPort}`;
     const warnings: string[] = [];
+    await this.store.writeEnv(record);
+    const readyUrl = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
+    if (readyUrl === undefined) {
+      throw new NectarError("E_SERVE_TIMEOUT", `serve-sim did not become ready within ${readyTimeoutMs}ms`, {
+        log_tail: await logTail(this.paths, record.name),
+      });
+    }
+    record.urls.local = readyUrl.origin;
     let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, upstreamPort);
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
     if (meshReady && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
@@ -665,14 +706,6 @@ export class NectarService {
       warnings.push(`tailscale unavailable or logged out — stream URL fell back to ${record.urls.local}`);
     }
     await this.store.writeEnv(record);
-    const ready = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
-    if (!ready) {
-      await stopProcessGroup(processRecord.pgid);
-      await stopServe(tailnetPort);
-      throw new NectarError("E_SERVE_TIMEOUT", `serve-sim did not become ready within ${readyTimeoutMs}ms`, {
-        log_tail: await logTail(this.paths, record.name),
-      });
-    }
     return { warnings };
   }
 

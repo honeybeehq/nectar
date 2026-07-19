@@ -51,6 +51,14 @@ export interface EnvUrls {
   mesh: string | null;
 }
 
+export interface PublishFailure {
+  code: string;
+  message: string;
+  failed_at: string;
+  log_tail: string[];
+  cleanup_errors?: string[];
+}
+
 export interface Publisher {
   hive_bee?: string;
   hive_session?: string;
@@ -112,6 +120,7 @@ export interface EnvRecord {
   evidence: string[];
   install_hash?: string;
   testpack?: TestpackRecord;
+  failure?: PublishFailure;
 }
 
 export interface MachineConfig {

@@ -2,7 +2,7 @@ import path from "node:path";
 import http from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runCommand, stopProcessGroup } from "../src/commands.js";
+import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
 import { extractTestpack } from "../src/testpack.js";
 import { fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
@@ -128,16 +128,64 @@ describe("fixture-backed web publish", () => {
     expect(result.warnings).toEqual([expect.stringContaining("portless"), expect.stringContaining("tailscale unavailable")]);
   });
 
-  it("implements F4 with E_SERVE_TIMEOUT, a crashed record, and a log tail", async () => {
-    const { service } = await harness();
+  it("rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT", async () => {
+    const { service, tailscaleLog } = await harness();
     const repo = await initGitRepo({
       "nectar.toml": `name="fixture-broken"\n[web]\nserve="node broken.mjs"\nready_timeout="250ms"\n`,
-      "broken.mjs": `console.log("never ready"); setInterval(() => {}, 1000);\n`,
+      "broken.mjs": `console.log("never ready", process.pid); setInterval(() => {}, 1000);\n`,
     });
-    await expect(service.publish({ repo })).rejects.toMatchObject({ code: "E_SERVE_TIMEOUT", details: { log_tail: ["never ready"] } });
+    let publishError: unknown;
+    try {
+      await service.publish({ repo });
+    } catch (error) {
+      publishError = error;
+    }
+    const failure = publishError as { code?: string; details?: { log_tail?: string[] } };
+    const processLine = failure.details?.log_tail?.find((item) => item.startsWith("never ready "));
+    const processId = Number(processLine?.split(" ").at(-1));
+    expect(failure.code).toBe("E_SERVE_TIMEOUT");
+    expect(processId).toBeGreaterThan(1);
     const env = "fixture-broken--main--web";
     track(service, env);
-    expect(((await service.show(env)).env as { status: string }).status).toBe("crashed");
+    const failed = (await service.show(env)).env as {
+      status: string;
+      serve?: unknown;
+      urls: { local: string | null; mesh: string | null };
+      failure: { code: string; log_tail: string[] };
+    };
+    expect(failed).toMatchObject({
+      status: "crashed",
+      urls: { local: null, mesh: null },
+      failure: { code: "E_SERVE_TIMEOUT", log_tail: [expect.stringContaining("never ready")] },
+    });
+    expect(failed.serve).toBeUndefined();
+    expect(pidAlive(processId)).toBe(false);
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8443 off");
+
+    const recoveryRepo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-recovery", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const recovered = await service.publish({ repo: recoveryRepo });
+    track(service, recovered.env as string);
+    const recoveredRecord = (await service.show(recovered.env as string)).env as {
+      serve: { upstream_port: number; tailnet_port: number };
+    };
+    expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500, tailnet_port: 8443 });
+  });
+
+  it("accepts an IPv6-loopback server and routes Tailscale Serve to the healthy address", async () => {
+    const { service, tailscaleLog } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-ipv6", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('"127.0.0.1"', '"::1"'),
+    });
+    const result = await service.publish({ repo });
+    track(service, result.env as string);
+    const local = (result.urls as { local: string }).local;
+    expect(local).toMatch(/^http:\/\/\[::1\]:45\d\d$/);
+    expect(await fetch(local).then(async (response) => response.text())).toBe("scrubbed");
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8443 ${local}`);
   });
 });
 

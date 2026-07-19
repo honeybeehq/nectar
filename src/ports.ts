@@ -1,21 +1,32 @@
 import net from "node:net";
 import { NectarError } from "./errors.js";
 
-export async function portAvailable(port: number): Promise<boolean> {
+async function portAvailableOnHost(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
-    server.once("error", () => resolve(false));
-    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+    server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EADDRNOTAVAIL"));
+    server.listen({ host, port, exclusive: true }, () => {
       server.close(() => resolve(true));
     });
   });
 }
 
-export async function portOpen(port: number, timeoutMs = 300): Promise<boolean> {
+export async function portAvailable(port: number): Promise<boolean> {
+  const [ipv4, ipv6] = await Promise.all([
+    portAvailableOnHost(port, "127.0.0.1"),
+    portAvailableOnHost(port, "::1"),
+  ]);
+  return ipv4 && ipv6;
+}
+
+export async function portOpenOnHost(port: number, host: string, timeoutMs = 300): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = net.createConnection({ host, port });
+    let settled = false;
     const done = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
       socket.destroy();
       resolve(value);
     };
@@ -24,6 +35,14 @@ export async function portOpen(port: number, timeoutMs = 300): Promise<boolean> 
     socket.once("timeout", () => done(false));
     socket.once("error", () => done(false));
   });
+}
+
+export async function portOpen(port: number, timeoutMs = 300): Promise<boolean> {
+  const results = await Promise.all([
+    portOpenOnHost(port, "127.0.0.1", timeoutMs),
+    portOpenOnHost(port, "::1", timeoutMs),
+  ]);
+  return results.some(Boolean);
 }
 
 export async function allocatePort(options: {

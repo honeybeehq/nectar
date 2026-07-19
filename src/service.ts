@@ -33,12 +33,30 @@ import {
   stopServe,
   tailnetIdentity,
 } from "./tailscale.js";
-import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
+import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
 import { gcTransition, packCandidates, selectPackPrunes, type GcTransition } from "./gc.js";
+import {
+  bootSim,
+  createSimDevice,
+  deleteSim,
+  installSimApp,
+  iosSimPlatform,
+  isAppleSiliconMac,
+  launchSimApp,
+  listDevices,
+  listDeviceTypes,
+  listRuntimes,
+  selectDeviceType,
+  selectRuntime,
+  serveSimCommand,
+  shutdownSim,
+} from "./sim.js";
+import { ensureAxHelper, findAppPid } from "./ax.js";
 import type {
   DesktopRecipe,
   EnvRecord,
+  IosRecipe,
   MachineConfig,
   Mode,
   MultiResolveResult,
@@ -116,6 +134,7 @@ export class NectarService {
       const web = await this.publishWeb(publishOptions);
       return this.publishResult(web.record, this.packetFields(web.record), web.warnings);
     }
+    if (mode === "ios") return this.publishIos(publishOptions);
     return this.publishDesktop(publishOptions);
   }
 
@@ -184,9 +203,22 @@ export class NectarService {
   }
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
-    if (record.serve === undefined) return;
-    await stopProcessGroup(record.serve.pgid);
-    await stopServe(record.serve.tailnet_port);
+    if (record.serve !== undefined) {
+      await stopProcessGroup(record.serve.pgid);
+      await stopServe(record.serve.tailnet_port);
+    }
+    if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
+  }
+
+  private async releaseSim(record: EnvRecord): Promise<void> {
+    if (record.mode !== "ios" || record.sim_udid === undefined) return;
+    // Only ever delete devices Nectar created (nectar- prefix guard).
+    if ((record.sim_device ?? "").startsWith("nectar-")) {
+      await shutdownSim(record.sim_udid);
+      await deleteSim(record.sim_udid);
+    }
+    delete record.sim_udid;
+    delete record.sim_device;
   }
 
   private async publishWeb(options: {
@@ -355,13 +387,11 @@ export class NectarService {
     });
   }
 
-  private async buildTestpack(
+  private async packArtifact(
     record: EnvRecord,
-    recipe: DesktopRecipe,
-    identity: MachineIdentity,
-    embeddedWeb?: EnvRecord,
-  ): Promise<{ sha256: string; size: number }> {
-    const platform = currentPlatform();
+    packCmd: string,
+    platform: string,
+  ): Promise<{ staging: string; packRoot: string; base: string; packDirectory: string }> {
     const base = `${record.app}--${branchSlug(record.branch)}--${platform}`;
     const packDirectory = path.join(this.paths.packs, record.name);
     const staging = path.join(packDirectory, `.staging-${process.pid}-${crypto.randomBytes(3).toString("hex")}`);
@@ -373,11 +403,11 @@ export class NectarService {
       NECTAR_PACK_OUT: packOut,
       NECTAR_PACK_PLATFORM: platform,
     });
-    const built = await runShell(recipe.pack, record.worktree, env);
+    const built = await runShell(packCmd, record.worktree, env);
     if (built.exitCode !== 0) {
       record.status = "crashed";
       await this.store.writeEnv(record);
-      throw new NectarError("E_INSTALL", `Desktop pack command failed: ${recipe.pack}`, {
+      throw new NectarError("E_INSTALL", `Pack command failed: ${packCmd}`, {
         log_tail: [...built.stdout.split("\n"), ...built.stderr.split("\n")].filter(Boolean).slice(-40),
       });
     }
@@ -392,8 +422,58 @@ export class NectarService {
       }
       packRoot = await extractTestpack(zipOut, path.join(staging, "extracted"));
     }
-    const draft = await readAndValidateManifest(packRoot);
+    return { staging, packRoot, base, packDirectory };
+  }
+
+  private manifestBase(record: EnvRecord, identity: MachineIdentity): Pick<TestpackManifest, "built_at" | "built_by"> {
     const publisher = record.publisher;
+    return {
+      built_at: new Date().toISOString(),
+      built_by: {
+        ...(publisher.hive_bee === undefined ? {} : { hive_bee: publisher.hive_bee }),
+        ...(publisher.hive_session === undefined ? {} : { hive_session: publisher.hive_session }),
+        host: identity.host,
+      },
+    };
+  }
+
+  private async finalizePack(
+    record: EnvRecord,
+    pack: { staging: string; packRoot: string; base: string; packDirectory: string },
+    manifest: TestpackManifest,
+    identity: MachineIdentity,
+  ): Promise<{ sha256: string; size: number }> {
+    await writeManifest(pack.packRoot, manifest);
+    const temporaryZip = path.join(pack.staging, `${pack.base}.testpack.zip`);
+    await createTestpackZip(pack.packRoot, temporaryZip, `${pack.base}.testpack`);
+    const digest = await sha256(temporaryZip);
+    const size = await fileSize(temporaryZip);
+    const finalZip = path.join(pack.packDirectory, `${pack.base}.testpack.zip`);
+    await trashPaths([finalZip], this.paths.root);
+    await rename(temporaryZip, finalZip);
+    const encodedPath = `${encodeURIComponent(record.name)}/${encodeURIComponent(path.basename(finalZip))}`;
+    record.testpack = {
+      file: path.basename(finalZip),
+      sha256: digest,
+      size_bytes: size,
+      platform: manifest.platform,
+      entry: manifest.entry,
+      url: identity.dnsName === undefined ? null : `https://${identity.dnsName}:8440/${encodedPath}`,
+      ...(manifest.bundle_id === undefined ? {} : { bundle_id: manifest.bundle_id }),
+    };
+    await this.store.writeEnv(record);
+    return { sha256: digest, size };
+  }
+
+  private async buildTestpack(
+    record: EnvRecord,
+    recipe: DesktopRecipe,
+    identity: MachineIdentity,
+    embeddedWeb?: EnvRecord,
+  ): Promise<{ sha256: string; size: number }> {
+    const platform = currentPlatform();
+    const pack = await this.packArtifact(record, recipe.pack, platform);
+    const draft = await readAndValidateManifest(pack.packRoot);
     const embedUrl =
       recipe.embedUrl === "web"
         ? embeddedWeb?.urls.mesh ?? embeddedWeb?.urls.local
@@ -407,40 +487,199 @@ export class NectarService {
       kind: recipe.kind,
       entry: draft.entry,
       ...(embedUrl === undefined || embedUrl === null ? {} : { embed: { mode: "webview", url: embedUrl } }),
-      built_at: new Date().toISOString(),
-      built_by: {
-        ...(publisher.hive_bee === undefined ? {} : { hive_bee: publisher.hive_bee }),
-        ...(publisher.hive_session === undefined ? {} : { hive_session: publisher.hive_session }),
-        host: identity.host,
-      },
+      ...this.manifestBase(record, identity),
     };
-    await writeManifest(packRoot, manifest);
-    const temporaryZip = path.join(staging, `${base}.testpack.zip`);
-    await createTestpackZip(packRoot, temporaryZip, `${base}.testpack`);
-    const digest = await sha256(temporaryZip);
-    const size = await fileSize(temporaryZip);
-    const finalZip = path.join(packDirectory, `${base}.testpack.zip`);
-    await trashPaths([finalZip], this.paths.root);
-    await rename(temporaryZip, finalZip);
-    const encodedPath = `${encodeURIComponent(record.name)}/${encodeURIComponent(path.basename(finalZip))}`;
-    record.testpack = {
-      file: path.basename(finalZip),
-      sha256: digest,
-      size_bytes: size,
-      platform,
-      entry: manifest.entry,
-      url: identity.dnsName === undefined ? null : `https://${identity.dnsName}:8440/${encodedPath}`,
-    };
+    const result = await this.finalizePack(record, pack, manifest, identity);
     record.status = "serving";
     await this.store.writeEnv(record);
-    await trashPaths([staging], this.paths.root);
-    return { sha256: digest, size };
+    await trashPaths([pack.staging], this.paths.root);
+    return result;
+  }
+
+  private async publishIos(options: {
+    repo: string;
+    branch: string;
+    recipe: Recipe;
+    ttlMs: number;
+    worktree?: string;
+    packet?: string;
+  }): Promise<Record<string, unknown>> {
+    if (options.recipe.ios === undefined) throw new NectarError("E_NO_RECIPE", "Recipe does not declare [ios]");
+    if (process.env.NECTAR_XCRUN_BIN === undefined && !isAppleSiliconMac()) {
+      throw new NectarError("E_PLATFORM", "--mode ios requires an Apple Silicon macOS host with Xcode simulators");
+    }
+    const name = envName(options.recipe.name, options.branch, "ios");
+    return this.store.withLock(name, async () => {
+      const records = await this.store.listEnvs();
+      const activeSims = records.filter(
+        (record) => record.name !== name && record.mode === "ios" && record.status === "serving" && record.serve !== undefined,
+      );
+      const config = await this.store.readConfig();
+      if (activeSims.length >= config.serving_sim_limit) {
+        throw new NectarError("E_QUOTA", `Serving simulator quota (${config.serving_sim_limit}) reached; run nectar gc or stop an ios env`);
+      }
+      const initial = await this.initialRecord({ ...options, mode: "ios" });
+      if (initial.old !== undefined) {
+        await this.stopRuntime(initial.old);
+        if (initial.old.sim_udid !== undefined) {
+          initial.record.sim_udid = initial.old.sim_udid;
+          initial.record.sim_device = initial.old.sim_device ?? `nectar-${name}`;
+        }
+      }
+      const record = await this.checkout(initial.record, initial.old, options.worktree);
+      try {
+        const branchRecipe = await loadRecipe(record.worktree);
+        const ios = branchRecipe.ios;
+        if (ios === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [ios]");
+        const pack = await this.buildSimpack(record, ios, initial.identity);
+        const warnings: string[] = [];
+        let axUrl: string | null = null;
+        if (ios.stream) {
+          // simctl failures fail the publish (F13); serve-sim failures only degrade it (F12).
+          const sim = await this.ensureSimDevice(record, ios);
+          await installSimApp(sim.udid, pack.entryPath);
+          await launchSimApp(sim.udid, ios.bundleId);
+          try {
+            const stream = await this.startSimStream(record, sim.device, ios.readyTimeoutMs, initial.identity, initial.old, records);
+            warnings.push(...stream.warnings);
+            const streamUrl = record.urls.mesh ?? record.urls.local;
+            if (streamUrl !== null) axUrl = `${streamUrl}/ax`;
+          } catch (error) {
+            delete record.serve;
+            record.urls = { local: null, mesh: null };
+            warnings.push(
+              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else {
+          warnings.push("[ios].stream is false — simpack-only publish");
+        }
+        await trashPaths([pack.staging], this.paths.root);
+        record.status = "serving";
+        await this.store.writeEnv(record);
+        return this.publishResult(record, this.packetFields(record), warnings, {
+          sha256: pack.sha256,
+          size_bytes: pack.size,
+          ...(record.sim_udid === undefined ? {} : { sim_udid: record.sim_udid }),
+          ax_url: axUrl,
+        });
+      } catch (error) {
+        await this.stopRuntime(record);
+        record.status = "crashed";
+        await this.store.writeEnv(record);
+        throw error;
+      }
+    });
+  }
+
+  private async buildSimpack(
+    record: EnvRecord,
+    recipe: IosRecipe,
+    identity: MachineIdentity,
+  ): Promise<{ sha256: string; size: number; entryPath: string; staging: string }> {
+    const platform = iosSimPlatform();
+    const pack = await this.packArtifact(record, recipe.pack, platform);
+    const draft = await readAndValidateManifest(pack.packRoot);
+    const manifest: TestpackManifest = {
+      testpack: 1,
+      app: record.app,
+      branch: record.branch,
+      commit: record.commit,
+      platform,
+      kind: "ios-sim",
+      entry: draft.entry,
+      bundle_id: recipe.bundleId,
+      ...this.manifestBase(record, identity),
+    };
+    const result = await this.finalizePack(record, pack, manifest, identity);
+    return { ...result, entryPath: path.join(pack.packRoot, draft.entry), staging: pack.staging };
+  }
+
+  private async ensureSimDevice(record: EnvRecord, recipe: IosRecipe): Promise<{ udid: string; device: string }> {
+    const deviceName = record.sim_device ?? `nectar-${record.name}`;
+    if (record.sim_udid !== undefined) {
+      const devices = await listDevices();
+      if (devices.some((device) => device.udid === record.sim_udid && device.available)) {
+        await bootSim(record.sim_udid);
+        return { udid: record.sim_udid, device: deviceName };
+      }
+      delete record.sim_udid;
+    }
+    const runtime = selectRuntime(await listRuntimes(), recipe.runtime);
+    const deviceType = selectDeviceType(await listDeviceTypes(), recipe.device);
+    const udid = await createSimDevice(deviceName, deviceType.identifier, runtime.identifier);
+    record.sim_udid = udid;
+    record.sim_device = deviceName;
+    await this.store.writeEnv(record);
+    await bootSim(udid);
+    return { udid, device: deviceName };
+  }
+
+  private async startSimStream(
+    record: EnvRecord,
+    deviceName: string,
+    readyTimeoutMs: number,
+    identity: MachineIdentity,
+    old: EnvRecord | undefined,
+    records: EnvRecord[],
+  ): Promise<{ warnings: string[] }> {
+    const reservedUpstream = new Set(
+      records.filter((item) => item.name !== record.name).map((item) => item.serve?.upstream_port).filter((port): port is number => port !== undefined),
+    );
+    reservedUpstream.add(identity.config.pack_server_port);
+    const reservedTailnet = new Set(
+      records.filter((item) => item.name !== record.name).map((item) => item.serve?.tailnet_port).filter((port): port is number => port !== undefined),
+    );
+    reservedTailnet.add(443);
+    const upstreamPort = await allocatePort({
+      start: identity.config.upstream_port_start,
+      end: identity.config.upstream_port_end,
+      reserved: reservedUpstream,
+      ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
+    });
+    const tailnetPort = await allocatePort({
+      start: identity.config.tailnet_port_start,
+      end: identity.config.tailnet_port_end,
+      reserved: reservedTailnet,
+      ...(old?.serve?.tailnet_port === undefined ? {} : { preferred: old.serve.tailnet_port }),
+    });
+    const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
+    const command = serveSimCommand(deviceName, upstreamPort);
+    const childEnv = scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree });
+    const processRecord = spawnDetached(command, record.worktree, childEnv, log);
+    record.serve = {
+      cmd: command,
+      pid: processRecord.pid,
+      pgid: processRecord.pgid,
+      upstream_port: upstreamPort,
+      tailnet_port: tailnetPort,
+    };
+    record.urls.local = `http://127.0.0.1:${upstreamPort}`;
+    const warnings: string[] = [];
+    let meshReady = false;
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, upstreamPort);
+    if (meshReady && identity.dnsName !== undefined) {
+      record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
+    } else {
+      record.urls.mesh = null;
+      warnings.push(`tailscale unavailable or logged out — stream URL fell back to ${record.urls.local}`);
+    }
+    await this.store.writeEnv(record);
+    const ready = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
+    if (!ready) {
+      await stopProcessGroup(processRecord.pgid);
+      await stopServe(tailnetPort);
+      throw new NectarError("E_SERVE_TIMEOUT", `serve-sim did not become ready within ${readyTimeoutMs}ms`, {
+        log_tail: await logTail(this.paths, record.name),
+      });
+    }
+    return { warnings };
   }
 
   private packetFields(record: EnvRecord): PacketFields {
     return {
-      preview_url: record.mode === "web" ? record.urls.mesh ?? record.urls.local : null,
-      testpack_ref: record.mode === "desktop" ? record.ref : null,
+      preview_url: record.mode === "web" || record.mode === "ios" ? record.urls.mesh ?? record.urls.local : null,
+      testpack_ref: record.mode === "desktop" || record.mode === "ios" ? record.ref : null,
       shell_recipe: null,
     };
   }
@@ -512,7 +751,7 @@ export class NectarService {
   }
 
   private isQualified(name: string): boolean {
-    return name.endsWith("--web") || name.endsWith("--desktop");
+    return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios");
   }
 
   private async localResolve(name: string, host: string, touch = true): Promise<ResolveResult | MultiResolveResult> {
@@ -529,6 +768,7 @@ export class NectarService {
         record.expires_at = expiresAt(now, DEFAULT_TTL);
         await this.store.writeEnv(record);
       }
+      const streamUrl = record.urls.mesh ?? record.urls.local;
       resolutions.push({
         env: record.name,
         mode: record.mode,
@@ -538,6 +778,8 @@ export class NectarService {
         size_bytes: record.testpack?.size_bytes ?? null,
         platform: record.testpack?.platform ?? null,
         entry: record.testpack?.entry ?? null,
+        bundle_id: record.testpack?.bundle_id ?? null,
+        ax_url: record.mode === "ios" && record.status === "serving" && streamUrl !== null ? `${streamUrl}/ax` : null,
         host,
         status: record.status,
         ...(record.status === "crashed" ? { log_tail: await logTail(this.paths, record.name) } : {}),
@@ -576,7 +818,7 @@ export class NectarService {
     return envelope.result as T;
   }
 
-  async open(input: string): Promise<Record<string, unknown>> {
+  async open(input: string, options: { noAx?: boolean } = {}): Promise<Record<string, unknown>> {
     const resolved = await this.resolve(input);
     if ("resolutions" in resolved) {
       throw new NectarError("E_NO_MODE", `Environment '${resolved.env}' has multiple modes; use a mode-qualified ref`);
@@ -584,11 +826,10 @@ export class NectarService {
     if (resolved.mode === "web") {
       const url = resolved.urls.mesh ?? resolved.urls.local;
       if (url === null) throw new NectarError("E_NOT_FOUND", `Web environment '${resolved.env}' has no reachable URL`);
-      const launcher = process.env.NECTAR_LAUNCH_BIN ?? "open";
-      const result = await runCommand(launcher, [url]);
-      if (result.exitCode !== 0) throw new NectarError("E_NOT_FOUND", result.stderr.trim() || `Could not open ${url}`);
+      await this.launch(url);
       return { env: resolved.env, mode: resolved.mode, opened: url };
     }
+    if (resolved.mode === "ios") return this.openIos(resolved);
     if (
       resolved.testpack_url === null ||
       resolved.sha256 === null ||
@@ -600,17 +841,7 @@ export class NectarService {
     if (currentPlatform() !== resolved.platform) {
       throw new NectarError("E_PLATFORM", `Testpack is ${resolved.platform}; this machine is ${currentPlatform()}`);
     }
-    const local = await this.store.maybeEnv(resolved.env);
-    const localSource =
-      local?.testpack?.sha256 === resolved.sha256
-        ? path.join(this.paths.packs, local.name, local.testpack.file)
-        : undefined;
-    const fetched = await fetchVerified({
-      url: resolved.testpack_url,
-      expectedSha256: resolved.sha256,
-      paths: this.paths,
-      ...(localSource === undefined ? {} : { localSource }),
-    });
+    const fetched = await this.fetchTestpack(resolved);
     const entry = await extractAndLaunch({
       zip: fetched.zip,
       sha: resolved.sha256,
@@ -618,7 +849,143 @@ export class NectarService {
       expectedEntry: resolved.entry,
       paths: this.paths,
     });
-    return { env: resolved.env, mode: resolved.mode, opened: entry, cache_hit: fetched.cacheHit, sha256: resolved.sha256 };
+    const ax = options.noAx === true ? {} : await this.startDesktopAx(entry);
+    return {
+      env: resolved.env,
+      mode: resolved.mode,
+      opened: entry,
+      cache_hit: fetched.cacheHit,
+      sha256: resolved.sha256,
+      ...ax,
+    };
+  }
+
+  private async launch(target: string): Promise<void> {
+    const launcher = process.env.NECTAR_LAUNCH_BIN ?? "open";
+    const result = await runCommand(launcher, [target]);
+    if (result.exitCode !== 0) throw new NectarError("E_NOT_FOUND", result.stderr.trim() || `Could not open ${target}`);
+  }
+
+  private async fetchTestpack(resolved: ResolveResult): Promise<{ zip: string; cacheHit: boolean }> {
+    if (resolved.testpack_url === null || resolved.sha256 === null) {
+      throw new NectarError("E_NOT_FOUND", `Environment '${resolved.env}' has no complete testpack metadata`);
+    }
+    const local = await this.store.maybeEnv(resolved.env);
+    const localSource =
+      local?.testpack?.sha256 === resolved.sha256
+        ? path.join(this.paths.packs, local.name, local.testpack.file)
+        : undefined;
+    return fetchVerified({
+      url: resolved.testpack_url,
+      expectedSha256: resolved.sha256,
+      paths: this.paths,
+      ...(localSource === undefined ? {} : { localSource }),
+    });
+  }
+
+  private async openIos(resolved: ResolveResult): Promise<Record<string, unknown>> {
+    const streamUrl = resolved.urls.mesh ?? resolved.urls.local;
+    const simCapable = (process.platform === "darwin" || process.env.NECTAR_XCRUN_BIN !== undefined) && process.env.NECTAR_IOS_OPEN !== "stream";
+    const openStream = async (): Promise<Record<string, unknown>> => {
+      if (streamUrl === null) {
+        throw new NectarError("E_NOT_FOUND", `iOS environment '${resolved.env}' has no stream URL and no launchable simpack on this host`);
+      }
+      await this.launch(streamUrl);
+      return { env: resolved.env, mode: resolved.mode, opened: streamUrl, surface: "stream", ax_url: resolved.ax_url };
+    };
+    if (!simCapable) return openStream();
+    if (
+      resolved.testpack_url === null ||
+      resolved.sha256 === null ||
+      resolved.entry === null ||
+      resolved.platform === null ||
+      resolved.bundle_id === null
+    ) {
+      return openStream();
+    }
+    if (resolved.platform !== iosSimPlatform()) {
+      if (streamUrl !== null) return openStream();
+      throw new NectarError("E_PLATFORM", `Simpack is ${resolved.platform}; this host is ${iosSimPlatform()}`);
+    }
+    const fetched = await this.fetchTestpack(resolved);
+    const { entry } = await extractVerified({
+      zip: fetched.zip,
+      sha: resolved.sha256,
+      expectedPlatform: resolved.platform,
+      expectedEntry: resolved.entry,
+      paths: this.paths,
+    });
+    try {
+      const udid = await this.ensureScratchSim();
+      await installSimApp(udid, entry);
+      await launchSimApp(udid, resolved.bundle_id);
+      return {
+        env: resolved.env,
+        mode: resolved.mode,
+        opened: entry,
+        surface: "simulator",
+        sim_udid: udid,
+        cache_hit: fetched.cacheHit,
+        sha256: resolved.sha256,
+        ax_url: resolved.ax_url,
+      };
+    } catch (error) {
+      if (error instanceof NectarError && error.code === "E_SIM") {
+        const hint = streamUrl === null ? "" : `; the stream needs no local runtime: ${streamUrl}`;
+        throw new NectarError("E_PLATFORM", `${error.message}${hint}`, error.details);
+      }
+      throw error;
+    }
+  }
+
+  private async ensureScratchSim(): Promise<string> {
+    const devices = await listDevices();
+    const existing = devices.find((device) => device.name === "nectar-open" && device.available);
+    let udid = existing?.udid;
+    if (udid === undefined) {
+      const runtime = selectRuntime(await listRuntimes(), "latest");
+      const deviceType = selectDeviceType(await listDeviceTypes(), "iPhone 17");
+      udid = await createSimDevice("nectar-open", deviceType.identifier, runtime.identifier);
+    }
+    await bootSim(udid);
+    return udid;
+  }
+
+  private async startDesktopAx(entry: string): Promise<Record<string, unknown>> {
+    if (process.platform !== "darwin" && process.env.NECTAR_AX_HELPER === undefined) return {};
+    try {
+      const pid = await findAppPid(entry);
+      if (pid === undefined) return { ax_warning: "could not find a running app process for the AX bridge" };
+      const helper = await ensureAxHelper(this.paths);
+      const config = await this.store.readConfig();
+      const reserved = new Set(
+        (await this.store.listEnvs())
+          .map((record) => record.serve?.upstream_port)
+          .filter((value): value is number => value !== undefined),
+      );
+      reserved.add(config.pack_server_port);
+      const port = await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved });
+      const log = await prepareLog(this.paths, "ax-bridge", config.log_max_bytes);
+      const bridgeEntry = process.env.NECTAR_AX_BRIDGE_ENTRY ?? fileURLToPath(new URL("./ax-bridge.js", import.meta.url));
+      const child = spawnDetachedExecutable(
+        process.execPath,
+        [bridgeEntry, String(pid), String(port), helper],
+        this.paths.root,
+        scrubbedEnvironment(),
+        log,
+      );
+      const deadline = Date.now() + 3_000;
+      while (!(await portOpen(port)) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!(await portOpen(port))) {
+        await stopProcessGroup(child.pgid);
+        return { ax_warning: "AX bridge did not start; see ax-bridge log" };
+      }
+      return { ax_url: `http://127.0.0.1:${port}/ax`, ax_pid: child.pid };
+    } catch (error) {
+      return { ax_warning: `AX bridge unavailable: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
 
   async touch(input: string, ttl = "72h"): Promise<Record<string, unknown>> {
@@ -653,6 +1020,7 @@ export class NectarService {
   async remove(name: string, force = false): Promise<Record<string, unknown>> {
     const record = await this.store.readEnv(validateEnvName(name));
     await this.stopRuntime(record);
+    await this.releaseSim(record);
     const targets = [
       path.join(this.paths.packs, record.name),
       path.join(this.paths.evidence, record.name),
@@ -686,12 +1054,14 @@ export class NectarService {
           await this.store.writeEnv(record);
         } else if (currentAction === "cold") {
           await this.stopRuntime(record);
+          await this.releaseSim(record);
           if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
           record.status = "cold";
           await this.store.writeEnv(record);
           await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
         } else {
           await this.stopRuntime(record);
+          await this.releaseSim(record);
           if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
           await trashPaths([this.store.envFile(record.name)], this.paths.root);
           await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
@@ -880,6 +1250,25 @@ export class NectarService {
       status: gcAge <= 24 * 60 * 60 * 1_000 ? "pass" : "warn",
       message: config.last_gc_at === undefined ? "GC has never run on this machine" : `Last GC: ${config.last_gc_at}`,
     });
+    if (process.platform === "darwin" || process.env.NECTAR_XCRUN_BIN !== undefined) {
+      try {
+        const runtimes = (await listRuntimes()).filter((runtime) => runtime.available);
+        checks.push({
+          name: "ios-toolchain",
+          status: runtimes.length > 0 ? "pass" : "warn",
+          message:
+            runtimes.length > 0
+              ? `simctl is available with ${runtimes.length} iOS runtime(s): ${runtimes.map((runtime) => runtime.version).join(", ")}`
+              : "simctl works but no iOS runtime is installed; run `xcodebuild -downloadPlatform iOS` before --mode ios",
+        });
+      } catch (error) {
+        checks.push({
+          name: "ios-toolchain",
+          status: "warn",
+          message: `simctl unavailable (${error instanceof Error ? error.message : String(error)}); --mode ios will fail on this host`,
+        });
+      }
+    }
     checks.push({
       name: "tailnet-acl",
       status: "warn",

@@ -120,17 +120,13 @@ export async function fetchVerified(options: {
   throw new NectarError("E_PLATFORM", "Testpack sha256 mismatch after one retry; refusing to launch");
 }
 
-export async function extractAndLaunch(options: {
+export async function extractVerified(options: {
   zip: string;
   sha: string;
   expectedPlatform: string;
   expectedEntry: string;
   paths: NectarPaths;
-}): Promise<string> {
-  const platform = currentPlatform();
-  if (platform !== options.expectedPlatform) {
-    throw new NectarError("E_PLATFORM", `Testpack is ${options.expectedPlatform}; this machine is ${platform}`);
-  }
+}): Promise<{ packRoot: string; manifest: TestpackManifest; entry: string }> {
   const destination = path.join(options.paths.packs, ".cache", options.sha);
   let packRoot: string;
   if (await pathExists(destination)) {
@@ -144,7 +140,21 @@ export async function extractAndLaunch(options: {
     throw new NectarError("E_PLATFORM", "Resolved testpack metadata does not match its manifest");
   }
   await runCommand("xattr", ["-dr", "com.apple.quarantine", packRoot]).catch(() => undefined);
-  const entry = path.join(packRoot, manifest.entry);
+  return { packRoot, manifest, entry: path.join(packRoot, manifest.entry) };
+}
+
+export async function extractAndLaunch(options: {
+  zip: string;
+  sha: string;
+  expectedPlatform: string;
+  expectedEntry: string;
+  paths: NectarPaths;
+}): Promise<string> {
+  const platform = currentPlatform();
+  if (platform !== options.expectedPlatform) {
+    throw new NectarError("E_PLATFORM", `Testpack is ${options.expectedPlatform}; this machine is ${platform}`);
+  }
+  const { entry } = await extractVerified(options);
   const launcher = process.env.NECTAR_LAUNCH_BIN ?? "open";
   const result = await runCommand(launcher, [entry]);
   if (result.exitCode !== 0) throw new NectarError("E_PLATFORM", result.stderr.trim() || `Could not launch ${entry}`);

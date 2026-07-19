@@ -1,4 +1,4 @@
-export type Mode = "web" | "desktop";
+export type Mode = "web" | "desktop" | "ios";
 
 export type EnvStatus =
   | "publishing"
@@ -21,11 +21,21 @@ export interface DesktopRecipe {
   embedUrl?: string;
 }
 
+export interface IosRecipe {
+  pack: string;
+  bundleId: string;
+  device: string;
+  runtime: string;
+  stream: boolean;
+  readyTimeoutMs: number;
+}
+
 export interface Recipe {
   name: string;
   source: "nectar.toml" | "package.json";
   web?: WebRecipe;
   desktop?: DesktopRecipe;
+  ios?: IosRecipe;
 }
 
 export interface ServeRecord {
@@ -53,8 +63,9 @@ export interface TestpackManifest {
   branch: string;
   commit: string;
   platform: string;
-  kind: "electron" | "native";
+  kind: "electron" | "native" | "ios-sim";
   entry: string;
+  bundle_id?: string;
   embed?: {
     mode: "webview";
     url: string;
@@ -74,6 +85,7 @@ export interface TestpackRecord {
   platform: string;
   entry: string;
   url: string | null;
+  bundle_id?: string;
 }
 
 export interface EnvRecord {
@@ -88,6 +100,8 @@ export interface EnvRecord {
   borrowed_worktree: boolean;
   status: EnvStatus;
   serve?: ServeRecord;
+  sim_udid?: string;
+  sim_device?: string;
   urls: EnvUrls;
   ref: string;
   published_at: string;
@@ -106,6 +120,7 @@ export interface MachineConfig {
   tailnet_port_start: number;
   tailnet_port_end: number;
   serving_web_limit: number;
+  serving_sim_limit: number;
   pack_quota_bytes: number;
   evidence_quota_bytes: number;
   log_max_bytes: number;
@@ -126,6 +141,8 @@ export interface ResolveResult {
   size_bytes: number | null;
   platform: string | null;
   entry: string | null;
+  bundle_id: string | null;
+  ax_url: string | null;
   host: string;
   status: EnvStatus;
   log_tail?: string[];

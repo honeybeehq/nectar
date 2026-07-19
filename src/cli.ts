@@ -44,8 +44,8 @@ program
 
 program
   .command("publish")
-  .description("publish a web or desktop review environment")
-  .addOption(new Option("--mode <mode>", "web or desktop"))
+  .description("publish a web, desktop, or ios review environment")
+  .addOption(new Option("--mode <mode>", "web, desktop, or ios"))
   .option("--branch <branch>", "branch to publish")
   .option("--ttl <duration>", "time to live", "72h")
   .option("--worktree <path>", "borrow an existing clean worktree")
@@ -80,8 +80,11 @@ program
 
 program
   .command("open <env-or-ref>")
-  .description("open a web environment or verified desktop testpack")
-  .action(async (input: string) => execute("open", async () => new NectarService().open(input)));
+  .description("open a web environment, verified testpack, or ios simpack/stream")
+  .option("--no-ax", "skip starting the desktop AX bridge")
+  .action(async (input: string, options: { ax?: boolean }) =>
+    execute("open", async () => new NectarService().open(input, { noAx: options.ax === false })),
+  );
 
 program
   .command("resolve <env-or-ref>")

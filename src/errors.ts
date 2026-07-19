@@ -9,7 +9,8 @@ export type ErrorCode =
   | "E_TAILNET_DOWN"
   | "E_PLATFORM"
   | "E_NOT_FOUND"
-  | "E_QUOTA";
+  | "E_QUOTA"
+  | "E_SIM";
 
 export class NectarError extends Error {
   readonly code: ErrorCode;

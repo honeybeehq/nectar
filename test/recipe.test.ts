@@ -54,6 +54,29 @@ embed_url = "web"
     expect(recipe.source).toBe("package.json");
   });
 
+  it("parses [ios] with defaults and validates bundle_id", async () => {
+    const repo = await tempDir("recipe-ios");
+    await writeFile(
+      path.join(repo, "nectar.toml"),
+      `name = "orders"\n[ios]\npack = "pnpm ios:sim-release"\nbundle_id = "com.digitech.order"\n`,
+    );
+    const recipe = await loadRecipe(repo);
+    expect(recipe.ios).toEqual({
+      pack: "pnpm ios:sim-release",
+      bundleId: "com.digitech.order",
+      device: "iPhone 17",
+      runtime: "latest",
+      stream: true,
+      readyTimeoutMs: 90_000,
+    });
+    expect(selectMode(recipe)).toBe("ios");
+
+    await writeFile(path.join(repo, "nectar.toml"), `[ios]\npack = "x"\nbundle_id = "bad id!"\n`);
+    await expect(loadRecipe(repo)).rejects.toThrow(/bundle_id/);
+    await writeFile(path.join(repo, "nectar.toml"), `[ios]\npack = "x"\n`);
+    await expect(loadRecipe(repo)).rejects.toThrow(/bundle_id/);
+  });
+
   it("returns stable contract errors for unsupported modes and missing recipes", async () => {
     const repo = await tempDir("recipe-missing");
     await expect(loadRecipe(repo)).rejects.toMatchObject({ code: "E_NO_RECIPE" });

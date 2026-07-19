@@ -36,6 +36,12 @@ async function harness(): Promise<{
     packServer,
     `import http from "node:http"; http.createServer((_q, r) => { r.writeHead(404); r.end(); }).listen(Number(process.argv[3]), "127.0.0.1");`,
   );
+  // Own port range: the machine's real nectar (pack server on 4099, envs on 41xx)
+  // and the ios suite (43xx) must never contend with this suite's allocations.
+  await writeFile(
+    path.join(state, "nectar.json"),
+    JSON.stringify({ upstream_port_start: 4500, upstream_port_end: 4599, pack_server_port: 4499 }),
+  );
   vi.stubEnv("NECTAR_HOME", state);
   vi.stubEnv("NECTAR_TAILSCALE_BIN", tailscale.binary);
   vi.stubEnv("FAKE_TS_LOG", tailscale.log);
@@ -43,6 +49,7 @@ async function harness(): Promise<{
   vi.stubEnv("FAKE_LAUNCH_LOG", launchLog);
   vi.stubEnv("NECTAR_TRASH_BIN", trash);
   vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", packServer);
+  vi.stubEnv("NECTAR_AX_PID_TIMEOUT_MS", "100");
   const service = new NectarService(state);
   services.push({ service, envs: [] });
   return { service, state, fakeDir, tailscaleLog: tailscale.log, launchLog };
@@ -117,7 +124,7 @@ describe("fixture-backed web publish", () => {
     const result = await service.publish({ repo, ttl: "1h" });
     track(service, result.env as string);
     expect((result.urls as { mesh: string | null }).mesh).toBeNull();
-    expect((result.packet_fields as { preview_url: string }).preview_url).toMatch(/^http:\/\/127\.0\.0\.1:41\d\d$/);
+    expect((result.packet_fields as { preview_url: string }).preview_url).toMatch(/^http:\/\/127\.0\.0\.1:45\d\d$/);
     expect(result.warnings).toEqual([expect.stringContaining("portless"), expect.stringContaining("tailscale unavailable")]);
   });
 
@@ -278,8 +285,11 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     const fixed = await service.doctor({ fix: true });
     expect(fixed.healthy).toBe(true);
     expect(fixed.checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: "pack-store-8440", status: "pass", fixed: true })]));
+    // Doctor persists the port it actually started the pack server on (the configured
+    // one when free, otherwise allocated) — assert against that, not a constant.
+    const config = await service.store.readConfig();
     const log = await readFile(tailscaleLog, "utf8");
-    expect(log).toContain("serve --bg --yes --https=8440 http://127.0.0.1:4099");
+    expect(log).toContain(`serve --bg --yes --https=8440 http://127.0.0.1:${config.pack_server_port}`);
     expect(log).not.toContain("--https=443");
     expect(log).not.toContain("funnel");
 

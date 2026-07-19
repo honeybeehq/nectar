@@ -5,7 +5,7 @@ import { parse } from "smol-toml";
 import { parseDuration } from "./duration.js";
 import { NectarError } from "./errors.js";
 import { appSlug } from "./refs.js";
-import type { DesktopRecipe, Mode, Recipe, WebRecipe } from "./types.js";
+import type { DesktopRecipe, IosRecipe, Mode, Recipe, WebRecipe } from "./types.js";
 
 type TomlTable = Record<string, unknown>;
 
@@ -75,6 +75,29 @@ function parseDesktop(value: unknown): DesktopRecipe | undefined {
   };
 }
 
+function parseIos(value: unknown): IosRecipe | undefined {
+  if (value === undefined) return undefined;
+  const ios = table(value, "[ios]");
+  const bundleId = requiredString(ios.bundle_id, "[ios].bundle_id");
+  if (!/^[A-Za-z0-9.-]+$/.test(bundleId)) {
+    throw new NectarError("E_NO_RECIPE", "[ios].bundle_id must be a reverse-DNS bundle identifier");
+  }
+  if (ios.stream !== undefined && typeof ios.stream !== "boolean") {
+    throw new NectarError("E_NO_RECIPE", "[ios].stream must be a boolean");
+  }
+  return {
+    pack: requiredString(ios.pack, "[ios].pack"),
+    bundleId,
+    device: ios.device === undefined ? "iPhone 17" : requiredString(ios.device, "[ios].device"),
+    runtime: ios.runtime === undefined ? "latest" : requiredString(ios.runtime, "[ios].runtime"),
+    stream: ios.stream === undefined ? true : ios.stream,
+    readyTimeoutMs: parseDuration(
+      ios.ready_timeout === undefined ? "90s" : requiredString(ios.ready_timeout, "[ios].ready_timeout"),
+      "ready_timeout",
+    ),
+  };
+}
+
 export async function loadRecipe(repo: string): Promise<Recipe> {
   const toml = await maybeRead(path.join(repo, "nectar.toml"));
   const fallbackName = appSlug(path.basename(repo));
@@ -88,11 +111,13 @@ export async function loadRecipe(repo: string): Promise<Recipe> {
     const name = value.name === undefined ? fallbackName : appSlug(requiredString(value.name, "name"));
     const web = parseWeb(value.web);
     const desktop = parseDesktop(value.desktop);
+    const ios = parseIos(value.ios);
     return {
       name,
       source: "nectar.toml",
       ...(web === undefined ? {} : { web }),
       ...(desktop === undefined ? {} : { desktop }),
+      ...(ios === undefined ? {} : { ios }),
     };
   }
 
@@ -129,8 +154,8 @@ function detectPackageManager(repo: string, packageManager: unknown): "pnpm" | "
 
 export function selectMode(recipe: Recipe, requested?: string): Mode {
   if (requested !== undefined) {
-    if (requested !== "web" && requested !== "desktop") {
-      throw new NectarError("E_NO_MODE", `Mode '${requested}' is not supported in Nectar v0`);
+    if (requested !== "web" && requested !== "desktop" && requested !== "ios") {
+      throw new NectarError("E_NO_MODE", `Mode '${requested}' is not supported`);
     }
     if (recipe[requested] === undefined) {
       throw new NectarError("E_NO_RECIPE", `Recipe does not declare [${requested}]`);
@@ -140,7 +165,8 @@ export function selectMode(recipe: Recipe, requested?: string): Mode {
   const declared: Mode[] = [];
   if (recipe.web !== undefined) declared.push("web");
   if (recipe.desktop !== undefined) declared.push("desktop");
+  if (recipe.ios !== undefined) declared.push("ios");
   if (declared.length === 1) return declared[0] ?? "web";
   if (recipe.web !== undefined) return "web";
-  throw new NectarError("E_NO_MODE", "Choose a declared mode with --mode web|desktop");
+  throw new NectarError("E_NO_MODE", "Choose a declared mode with --mode web|desktop|ios");
 }

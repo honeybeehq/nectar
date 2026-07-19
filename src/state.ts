@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG: MachineConfig = {
   tailnet_port_start: 8443,
   tailnet_port_end: 8542,
   serving_web_limit: 12,
+  serving_sim_limit: 3,
   pack_quota_bytes: 10 * 1024 * 1024 * 1024,
   evidence_quota_bytes: 500 * 1024 * 1024,
   log_max_bytes: 10 * 1024 * 1024,

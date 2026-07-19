@@ -121,6 +121,7 @@ describe("ios publish", () => {
       preview_url: "https://fixture.tailtest.ts.net:8700",
       testpack_ref: `nectar://fixture/${env}`,
       shell_recipe: null,
+      public_url: null,
     });
     expect(result.sim_udid).toBe("FAKE-UDID-0001");
     expect(result.ax_url).toBe("https://fixture.tailtest.ts.net:8700/ax");

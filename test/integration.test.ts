@@ -93,6 +93,7 @@ describe("fixture-backed web publish", () => {
       preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: null,
       shell_recipe: null,
+      public_url: null,
     });
     expect(first.warnings).toEqual([expect.stringContaining("portless")]);
     const localUrl = (first.urls as { local: string }).local;
@@ -229,6 +230,7 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
       preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: `nectar://fixture/${desktopEnv}`,
       shell_recipe: null,
+      public_url: null,
     });
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/);
 

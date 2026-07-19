@@ -14,12 +14,13 @@ export type ErrorCode =
   | "E_BUSY"
   | "E_USAGE"
   | "E_VERIFY"
-  | "E_INTERNAL";
+  | "E_INTERNAL"
+  | "E_EXPOSE";
 
 const CODES = new Set<string>([
   "E_NO_RECIPE", "E_NO_MODE", "E_CHECKOUT", "E_INSTALL", "E_SERVE_TIMEOUT", "E_SMOKE_FAILED",
   "E_PORTS", "E_TAILNET_DOWN", "E_PLATFORM", "E_NOT_FOUND", "E_QUOTA", "E_SIM",
-  "E_BUSY", "E_USAGE", "E_VERIFY", "E_INTERNAL",
+  "E_BUSY", "E_USAGE", "E_VERIFY", "E_INTERNAL", "E_EXPOSE",
 ]);
 
 export function isErrorCode(value: unknown): value is ErrorCode {

@@ -6,7 +6,7 @@ import { NectarService } from "./service.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
-const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor"];
+const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor", "expose", "unexpose"];
 const requestedCommand = argv.find((arg) => knownCommands.includes(arg)) ?? "nectar";
 
 function output(value: unknown, json: boolean): void {
@@ -117,6 +117,33 @@ program
   .action(async (input: string, options: { force?: boolean }) =>
     execute("rm", async () => new NectarService().remove(input, options.force ?? false)),
   );
+
+program
+  .command("expose <env-or-ref>")
+  .description("expose a serving env on the public internet through a configured relay")
+  .requiredOption("--to <target>", "exposures.<name> from machine config (e.g. site)")
+  .addOption(new Option("--gate <gate>", "password or none").choices(["password", "none"]))
+  .option("--password <password>", "explicit gate password (default: generated)")
+  .option("--public", "confirm an ungated (--gate none) exposure")
+  .option("--ttl <duration>", "route lifetime (default: the env's own expiry)")
+  .option("--expose-interactive", "allow exposing an interactive iOS stream")
+  .action(async (input: string, options: { to: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean }) =>
+    execute("expose", async () =>
+      new NectarService().expose(input, {
+        to: options.to,
+        ...(options.gate === undefined ? {} : { gate: options.gate }),
+        ...(options.password === undefined ? {} : { password: options.password }),
+        ...(options.public === undefined ? {} : { public: options.public }),
+        ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
+        ...(options.exposeInteractive === undefined ? {} : { exposeInteractive: options.exposeInteractive }),
+      }),
+    ),
+  );
+
+program
+  .command("unexpose <env-or-ref>")
+  .description("remove an env's public route")
+  .action(async (input: string) => execute("unexpose", async () => new NectarService().unexpose(input)));
 
 program
   .command("gc")

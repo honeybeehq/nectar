@@ -49,6 +49,31 @@ export interface ServeRecord {
 export interface EnvUrls {
   local: string | null;
   mesh: string | null;
+  public?: string | null;
+}
+
+// One configured internet-exposure destination (machine config `exposures.<name>`).
+// v0.2 ships the `relay` kind (the nctr.site relay, D21); other kinds are schema slots.
+export interface ExposureTarget {
+  kind: "relay" | "ssh-tunnel" | "exe-dev" | "vercel-deploy";
+  host?: string; // relay/ssh-tunnel: the VM nectar drives to run nectar-relay
+  user?: string; // ssh user on that VM (default: root)
+  domain?: string; // relay: the wildcard domain, e.g. "nctr.site"
+  gate?: "password" | "none"; // default gate for this target
+  // How nectar reaches the relay to run nectar-relay. Default is Tailscale SSH (no key
+  // management — the zero-credential path), which needs a tailnet ACL ssh rule to the
+  // relay. "ssh" uses the system ssh client for hosts where a key is already set up.
+  control?: "tailscale-ssh" | "ssh";
+}
+
+// What an env currently has exposed (on the env record, for unexpose/gc/resolve).
+export interface ExposureRecord {
+  target: string; // the exposures.<name> key
+  kind: string;
+  sub: string; // the subdomain label on the relay
+  url: string; // https://<sub>.<domain>
+  gate: "password" | "none";
+  expires_at: string;
 }
 
 export interface PublishFailure {
@@ -122,6 +147,7 @@ export interface EnvRecord {
   install_hash?: string;
   testpack?: TestpackRecord;
   failure?: PublishFailure;
+  exposure?: ExposureRecord;
 }
 
 export interface MachineConfig {
@@ -140,6 +166,7 @@ export interface MachineConfig {
   tailnet_host?: string;
   tailnet_dns_name?: string;
   last_gc_at?: string;
+  exposures?: Record<string, ExposureTarget>;
 }
 
 export interface ResolveResult {
@@ -170,4 +197,5 @@ export interface PacketFields {
   preview_url: string | null;
   testpack_ref: string | null;
   shell_recipe: string | null;
+  public_url: string | null;
 }

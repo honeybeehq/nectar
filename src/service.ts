@@ -56,6 +56,7 @@ import {
   shutdownSim,
 } from "./sim.js";
 import { ensureAxHelper, findAppPid } from "./ax.js";
+import { exposureSub, relayAdd, relayHealth, relayRm } from "./relay.js";
 import type {
   DesktopRecipe,
   EnvRecord,
@@ -187,7 +188,11 @@ export class NectarService {
       worktree: destination,
       borrowed_worktree: options.worktree !== undefined,
       status: "publishing",
-      urls: { local: null, mesh: null },
+      // Republish keeps the same stable mesh URL, so a live exposure stays valid — the
+      // relay route already points at it; carry it across so packet_fields keeps the
+      // public_url and gc still knows to tear it down.
+      urls: { local: null, mesh: null, public: old?.exposure?.url ?? null },
+      ...(old?.exposure === undefined ? {} : { exposure: old.exposure }),
       ref: formatRef(identity.host, name),
       published_at: now.toISOString(),
       expires_at: expiresAt(now, options.ttlMs),
@@ -514,6 +519,7 @@ export class NectarService {
           preview_url: embeddedWeb === undefined ? null : embeddedWeb.record.urls.mesh ?? embeddedWeb.record.urls.local,
           testpack_ref: record.ref,
           shell_recipe: null,
+          public_url: record.exposure?.url ?? null,
         };
         return this.publishResult(record, packetFields, embeddedWeb?.warnings ?? [], {
           sha256: packResult.sha256,
@@ -819,6 +825,7 @@ export class NectarService {
       preview_url: record.mode === "web" || record.mode === "ios" ? record.urls.mesh ?? record.urls.local : null,
       testpack_ref: record.mode === "desktop" || record.mode === "ios" ? record.ref : null,
       shell_recipe: null,
+      public_url: record.exposure?.url ?? null,
     };
   }
 
@@ -1186,6 +1193,8 @@ export class NectarService {
     const record = await this.store.withLock(validateEnvName(name), async () => {
       const current = await this.store.readEnv(name);
       await this.stopRuntime(current);
+      // A stopped env's public URL would 502; take it down with the serve.
+      await this.tearDownExposure(current).catch(() => undefined);
       // Only running-ish states collapse to stopped; expired/cold stay where gc
       // put them so ls/resolve keep telling the truth.
       if (current.status === "serving" || current.status === "publishing" || current.status === "crashed") {
@@ -1212,9 +1221,111 @@ export class NectarService {
         this.store.envFile(record.name),
       ];
       if (!record.borrowed_worktree) targets.push(record.worktree);
+      await this.tearDownExposure(record).catch(() => undefined);
       await trashPaths(targets, this.paths.root);
       await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
       return { env: record.name, removed: true, forced: force, borrowed_worktree_preserved: record.borrowed_worktree };
+    });
+  }
+
+  // Remove a live public route (nctr.site relay, D21). The relay's own hourly prune is
+  // the backstop; this is the proactive half so a stopped/expired env stops answering
+  // publicly at once. Best-effort: the relay being unreachable must not block gc/stop.
+  private async tearDownExposure(record: EnvRecord): Promise<void> {
+    if (record.exposure === undefined) return;
+    const config = await this.store.readConfig();
+    const target = config.exposures?.[record.exposure.target];
+    if (target !== undefined) await relayRm(target, record.exposure.sub);
+    delete record.exposure;
+    record.urls.public = null;
+  }
+
+  async expose(
+    input: string,
+    options: { to: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean },
+  ): Promise<Record<string, unknown>> {
+    if (isRef(input)) {
+      const parsed = parseRef(input);
+      if (!(await this.isLocalHost(parsed.host))) {
+        const flags = [
+          "expose", parsed.env, "--to", options.to, "--json",
+          ...(options.gate === undefined ? [] : ["--gate", options.gate]),
+          ...(options.password === undefined ? [] : ["--password", options.password]),
+          ...(options.public === true ? ["--public"] : []),
+          ...(options.ttl === undefined ? [] : ["--ttl", options.ttl]),
+          ...(options.exposeInteractive === true ? ["--expose-interactive"] : []),
+        ];
+        return this.remoteResult(parsed.host, flags);
+      }
+      input = parsed.env;
+    }
+    const name = validateEnvName(input);
+    return this.store.withLock(name, async () => {
+      const config = await this.store.readConfig();
+      const target = config.exposures?.[options.to];
+      if (target === undefined) {
+        throw new NectarError("E_EXPOSE", `No exposure target '${options.to}' in machine config (~/.nectar/nectar.json → exposures)`);
+      }
+      if (target.kind !== "relay") throw new NectarError("E_EXPOSE", `Exposure kind '${target.kind}' is not implemented in v0.2`);
+      const record = await this.refreshLiveness(await this.store.readEnv(name));
+      if (record.status !== "serving") {
+        throw new NectarError("E_EXPOSE", `Environment '${name}' is ${record.status}; only a serving env can be exposed`);
+      }
+      // The relay proxies to the tailnet serve URL — that is the only address it can
+      // reach the publisher at. No mesh URL (tailscale down) ⇒ nothing to expose.
+      const upstream = record.urls.mesh;
+      if (upstream === null) throw new NectarError("E_EXPOSE", `Environment '${name}' has no mesh URL; exposure needs tailscale up`);
+      // Streamed simulators are interactive control surfaces (SPEC §9.1): refuse to put
+      // one on the public internet without an explicit opt-in.
+      if (record.mode === "ios" && options.exposeInteractive !== true) {
+        throw new NectarError("E_EXPOSE", `'${name}' is an interactive iOS stream; pass --expose-interactive to expose a device someone can drive`);
+      }
+      const gate = options.gate ?? target.gate ?? "password";
+      const isPublic = gate === "none";
+      if (isPublic && options.public !== true) {
+        throw new NectarError("E_EXPOSE", "--gate none exposes with no auth; pass --public to confirm");
+      }
+      const password = gate === "password" ? options.password ?? crypto.randomBytes(9).toString("base64url") : undefined;
+      const expiresEpoch = options.ttl
+        ? Math.floor((Date.now() + parseDuration(options.ttl, "ttl")) / 1000)
+        : Math.floor(new Date(record.expires_at).getTime() / 1000);
+      const sub = record.exposure?.sub ?? exposureSub(record, isPublic);
+      const added = await relayAdd({ target, sub, upstream, expiresEpoch, gate, ...(password === undefined ? {} : { password }) });
+      record.exposure = {
+        target: options.to,
+        kind: target.kind,
+        sub,
+        url: added.url,
+        gate,
+        expires_at: new Date(expiresEpoch * 1_000).toISOString(),
+      };
+      record.urls.public = added.url;
+      await this.store.writeEnv(record);
+      return {
+        env: record.name,
+        url: added.url,
+        gate,
+        ...(password === undefined ? {} : { password, credentials: { user: "reviewer", password } }),
+        expires_at: record.exposure.expires_at,
+        packet_fields: this.packetFields(record),
+      };
+    });
+  }
+
+  async unexpose(input: string): Promise<Record<string, unknown>> {
+    if (isRef(input)) {
+      const parsed = parseRef(input);
+      if (!(await this.isLocalHost(parsed.host))) return this.remoteResult(parsed.host, ["unexpose", parsed.env, "--json"]);
+      input = parsed.env;
+    }
+    const name = validateEnvName(input);
+    return this.store.withLock(name, async () => {
+      const record = await this.store.readEnv(name);
+      if (record.exposure === undefined) return { env: record.name, unexposed: false };
+      const url = record.exposure.url;
+      await this.tearDownExposure(record);
+      await this.store.writeEnv(record);
+      return { env: record.name, unexposed: true, was: url };
     });
   }
 
@@ -1251,10 +1362,12 @@ export class NectarService {
           report.push({ env: record.name, action: currentAction });
           if (currentAction === "expire") {
             await this.stopRuntime(record);
+            await this.tearDownExposure(record).catch(() => undefined);
             record.status = "expired";
             await this.store.writeEnv(record);
           } else if (currentAction === "cold") {
             await this.stopRuntime(record);
+            await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
             if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
             record.status = "cold";
@@ -1263,6 +1376,7 @@ export class NectarService {
           } else {
             // Reap removes everything the env ever owned, exactly like `rm`.
             await this.stopRuntime(record);
+            await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
             const targets = [
               path.join(this.paths.packs, record.name),
@@ -1510,6 +1624,17 @@ export class NectarService {
       status: "warn",
       message: "Verify tailnet ACLs restrict ports 8440-8542 to operator-owned devices",
     });
+    for (const [name, target] of Object.entries(config.exposures ?? {})) {
+      if (target.kind !== "relay") continue;
+      const health = await relayHealth(target);
+      checks.push({
+        name: `exposure-${name}`,
+        status: health.ok ? "pass" : "warn",
+        message: health.ok
+          ? `Relay '${name}' (${target.host}) is up: ${health.detail}`
+          : `Relay '${name}' (${target.host}) unreachable — exposes to ${target.domain} will fail: ${health.detail}`,
+      });
+    }
     return { healthy: checks.every((check) => check.status !== "fail"), checks };
   }
 

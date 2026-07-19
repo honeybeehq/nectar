@@ -132,10 +132,14 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<vo
     }
   };
   if (!Number.isInteger(pgid) || pgid <= 1 || !groupAlive()) return;
+  // EPERM means the pgid now belongs to another user's process (recycled after a
+  // reboot or long-dead record) — never escalate against a group that isn't ours.
   try {
     process.kill(-pgid, "SIGTERM");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM") return;
+    if (code !== "ESRCH") throw error;
   }
   const deadline = Date.now() + waitMs;
   while (groupAlive() && Date.now() < deadline) {
@@ -145,7 +149,8 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<vo
     try {
       process.kill(-pgid, "SIGKILL");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") throw error;
     }
   }
 }

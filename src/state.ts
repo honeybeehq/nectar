@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { open, readFile, readdir, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { pidAlive } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { ensureLayout, type NectarPaths } from "./paths.js";
 import { validateEnvName } from "./refs.js";
@@ -71,7 +72,18 @@ export class StateStore {
   async listEnvs(): Promise<EnvRecord[]> {
     await this.init();
     const files = (await readdir(this.paths.envs)).filter((file) => file.endsWith(".json")).sort();
-    return Promise.all(files.map(async (file) => JSON.parse(await readFile(path.join(this.paths.envs, file), "utf8")) as EnvRecord));
+    const records = await Promise.all(
+      files.map(async (file): Promise<EnvRecord | undefined> => {
+        try {
+          return JSON.parse(await readFile(path.join(this.paths.envs, file), "utf8")) as EnvRecord;
+        } catch {
+          // One corrupt record must not brick ls/gc/publish; the file stays on
+          // disk for manual inspection.
+          return undefined;
+        }
+      }),
+    );
+    return records.filter((record): record is EnvRecord => record !== undefined);
   }
 
   async deleteEnvFile(name: string): Promise<void> {
@@ -96,23 +108,65 @@ export class StateStore {
     await atomicJson(this.paths.config, config);
   }
 
+  private async acquireLock(lockPath: string): Promise<FileHandle> {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(`${process.pid}\n`);
+      return handle;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    // A lock left behind by a killed process would wedge this env forever; steal
+    // it when the recorded holder is gone (or the file predates a generous bound).
+    const stale = await readFile(lockPath, "utf8")
+      .then((content) => {
+        const pid = Number(content.trim());
+        return !Number.isInteger(pid) || pid <= 1 || !pidAlive(pid);
+      })
+      .catch((error: NodeJS.ErrnoException) => error.code === "ENOENT");
+    if (stale) {
+      await unlink(lockPath).catch(() => undefined);
+      try {
+        const handle = await open(lockPath, "wx", 0o600);
+        await handle.writeFile(`${process.pid}\n`);
+        return handle;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+    throw new NectarError("E_BUSY", `Environment '${path.basename(lockPath, ".lock")}' is busy; retry shortly`);
+  }
+
   async withLock<T>(name: string, action: () => Promise<T>): Promise<T> {
     await this.init();
     const lockPath = path.join(this.paths.locks, `${validateEnvName(name)}.lock`);
-    let handle;
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new NectarError("E_CHECKOUT", `Environment '${name}' is busy; retry shortly`);
-      }
-      throw error;
-    }
+    const handle = await this.acquireLock(lockPath);
     try {
       return await action();
     } finally {
       await handle.close();
       await unlink(lockPath).catch(() => undefined);
+    }
+  }
+
+  // Locked read-modify-write: the only safe way to mutate a record outside a
+  // publish. `bestEffort` callers (touch-on-resolve, liveness flips) skip
+  // silently when a publish holds the lock — the env is clearly active anyway.
+  async updateEnv(
+    name: string,
+    mutate: (record: EnvRecord) => void | Promise<void>,
+    options: { bestEffort?: boolean } = {},
+  ): Promise<EnvRecord | undefined> {
+    try {
+      return await this.withLock(name, async () => {
+        const record = await this.readEnv(name);
+        await mutate(record);
+        await this.writeEnv(record);
+        return record;
+      });
+    } catch (error) {
+      if (options.bestEffort === true && error instanceof NectarError && error.code === "E_BUSY") return undefined;
+      throw error;
     }
   }
 }

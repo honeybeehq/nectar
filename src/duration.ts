@@ -1,4 +1,4 @@
-import { NectarError } from "./errors.js";
+import { NectarError, type ErrorCode } from "./errors.js";
 
 const UNITS: Record<string, number> = {
   ms: 1,
@@ -8,15 +8,15 @@ const UNITS: Record<string, number> = {
   d: 86_400_000,
 };
 
-export function parseDuration(value: string, label = "duration"): number {
+export function parseDuration(value: string, label = "duration", code: ErrorCode = "E_USAGE"): number {
   const match = /^(\d+)(ms|s|m|h|d)$/.exec(value.trim());
   if (!match) {
-    throw new NectarError("E_NO_MODE", `Invalid ${label} '${value}'; expected e.g. 90s, 12h, or 7d`);
+    throw new NectarError(code, `Invalid ${label} '${value}'; expected e.g. 90s, 12h, or 7d`);
   }
   const amount = Number(match[1]);
   const unit = UNITS[match[2] ?? ""];
   if (!Number.isSafeInteger(amount) || amount <= 0 || unit === undefined) {
-    throw new NectarError("E_NO_MODE", `Invalid ${label} '${value}'`);
+    throw new NectarError(code, `Invalid ${label} '${value}'`);
   }
   return amount * unit;
 }

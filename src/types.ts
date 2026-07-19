@@ -144,6 +144,7 @@ export interface MachineConfig {
 export interface ResolveResult {
   env: string;
   mode: Mode;
+  is_self: boolean;
   urls: EnvUrls;
   testpack_url: string | null;
   sha256: string | null;
@@ -160,6 +161,7 @@ export interface ResolveResult {
 export interface MultiResolveResult {
   env: string;
   host: string;
+  is_self: boolean;
   resolutions: ResolveResult[];
 }
 

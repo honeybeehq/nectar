@@ -291,6 +291,30 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
 });
 
 describe("lifecycle, doctor, and cross-machine command adapters", () => {
+  it("marks same-node resolves and opens their local URL while packet fields remain mesh-canonical", async () => {
+    const { service, launchLog } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-self", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const published = await service.publish({ repo });
+    const env = published.env as string;
+    track(service, env);
+    expect(published.packet_fields).toMatchObject({ preview_url: "https://fixture.tailtest.ts.net:8443" });
+
+    const byFqdn = await service.resolve(`nectar://FIXTURE.TAILTEST.TS.NET/${env}`);
+    expect(byFqdn).toMatchObject({ env, host: "fixture.tailtest.ts.net", is_self: true });
+    const byShortName = await service.resolve(`nectar://FiXtUrE/${env}`);
+    expect(byShortName).toMatchObject({ env, host: "fixture", is_self: true });
+    const byBase = await service.resolve("fixture-self--main");
+    expect(byBase).toMatchObject({ env: "fixture-self--main", is_self: true });
+    expect("resolutions" in byBase && byBase.resolutions.every((item) => item.is_self)).toBe(true);
+
+    const opened = await service.open(`nectar://fixture/${env}`);
+    expect(opened.opened).toBe((published.urls as { local: string }).local);
+    expect((await readFile(launchLog, "utf8")).trim()).toBe((published.urls as { local: string }).local);
+  });
+
   it("expires, revives on the same URL, stops, cools, and trashes an env", async () => {
     const { service } = await harness();
     const repo = await initGitRepo({
@@ -366,9 +390,10 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
       entry: null,
       host: "remote",
       status: "serving",
+      is_self: true,
     };
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", JSON.stringify({ ok: true, command: "resolve", result: remote }));
-    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual(remote);
+    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual({ ...remote, is_self: false });
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", "");
     vi.stubEnv("FAKE_TS_SSH_FAIL", "1");
     await expect(service.resolve("nectar://offline/remote-app--main--web")).rejects.toThrow(/Host 'offline' unreachable/);

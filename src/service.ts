@@ -90,6 +90,14 @@ interface PublishedWeb {
   warnings: string[];
 }
 
+function hostAliases(value: string | undefined): Set<string> {
+  if (value === undefined) return new Set();
+  const normalized = value.trim().toLowerCase().replace(/\.+$/, "");
+  if (normalized.length === 0) return new Set();
+  const short = normalized.split(".")[0];
+  return new Set(short === undefined ? [normalized] : [normalized, short]);
+}
+
 export class NectarService {
   readonly paths: NectarPaths;
   readonly store: StateStore;
@@ -777,17 +785,18 @@ export class NectarService {
     };
   }
 
-  private async isLocalHost(host: string): Promise<boolean> {
-    const identity = await this.identity();
-    const osHost = (os.hostname().split(".")[0] ?? "").toLowerCase();
-    return host === identity.host.toLowerCase() || host === osHost;
+  private async isLocalHost(host: string, knownIdentity?: MachineIdentity): Promise<boolean> {
+    const identity = knownIdentity ?? (await this.identity());
+    const requested = hostAliases(host);
+    const local = [identity.host, identity.dnsName, os.hostname()].flatMap((value) => [...hostAliases(value)]);
+    return local.some((alias) => requested.has(alias));
   }
 
   private isQualified(name: string): boolean {
     return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios");
   }
 
-  private async localResolve(name: string, host: string, touch = true): Promise<ResolveResult | MultiResolveResult> {
+  private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
     const records = this.isQualified(name)
       ? [await this.store.readEnv(validateEnvName(name))]
       : (await this.store.listEnvs()).filter((record) => record.name.startsWith(`${validateEnvName(name)}--`));
@@ -801,10 +810,11 @@ export class NectarService {
         record.expires_at = expiresAt(now, DEFAULT_TTL);
         await this.store.writeEnv(record);
       }
-      const streamUrl = record.urls.mesh ?? record.urls.local;
+      const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
       resolutions.push({
         env: record.name,
         mode: record.mode,
+        is_self: isSelf,
         urls: record.urls,
         testpack_url: record.testpack?.url ?? null,
         sha256: record.testpack?.sha256 ?? null,
@@ -818,15 +828,23 @@ export class NectarService {
         ...(record.status === "crashed" ? { log_tail: await logTail(this.paths, record.name) } : {}),
       });
     }
-    return this.isQualified(name) ? (resolutions[0] as ResolveResult) : { env: name, host, resolutions };
+    return this.isQualified(name) ? (resolutions[0] as ResolveResult) : { env: name, host, is_self: isSelf, resolutions };
   }
 
   async resolve(input: string): Promise<ResolveResult | MultiResolveResult> {
     const identity = await this.identity();
-    if (!isRef(input)) return this.localResolve(validateEnvName(input), identity.host);
+    if (!isRef(input)) return this.localResolve(validateEnvName(input), identity.host, true);
     const parsed = parseRef(input);
-    if (await this.isLocalHost(parsed.host)) return this.localResolve(parsed.env, parsed.host);
-    return this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
+    if (await this.isLocalHost(parsed.host, identity)) return this.localResolve(parsed.env, parsed.host, true);
+    const remote = await this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
+    if ("resolutions" in remote) {
+      return {
+        ...remote,
+        is_self: false,
+        resolutions: remote.resolutions.map((resolution) => ({ ...resolution, is_self: false })),
+      };
+    }
+    return { ...remote, is_self: false };
   }
 
   private async remoteResult<T extends object = Record<string, unknown>>(host: string, args: string[]): Promise<T> {
@@ -857,7 +875,7 @@ export class NectarService {
       throw new NectarError("E_NO_MODE", `Environment '${resolved.env}' has multiple modes; use a mode-qualified ref`);
     }
     if (resolved.mode === "web") {
-      const url = resolved.urls.mesh ?? resolved.urls.local;
+      const url = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
       if (url === null) throw new NectarError("E_NOT_FOUND", `Web environment '${resolved.env}' has no reachable URL`);
       await this.launch(url);
       return { env: resolved.env, mode: resolved.mode, opened: url };
@@ -917,7 +935,7 @@ export class NectarService {
   }
 
   private async openIos(resolved: ResolveResult): Promise<Record<string, unknown>> {
-    const streamUrl = resolved.urls.mesh ?? resolved.urls.local;
+    const streamUrl = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
     const simCapable = (process.platform === "darwin" || process.env.NECTAR_XCRUN_BIN !== undefined) && process.env.NECTAR_IOS_OPEN !== "stream";
     const openStream = async (): Promise<Record<string, unknown>> => {
       if (streamUrl === null) {

@@ -540,7 +540,19 @@ runs. Envelope matches Forum's shape so every harness already knows how to read 
 Non-zero exit iff `ok: false`. Error codes are part of the contract: `E_NO_RECIPE`,
 `E_NO_MODE`, `E_CHECKOUT`, `E_INSTALL`, `E_SERVE_TIMEOUT`, `E_SMOKE_FAILED`, `E_PORTS`,
 `E_TAILNET_DOWN`, `E_PLATFORM`, `E_NOT_FOUND`, `E_QUOTA`, `E_SIM` (simctl
-create/boot/install/launch failures, with the simctl stderr in `error.log_tail`).
+create/boot/install/launch failures, with the simctl stderr in `error.log_tail`),
+plus (added post-v0 review, 2026-07-19):
+
+- `E_USAGE` — the invocation itself is wrong (unknown command/flag, bad `--ttl`,
+  `rm` of a serving env without `--force`). Fix the call, not the environment.
+- `E_BUSY` — a per-env lock is held by a live process; retry shortly. (Stale locks
+  from killed processes are stolen automatically, so E_BUSY always means real work
+  is in flight.)
+- `E_VERIFY` — testpack/simpack verification failed (sha mismatch, invalid or
+  escaping manifest entry, metadata mismatch). Never launched; `E_PLATFORM` now
+  means platform mismatch only.
+- `E_INTERNAL` — an unexpected internal failure (bug, fs error); `details.unexpected`
+  is set when it was not a typed nectar error. Report it, don't remediate.
 
 ### Commands
 
@@ -570,8 +582,11 @@ nectar resolve <ref> [--json]
     # Consumers prefer urls.local when is_self, urls.mesh otherwise.
 
 nectar touch <env|ref> [--ttl 72h]
+    # Explicit touch re-arms with the given TTL; implicit touches (open/resolve)
+    # re-arm the env's own publish TTL, never the 72 h default.
 nectar stop <env>            # stop serve process, keep everything; status → stopped
-nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash)
+nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash);
+                             # a *serving* env refuses without --force (E_USAGE)
 nectar gc [--dry-run] [--json]
     # Enforce §10: expire → stop; cold → delete worktrees; reap old records; prune pack
     # store to quota (LRU). Prints a reap report. Safe to run concurrently (per-env locks).
@@ -670,8 +685,11 @@ hive integration surface. No hive API calls, no harness detection.
   refs (`project/<p>/*-test` convention); values go into the child env only, never the env
   record, never logs. A pending-approval response from hem aborts publish with the
   approval instructions in the error envelope — the bee escalates to the human.
-- Env records, envelopes, and evidence are secret-free by construction; `nectar show` is
-  always safe to paste into a packet.
+- Env records, envelopes, and evidence are secret-free by construction — with one
+  honest caveat: `error.log_tail` is the raw last lines of the branch process's
+  output. An app that prints its own config/secrets on boot puts them there. The
+  scrubbed environment keeps *injected* agent tokens out of that output; what the
+  branch chooses to print is the branch's doing.
 
 ### 9.3 Untrusted branch code
 
@@ -701,12 +719,15 @@ noted future step, out of scope here.
 
 `nectar gc` (idempotent, per-env lockfiles): expire past-TTL envs (stop process group,
 remove tailscale-serve entry) → cold at expiry+24 h (delete worktree) → reap records at
-cold+14 d → prune pack store/evidence to quota. Grace: envs touched within 6 h are never
-transitioned, so an open review can't be reaped underneath the reviewer (open/resolve/touch
-all bump `last_touched_at`). Every non-dry run also removes Nectar-range Serve entries whose
-loopback proxy target is dead; if an env record owns the entry, GC kills its process group,
-clears its runtime claims, and marks it `crashed` with failure details. `doctor` reports the
-same orphan class and `doctor --fix` applies the same cleanup.
+cold+14 d → prune pack store/evidence to quota. Grace: envs *touched after publish* within
+the last 6 h are never transitioned, so an open review can't be reaped underneath the
+reviewer (open/resolve/touch all bump `last_touched_at`). The publish stamp itself does not
+count as a touch — otherwise `--ttl 1m` would silently mean six hours. A busy env (lock
+held by a live publish) is skipped and reported, never an abort of the sweep. Every non-dry
+run also removes Nectar-range Serve entries whose loopback proxy target is dead; if an env
+record owns the entry, GC kills its process group, clears its runtime claims, and marks it
+`crashed` with failure details. `doctor` reports the same orphan class and `doctor --fix`
+applies the same cleanup.
 
 ### 10.3 Scheduling
 

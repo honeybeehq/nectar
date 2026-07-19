@@ -23,6 +23,9 @@ export async function currentBranch(repo: string): Promise<string> {
 }
 
 export async function resolveCommit(repo: string, branch: string): Promise<string> {
+  // spawn() means no shell injection, but a branch beginning with '-' would still
+  // be argument-smuggled into git as an option.
+  if (branch.startsWith("-")) throw new NectarError("E_CHECKOUT", `Branch '${branch}' is not a valid ref name`);
   return git(["rev-parse", `${branch}^{commit}`], repo);
 }
 

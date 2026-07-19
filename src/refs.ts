@@ -37,6 +37,15 @@ export function formatRef(host: string, env: string): string {
   return `nectar://${normalizedHost}/${env}`;
 }
 
+// Hosts reach `tailscale ssh <host>` verbatim, so the untrusted-ref path must
+// constrain them to DNS-label form — a host like "-oProxyCommand" would otherwise
+// be argument-smuggled into ssh.
+const HOST_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
+function validHost(host: string): boolean {
+  return host.split(".").every((label) => HOST_LABEL.test(label));
+}
+
 export function parseRef(value: string): NectarRef {
   let url: URL;
   try {
@@ -48,6 +57,7 @@ export function parseRef(value: string): NectarRef {
   if (
     url.protocol !== "nectar:" ||
     !url.hostname ||
+    !validHost(url.hostname.toLowerCase()) ||
     url.port ||
     url.username ||
     url.password ||

@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
-import { access, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
+import { access, copyFile, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import archiver from "archiver";
 import extract from "extract-zip";
 import { runCommand } from "./commands.js";
@@ -60,7 +63,7 @@ export async function extractTestpack(zip: string, destination: string): Promise
   for (const candidate of candidates) {
     if (await pathExists(path.join(candidate, "testpack.json"))) return candidate;
   }
-  throw new NectarError("E_PLATFORM", "Testpack zip does not contain testpack.json");
+  throw new NectarError("E_VERIFY", "Testpack zip does not contain testpack.json");
 }
 
 export async function readAndValidateManifest(packRoot: string): Promise<TestpackManifest> {
@@ -68,15 +71,22 @@ export async function readAndValidateManifest(packRoot: string): Promise<Testpac
   try {
     manifest = JSON.parse(await readFile(path.join(packRoot, "testpack.json"), "utf8")) as TestpackManifest;
   } catch (error) {
-    throw new NectarError("E_PLATFORM", `Invalid testpack.json: ${error instanceof Error ? error.message : String(error)}`);
+    throw new NectarError("E_VERIFY", `Invalid testpack.json: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (manifest.testpack !== 1) throw new NectarError("E_PLATFORM", `Unsupported testpack format '${String(manifest.testpack)}'`);
+  if (manifest.testpack !== 1) throw new NectarError("E_VERIFY", `Unsupported testpack format '${String(manifest.testpack)}'`);
   if (typeof manifest.entry !== "string" || path.isAbsolute(manifest.entry) || manifest.entry.split(/[\\/]/).includes("..")) {
-    throw new NectarError("E_PLATFORM", "testpack.json entry must be a safe relative path");
+    throw new NectarError("E_VERIFY", "testpack.json entry must be a safe relative path");
   }
   const entry = path.resolve(packRoot, manifest.entry);
   if (!entry.startsWith(`${path.resolve(packRoot)}${path.sep}`) || !(await pathExists(entry))) {
-    throw new NectarError("E_PLATFORM", `Testpack entry '${manifest.entry}' does not exist`);
+    throw new NectarError("E_VERIFY", `Testpack entry '${manifest.entry}' does not exist`);
+  }
+  // The lexical check above is satisfied by a symlink inside the pack pointing
+  // outside it — and what we launch/install must be covered by the digest. The
+  // extract library blocks symlink *writes* escaping the root, not symlink entries.
+  const [realEntry, realRoot] = await Promise.all([realpath(entry).catch(() => undefined), realpath(packRoot)]);
+  if (realEntry === undefined || !realEntry.startsWith(`${realRoot}${path.sep}`)) {
+    throw new NectarError("E_VERIFY", `Testpack entry '${manifest.entry}' escapes the verified pack`);
   }
   return manifest;
 }
@@ -104,12 +114,13 @@ export async function fetchVerified(options: {
     if (options.localSource !== undefined) {
       await copyFile(options.localSource, temporary);
     } else {
-      const response = await fetch(options.url);
+      // Stream to disk — buffering a multi-GB pack in memory OOMs `open`, and an
+      // unresponsive pack server must not hang it forever.
+      const response = await fetch(options.url, { signal: AbortSignal.timeout(600_000) });
       if (!response.ok || response.body === null) {
         throw new NectarError("E_NOT_FOUND", `Testpack fetch failed: HTTP ${response.status}`);
       }
-      const bytes = Buffer.from(await response.arrayBuffer());
-      await writeFile(temporary, bytes, { mode: 0o600 });
+      await pipeline(Readable.fromWeb(response.body as WebReadableStream), createWriteStream(temporary, { mode: 0o600 }));
     }
     if ((await sha256(temporary)) === options.expectedSha256) {
       await rename(temporary, cached);
@@ -117,7 +128,7 @@ export async function fetchVerified(options: {
     }
     await trashPaths([temporary], options.paths.root);
   }
-  throw new NectarError("E_PLATFORM", "Testpack sha256 mismatch after one retry; refusing to launch");
+  throw new NectarError("E_VERIFY", "Testpack sha256 mismatch after one retry; refusing to launch");
 }
 
 export async function extractVerified(options: {
@@ -137,7 +148,7 @@ export async function extractVerified(options: {
   }
   const manifest = await readAndValidateManifest(packRoot);
   if (manifest.platform !== options.expectedPlatform || manifest.entry !== options.expectedEntry) {
-    throw new NectarError("E_PLATFORM", "Resolved testpack metadata does not match its manifest");
+    throw new NectarError("E_VERIFY", "Resolved testpack metadata does not match its manifest");
   }
   await runCommand("xattr", ["-dr", "com.apple.quarantine", packRoot]).catch(() => undefined);
   return { packRoot, manifest, entry: path.join(packRoot, manifest.entry) };
@@ -157,7 +168,7 @@ export async function extractAndLaunch(options: {
   const { entry } = await extractVerified(options);
   const launcher = process.env.NECTAR_LAUNCH_BIN ?? "open";
   const result = await runCommand(launcher, [entry]);
-  if (result.exitCode !== 0) throw new NectarError("E_PLATFORM", result.stderr.trim() || `Could not launch ${entry}`);
+  if (result.exitCode !== 0) throw new NectarError("E_INTERNAL", result.stderr.trim() || `Could not launch ${entry}`);
   return entry;
 }
 

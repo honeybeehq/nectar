@@ -40,11 +40,30 @@ export async function startAxBridge(options: {
     for (const client of clients) client.write(`data: ${trimmed}\n\n`);
   });
 
+  // The stream carries the app-under-review's full UI contents. Loopback bind is
+  // not enough in a browser world: a Host check closes DNS rebinding, and CORS is
+  // opt-in (NECTAR_AX_ALLOW_ORIGIN) instead of `*` so a drive-by page scanning
+  // loopback ports cannot read the tree. The desk reads it from a non-browser
+  // context (or sets the env) and is unaffected.
+  const allowOrigin = process.env.NECTAR_AX_ALLOW_ORIGIN;
+  const localHost = (value: string | undefined): boolean => {
+    const host = (value ?? "").replace(/:\d+$/, "");
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+  };
   const server = http.createServer((request, response) => {
+    if (!localHost(request.headers.host)) {
+      response.writeHead(403, { "content-type": "text/plain" });
+      response.end("forbidden\n");
+      return;
+    }
+    const cors: Record<string, string> =
+      allowOrigin !== undefined && (allowOrigin === "*" || allowOrigin === request.headers.origin)
+        ? { "access-control-allow-origin": allowOrigin }
+        : {};
     const url = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     if (url === "/health") {
       const body = JSON.stringify({ ok: helperError === undefined, pid: options.pid, clients: clients.size, error: helperError ?? null });
-      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), ...cors });
       response.end(body);
       return;
     }
@@ -53,7 +72,7 @@ export async function startAxBridge(options: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
-        "access-control-allow-origin": "*",
+        ...cors,
       });
       if (latest !== undefined) response.write(`data: ${latest}\n\n`);
       clients.add(response);

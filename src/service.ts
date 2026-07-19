@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, rename } from "node:fs/promises";
 import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo } from "./git.js";
-import { allocatePort, portAvailable, portOpen } from "./ports.js";
+import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
   pidAlive,
@@ -16,7 +16,7 @@ import {
   stopProcessGroup,
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
-import { NectarError } from "./errors.js";
+import { asNectarError, NectarError } from "./errors.js";
 import { envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, selectMode } from "./recipe.js";
 import { getPaths, type NectarPaths } from "./paths.js";
@@ -25,6 +25,7 @@ import { logTail, prepareLog } from "./logs.js";
 import {
   remoteNectar,
   servePackStore,
+  serveProxyEntries,
   serveStatus,
   serveWeb,
   statusHasFunnel,
@@ -32,6 +33,7 @@ import {
   statusHasProxyTarget,
   stopServe,
   tailnetIdentity,
+  type ServeProxyEntry,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
@@ -88,6 +90,18 @@ interface MachineIdentity {
 interface PublishedWeb {
   record: EnvRecord;
   warnings: string[];
+}
+
+interface ServeOrphan extends ServeProxyEntry {
+  env?: string;
+}
+
+function hostAliases(value: string | undefined): Set<string> {
+  if (value === undefined) return new Set();
+  const normalized = value.trim().toLowerCase().replace(/\.+$/, "");
+  if (normalized.length === 0) return new Set();
+  const short = normalized.split(".")[0];
+  return new Set(short === undefined ? [normalized] : [normalized, short]);
 }
 
 export class NectarService {
@@ -204,10 +218,89 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      await stopProcessGroup(record.serve.pgid);
-      await stopServe(record.serve.tailnet_port);
+      await Promise.all([stopProcessGroup(record.serve.pgid), stopServe(record.serve.tailnet_port)]);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
+  }
+
+  private async cleanupRuntime(record: EnvRecord): Promise<string[]> {
+    const cleanupErrors: string[] = [];
+    if (record.serve !== undefined) {
+      const owned = record.serve;
+      const [processCleanup, serveCleanup] = await Promise.allSettled([
+        stopProcessGroup(owned.pgid),
+        stopServe(owned.tailnet_port),
+      ]);
+      if (processCleanup.status === "rejected") {
+        cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.reason)}`);
+      }
+      if (serveCleanup.status === "rejected" || !serveCleanup.value) {
+        cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+      }
+    }
+    delete record.serve;
+    record.urls = { local: null, mesh: null };
+    return cleanupErrors;
+  }
+
+  private async rollbackRuntime(record: EnvRecord, error: unknown): Promise<void> {
+    const failure = asNectarError(error);
+    const cleanupErrors = await this.cleanupRuntime(record);
+    record.status = "crashed";
+    record.failure = {
+      code: failure.code,
+      message: failure.message,
+      failed_at: new Date().toISOString(),
+      log_tail: await logTail(this.paths, record.name),
+      ...(cleanupErrors.length === 0 ? {} : { cleanup_errors: cleanupErrors }),
+    };
+    await this.store.writeEnv(record);
+  }
+
+  private async deadServeProxies(status: unknown, config: MachineConfig): Promise<ServeOrphan[]> {
+    const records = await this.store.listEnvs();
+    const candidates = serveProxyEntries(status).filter(
+      (entry) =>
+        entry.tailnetPort >= config.tailnet_port_start &&
+        entry.tailnetPort <= config.tailnet_port_end &&
+        entry.tailnetPort !== 8440,
+    );
+    const inspected = await Promise.all(
+      candidates.map(async (entry): Promise<ServeOrphan | undefined> => {
+        const open =
+          entry.upstreamHost === "localhost"
+            ? await portOpen(entry.upstreamPort)
+            : await portOpenOnHost(entry.upstreamPort, entry.upstreamHost);
+        if (open) return undefined;
+        const owner = records.find((record) => record.serve?.tailnet_port === entry.tailnetPort);
+        return { ...entry, ...(owner === undefined ? {} : { env: owner.name }) };
+      }),
+    );
+    return inspected.filter((entry): entry is ServeOrphan => entry !== undefined);
+  }
+
+  private async cleanupServeOrphan(orphan: ServeOrphan): Promise<boolean> {
+    if (orphan.env === undefined) return stopServe(orphan.tailnetPort);
+    const env = orphan.env;
+    try {
+      return await this.store.withLock(env, async () => {
+        const record = await this.store.readEnv(env);
+        if (record.serve?.tailnet_port !== orphan.tailnetPort) return stopServe(orphan.tailnetPort);
+        const cleanupErrors = await this.cleanupRuntime(record);
+        record.status = "crashed";
+        record.failure = {
+          code: "E_SERVE_ORPHAN",
+          message: `Tailscale Serve :${orphan.tailnetPort} pointed at dead local target ${orphan.target}`,
+          failed_at: new Date().toISOString(),
+          log_tail: await logTail(this.paths, record.name),
+          ...(cleanupErrors.length === 0 ? {} : { cleanup_errors: cleanupErrors }),
+        };
+        await this.store.writeEnv(record);
+        return cleanupErrors.length === 0;
+      });
+    } catch {
+      return false;
+    }
   }
 
   private async releaseSim(record: EnvRecord): Promise<void> {
@@ -247,9 +340,7 @@ export class NectarService {
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
         return await this.startWeb(record, web, initial.identity, initial.old, records);
       } catch (error) {
-        await this.stopRuntime(record);
-        record.status = "crashed";
-        await this.store.writeEnv(record);
+        await this.rollbackRuntime(record, error);
         throw error;
       }
     });
@@ -300,43 +391,46 @@ export class NectarService {
     };
     record.urls.local = `http://127.0.0.1:${upstreamPort}`;
     const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`];
+    await this.store.writeEnv(record);
+
+    const readyUrl = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
+    if (readyUrl === undefined) {
+      throw new NectarError("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${recipe.readyPath} within ${recipe.readyTimeoutMs}ms`, {
+        log_tail: await logTail(this.paths, record.name),
+      });
+    }
+    record.urls.local = readyUrl.origin;
+    warnings[0] = `portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`;
     let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, upstreamPort);
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
     if (meshReady && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
       warnings.push(`tailscale unavailable or logged out — mesh URL unavailable; preview_url fell back to ${record.urls.local}`);
     }
-    await this.store.writeEnv(record);
-
-    const ready = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
-    if (!ready) {
-      await this.stopRuntime(record);
-      record.status = "crashed";
-      await this.store.writeEnv(record);
-      throw new NectarError("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${recipe.readyPath} within ${recipe.readyTimeoutMs}ms`, {
-        log_tail: await logTail(this.paths, record.name),
-      });
-    }
     record.status = "serving";
+    delete record.failure;
     await this.store.writeEnv(record);
     return { record, warnings };
   }
 
-  private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<boolean> {
+  private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {
     const pathPart = readyPath.startsWith("/") ? readyPath : `/${readyPath}`;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}${pathPart}`, { signal: AbortSignal.timeout(1_000) });
-        if (response.status === 200) return true;
-      } catch {
-        // Process startup races are expected until the timeout.
+      for (const host of ["127.0.0.1", "[::1]"]) {
+        const url = new URL(`http://${host}:${port}${pathPart}`);
+        try {
+          const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+          if (response.status === 200) return url;
+        } catch {
+          // Process startup races are expected until the timeout.
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return false;
+    return undefined;
   }
 
   private async publishDesktop(options: {
@@ -545,10 +639,9 @@ export class NectarService {
             const streamUrl = record.urls.mesh ?? record.urls.local;
             if (streamUrl !== null) axUrl = `${streamUrl}/ax`;
           } catch (error) {
-            delete record.serve;
-            record.urls = { local: null, mesh: null };
+            const cleanupErrors = await this.cleanupRuntime(record);
             warnings.push(
-              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}`,
+              `stream unavailable — publish degraded to simpack-only: ${error instanceof Error ? error.message : String(error)}${cleanupErrors.length === 0 ? "" : ` (cleanup: ${cleanupErrors.join("; ")})`}`,
             );
           }
         } else {
@@ -656,8 +749,16 @@ export class NectarService {
     };
     record.urls.local = `http://127.0.0.1:${upstreamPort}`;
     const warnings: string[] = [];
+    await this.store.writeEnv(record);
+    const readyUrl = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
+    if (readyUrl === undefined) {
+      throw new NectarError("E_SERVE_TIMEOUT", `serve-sim did not become ready within ${readyTimeoutMs}ms`, {
+        log_tail: await logTail(this.paths, record.name),
+      });
+    }
+    record.urls.local = readyUrl.origin;
     let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, upstreamPort);
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
     if (meshReady && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
@@ -665,14 +766,6 @@ export class NectarService {
       warnings.push(`tailscale unavailable or logged out — stream URL fell back to ${record.urls.local}`);
     }
     await this.store.writeEnv(record);
-    const ready = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
-    if (!ready) {
-      await stopProcessGroup(processRecord.pgid);
-      await stopServe(tailnetPort);
-      throw new NectarError("E_SERVE_TIMEOUT", `serve-sim did not become ready within ${readyTimeoutMs}ms`, {
-        log_tail: await logTail(this.paths, record.name),
-      });
-    }
     return { warnings };
   }
 
@@ -744,17 +837,18 @@ export class NectarService {
     };
   }
 
-  private async isLocalHost(host: string): Promise<boolean> {
-    const identity = await this.identity();
-    const osHost = (os.hostname().split(".")[0] ?? "").toLowerCase();
-    return host === identity.host.toLowerCase() || host === osHost;
+  private async isLocalHost(host: string, knownIdentity?: MachineIdentity): Promise<boolean> {
+    const identity = knownIdentity ?? (await this.identity());
+    const requested = hostAliases(host);
+    const local = [identity.host, identity.dnsName, os.hostname()].flatMap((value) => [...hostAliases(value)]);
+    return local.some((alias) => requested.has(alias));
   }
 
   private isQualified(name: string): boolean {
     return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios");
   }
 
-  private async localResolve(name: string, host: string, touch = true): Promise<ResolveResult | MultiResolveResult> {
+  private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
     const records = this.isQualified(name)
       ? [await this.store.readEnv(validateEnvName(name))]
       : (await this.store.listEnvs()).filter((record) => record.name.startsWith(`${validateEnvName(name)}--`));
@@ -768,10 +862,11 @@ export class NectarService {
         record.expires_at = expiresAt(now, DEFAULT_TTL);
         await this.store.writeEnv(record);
       }
-      const streamUrl = record.urls.mesh ?? record.urls.local;
+      const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
       resolutions.push({
         env: record.name,
         mode: record.mode,
+        is_self: isSelf,
         urls: record.urls,
         testpack_url: record.testpack?.url ?? null,
         sha256: record.testpack?.sha256 ?? null,
@@ -785,15 +880,23 @@ export class NectarService {
         ...(record.status === "crashed" ? { log_tail: await logTail(this.paths, record.name) } : {}),
       });
     }
-    return this.isQualified(name) ? (resolutions[0] as ResolveResult) : { env: name, host, resolutions };
+    return this.isQualified(name) ? (resolutions[0] as ResolveResult) : { env: name, host, is_self: isSelf, resolutions };
   }
 
   async resolve(input: string): Promise<ResolveResult | MultiResolveResult> {
     const identity = await this.identity();
-    if (!isRef(input)) return this.localResolve(validateEnvName(input), identity.host);
+    if (!isRef(input)) return this.localResolve(validateEnvName(input), identity.host, true);
     const parsed = parseRef(input);
-    if (await this.isLocalHost(parsed.host)) return this.localResolve(parsed.env, parsed.host);
-    return this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
+    if (await this.isLocalHost(parsed.host, identity)) return this.localResolve(parsed.env, parsed.host, true);
+    const remote = await this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
+    if ("resolutions" in remote) {
+      return {
+        ...remote,
+        is_self: false,
+        resolutions: remote.resolutions.map((resolution) => ({ ...resolution, is_self: false })),
+      };
+    }
+    return { ...remote, is_self: false };
   }
 
   private async remoteResult<T extends object = Record<string, unknown>>(host: string, args: string[]): Promise<T> {
@@ -824,7 +927,7 @@ export class NectarService {
       throw new NectarError("E_NO_MODE", `Environment '${resolved.env}' has multiple modes; use a mode-qualified ref`);
     }
     if (resolved.mode === "web") {
-      const url = resolved.urls.mesh ?? resolved.urls.local;
+      const url = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
       if (url === null) throw new NectarError("E_NOT_FOUND", `Web environment '${resolved.env}' has no reachable URL`);
       await this.launch(url);
       return { env: resolved.env, mode: resolved.mode, opened: url };
@@ -884,7 +987,7 @@ export class NectarService {
   }
 
   private async openIos(resolved: ResolveResult): Promise<Record<string, unknown>> {
-    const streamUrl = resolved.urls.mesh ?? resolved.urls.local;
+    const streamUrl = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
     const simCapable = (process.platform === "darwin" || process.env.NECTAR_XCRUN_BIN !== undefined) && process.env.NECTAR_IOS_OPEN !== "stream";
     const openStream = async (): Promise<Record<string, unknown>> => {
       if (streamUrl === null) {
@@ -1035,6 +1138,18 @@ export class NectarService {
 
   async gc(options: { dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
     const now = new Date();
+    const config = await this.store.readConfig();
+    const serveOrphans = await this.deadServeProxies(await serveStatus(), config);
+    const orphanReport = [] as Array<{ tailnet_port: number; target: string; env: string | null; fixed: boolean }>;
+    for (const orphan of serveOrphans) {
+      const fixed = options.dryRun ? false : await this.cleanupServeOrphan(orphan);
+      orphanReport.push({
+        tailnet_port: orphan.tailnetPort,
+        target: orphan.target,
+        env: orphan.env ?? null,
+        fixed,
+      });
+    }
     const report: Array<{ env: string; action: GcTransition }> = [];
     for (const snapshot of await this.store.listEnvs()) {
       const action = gcTransition(snapshot, now);
@@ -1068,7 +1183,6 @@ export class NectarService {
         }
       });
     }
-    const config = await this.store.readConfig();
     const current = await this.store.listEnvs();
     const protectedPacks = new Set(
       current
@@ -1084,6 +1198,7 @@ export class NectarService {
     return {
       dry_run: options.dryRun ?? false,
       transitions: report,
+      serve_orphans: orphanReport,
       packs_pruned: packPrunes.map((file) => ({ file: path.relative(this.paths.root, file.path), size_bytes: file.size })),
       ran_at: now.toISOString(),
     };
@@ -1185,6 +1300,22 @@ export class NectarService {
       message: funnelOn
         ? "A Tailscale Funnel entry exists; Nectar never invokes Funnel and will not alter unrelated public exposure"
         : "Tailscale Funnel is off in the Serve configuration",
+    });
+    const serveOrphans = await this.deadServeProxies(status, config);
+    const orphanFixes = options.fix
+      ? await Promise.all(serveOrphans.map(async (orphan) => this.cleanupServeOrphan(orphan)))
+      : serveOrphans.map(() => false);
+    const remainingOrphans = serveOrphans.filter((_orphan, index) => orphanFixes[index] !== true);
+    checks.push({
+      name: "serve-orphans",
+      status: remainingOrphans.length === 0 ? "pass" : "fail",
+      message:
+        serveOrphans.length === 0
+          ? "No Nectar Serve entries point at dead local ports"
+          : remainingOrphans.length === 0
+            ? `Removed ${serveOrphans.length} Nectar Serve ${serveOrphans.length === 1 ? "entry" : "entries"} pointing at dead local ports`
+            : `${remainingOrphans.length} Nectar Serve ${remainingOrphans.length === 1 ? "entry points" : "entries point"} at dead local ports: ${remainingOrphans.map((orphan) => `:${orphan.tailnetPort} -> ${orphan.target}`).join(", ")}`,
+      ...(serveOrphans.length > 0 && remainingOrphans.length === 0 ? { fixed: true } : {}),
     });
     let packServerLive = await this.packServerAlive(config);
     let packServerFixed = false;

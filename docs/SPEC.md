@@ -168,7 +168,10 @@ publishing → serving → expired → cold → (reaped)
 
 - **publishing** — checkout + build/pack running. Failure here → the publish command errors
   and the partial env is recorded as `crashed` with logs (so a bee's failed publish is
-  inspectable, not vanished).
+  inspectable, not vanished). Once runtime allocation begins, failure rollback kills the
+  detached process group, removes the allocated Tailscale Serve entry, clears `serve` and
+  both URLs (releasing the port claims), and stores `failure: { code, message, failed_at,
+  log_tail }` on the crashed record.
 - **serving** — process up (web/cli/backend-with-shell) or artifacts available (desktop).
 - **expired** — TTL passed. `gc` transition: stop process, remove tailscale-serve entry,
   keep worktree + packs + evidence. Env is revivable with `nectar publish` (fast path:
@@ -248,23 +251,32 @@ The easy, important case: embed a live branch build in the desk's Test tab.
 3. Register the **local name** with portless so the same-machine URL follows portless
    grammar: `agent-coupons-stack.kontiki.localhost`. Nectar runs the serve command itself
    and points portless at the already-allocated port; if portless is absent or its proxy is
-   down, the local URL degrades to `http://127.0.0.1:<p>` with a warning in the envelope —
-   never a failure (DECISIONS D3, F1).
-4. Expose to the mesh: allocate a **tailnet port** from 8443–8542 and run
-   `tailscale serve --bg --https=<tport> http://127.0.0.1:<p>`.
+   down, the local URL degrades to the healthy loopback origin (`http://127.0.0.1:<p>` or
+   `http://[::1]:<p>`) with a warning in the envelope — never a failure (DECISIONS D3, F1).
+4. Poll `ready_path` on both IPv4 (`127.0.0.1`) and IPv6 (`::1`) until one returns 200;
+   retain the healthy loopback origin. `ready_timeout` fails with `E_SERVE_TIMEOUT` and the
+   transactional rollback described in §4.4.
+5. Expose to the mesh: allocate a **tailnet port** from 8443–8542 and run
+   `tailscale serve --bg --https=<tport> <healthy-loopback-origin>`.
    **The 443 caveat is load-bearing**: port 443 on nectar machines belongs to the portless
    proxy (launchd), so tailscale serve must always bind non-443 — nectar never allocates
    443 and `nectar doctor` flags any existing 443 serve entry as a portless-breaker.
-5. Poll `ready_path` until 200 (or `ready_timeout` → status `crashed`, envelope error with
-   log tail).
 6. Write the env record; emit the envelope.
 
 **URLs.** `urls.mesh` (`https://<host>.tailca9707.ts.net:<tport>`) is the primary reference
-— valid from every tailnet device including the publishing machine (tailscaled hairpins).
-`urls.local` is the portless nicety for same-machine humans. **`preview_url` on the packet
-is always `urls.mesh`** so the desk never cares where the env lives (DECISIONS D4). One
-tailnet port per env — no path prefixes (SPAs break), no subdomains (ts.net has no
-per-machine wildcards) (DECISIONS D3).
+for other authorized tailnet devices. `urls.local` is the loopback/portless URL for
+same-machine consumers. **`preview_url` on the packet remains `urls.mesh`** because packets
+are location-independent; consumers choose at resolve time (DECISIONS D4). One tailnet
+port per env — no path prefixes (SPAs break), no subdomains (ts.net has no per-machine
+wildcards) (DECISIONS D3).
+
+**Live-use amendment · 2026-07-19 — same-node Serve identity.** A request from the
+publishing machine to its own tailnet Serve URL carries no Tailscale identity and receives
+HTTP 403. `resolve --json` therefore includes `is_self: boolean`, comparing the ref host
+with this machine's Tailscale status identity using case-insensitive full-name and
+short-name aliases. When `is_self` is true, consumers (including the Apiary desk) **must
+prefer `urls.local`**, falling back to `urls.mesh` only when local is null. When false they
+prefer `urls.mesh`. `packet_fields.preview_url` stays mesh-canonical and unchanged.
 
 **Auth.** Two layers, both honest:
 
@@ -546,15 +558,16 @@ nectar show <env|ref> [--json]
     # Full record + last 40 log lines when status is crashed.
 
 nectar open <env|ref>
-    # web → open urls.mesh in the browser · desktop → fetch/verify/launch testpack ·
+    # web → open urls.local when resolve.is_self, otherwise urls.mesh ·
+    # desktop → fetch/verify/launch testpack ·
     # ios → fetch/verify simpack, simctl install+launch (Mac) or open the stream URL ·
     # cli → alias for `nectar shell` · backend → print evidence + shell hint.
     # Always touches the env (TTL reset).
 
 nectar shell <env|ref> [--no-record] [--json]
 nectar resolve <ref> [--json]
-    # ref → concrete consumables: { mode, urls, testpack_url, host, status } — this is the
-    # one command the desk needs beyond open/shell/touch.
+    # ref → concrete consumables: { mode, is_self, urls, testpack_url, host, status }.
+    # Consumers prefer urls.local when is_self, urls.mesh otherwise.
 
 nectar touch <env|ref> [--ttl 72h]
 nectar stop <env>            # stop serve process, keep everything; status → stopped
@@ -569,7 +582,8 @@ nectar evidence ls <env> [--json]
 nectar doctor [--fix]
     # Checks: portless present + proxy up · tailscale up + this host's serve entries ·
     # port-range availability · pack store served on 8440 · no 443 tailscale serve entry
-    # (portless killer) · quota headroom. --fix applies the mechanical ones.
+    # (portless killer) · dead Nectar-range Serve proxies · quota headroom. --fix repairs
+    # the pack chain and removes dead Nectar-range proxies.
 ```
 
 ### `publish --json` result (web example)
@@ -689,7 +703,10 @@ noted future step, out of scope here.
 remove tailscale-serve entry) → cold at expiry+24 h (delete worktree) → reap records at
 cold+14 d → prune pack store/evidence to quota. Grace: envs touched within 6 h are never
 transitioned, so an open review can't be reaped underneath the reviewer (open/resolve/touch
-all bump `last_touched_at`).
+all bump `last_touched_at`). Every non-dry run also removes Nectar-range Serve entries whose
+loopback proxy target is dead; if an env record owns the entry, GC kills its process group,
+clears its runtime claims, and marks it `crashed` with failure details. `doctor` reports the
+same orphan class and `doctor --fix` applies the same cleanup.
 
 ### 10.3 Scheduling
 
@@ -701,11 +718,11 @@ doctor` warns if `gc` hasn't run in 24 h.
 
 | # | failure | behavior |
 | --- | --- | --- |
-| F1 | portless missing / proxy down | web publish **succeeds**; `urls.local` degrades to `http://127.0.0.1:<p>`; warning in envelope; mesh URL unaffected |
+| F1 | portless missing / proxy down | web publish **succeeds**; `urls.local` degrades to the healthy IPv4/IPv6 loopback origin; warning in envelope; mesh URL unaffected |
 | F2 | tailscale down / logged out | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`) |
 | F3 | serve crashes post-publish | lazy detection → `status: crashed`; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
-| F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; env kept as `crashed` for inspection |
-| F5 | port collision (stale external process) | allocator probes before binding, skips occupied, records leaks in `doctor` |
+| F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; detached process killed, Serve entry removed, runtime fields/port claims cleared; env kept as `crashed` with `failure` details |
+| F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove them and clear matching env claims |
 | F6 | checkout conflict / dirty nectar worktree | worktree is nectar-owned ⇒ `git reset --hard` + clean is always legal; borrowed `--worktree` is never reset — publish fails `E_CHECKOUT` instead |
 | F7 | smoke fails (backend) | publish fails `E_SMOKE_FAILED`; evidence written; no packet fields emitted |
 | F8 | testpack fetch sha mismatch | `open` deletes the download, retries once, then errors — never launches an unverified pack |
@@ -715,6 +732,7 @@ doctor` warns if `gc` hasn't run in 24 h.
 | F12 | serve-sim missing or fails to start | ios publish **succeeds** simpack-only: `preview_url: null`, `testpack_ref` present, loud warning; stream death post-publish is F3 |
 | F13 | simctl failure (no runtime, boot timeout, install/launch error) | publish fails `E_SIM` with simctl stderr; env kept as `crashed`; nectar-created device cleaned up |
 | F14 | `open` on a Mac without a matching iOS runtime | `E_PLATFORM` with the `preview_url`-needs-nothing hint; non-Mac `open` goes straight to the stream URL |
+| F15 | publishing host requests its own tailnet Serve URL | Tailscale supplies no caller identity and Serve returns 403; `resolve.is_self: true` tells consumers to prefer `urls.local`; packet `preview_url` remains the canonical mesh URL |
 
 ## 11. Where the implementation lives
 

@@ -133,7 +133,8 @@ describe("ios publish", () => {
     expect(resolved).toMatchObject({
       mode: "ios",
       bundle_id: "no.trmd.dummy",
-      ax_url: "https://fixture.tailtest.ts.net:8443/ax",
+      is_self: true,
+      ax_url: "http://127.0.0.1:4300/ax",
       platform: "ios-sim-arm64",
     });
 
@@ -187,7 +188,7 @@ describe("ios publish", () => {
       vi.stubEnv("NECTAR_IOS_OPEN", "stream");
       return service.open(result.ref as string);
     })();
-    expect(streamed).toMatchObject({ surface: "stream", opened: "https://fixture.tailtest.ts.net:8443" });
+    expect(streamed).toMatchObject({ surface: "stream", opened: "http://127.0.0.1:4300" });
   });
 });
 

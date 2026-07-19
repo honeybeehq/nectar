@@ -2,10 +2,10 @@ import path from "node:path";
 import http from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runCommand, stopProcessGroup } from "../src/commands.js";
+import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
 import { extractTestpack } from "../src/testpack.js";
-import { fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
+import { fakeExecutable, fakeTailscale, initGitRepo, record, tempDir } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -128,16 +128,64 @@ describe("fixture-backed web publish", () => {
     expect(result.warnings).toEqual([expect.stringContaining("portless"), expect.stringContaining("tailscale unavailable")]);
   });
 
-  it("implements F4 with E_SERVE_TIMEOUT, a crashed record, and a log tail", async () => {
-    const { service } = await harness();
+  it("rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT", async () => {
+    const { service, tailscaleLog } = await harness();
     const repo = await initGitRepo({
       "nectar.toml": `name="fixture-broken"\n[web]\nserve="node broken.mjs"\nready_timeout="250ms"\n`,
-      "broken.mjs": `console.log("never ready"); setInterval(() => {}, 1000);\n`,
+      "broken.mjs": `console.log("never ready", process.pid); setInterval(() => {}, 1000);\n`,
     });
-    await expect(service.publish({ repo })).rejects.toMatchObject({ code: "E_SERVE_TIMEOUT", details: { log_tail: ["never ready"] } });
+    let publishError: unknown;
+    try {
+      await service.publish({ repo });
+    } catch (error) {
+      publishError = error;
+    }
+    const failure = publishError as { code?: string; details?: { log_tail?: string[] } };
+    const processLine = failure.details?.log_tail?.find((item) => item.startsWith("never ready "));
+    const processId = Number(processLine?.split(" ").at(-1));
+    expect(failure.code).toBe("E_SERVE_TIMEOUT");
+    expect(processId).toBeGreaterThan(1);
     const env = "fixture-broken--main--web";
     track(service, env);
-    expect(((await service.show(env)).env as { status: string }).status).toBe("crashed");
+    const failed = (await service.show(env)).env as {
+      status: string;
+      serve?: unknown;
+      urls: { local: string | null; mesh: string | null };
+      failure: { code: string; log_tail: string[] };
+    };
+    expect(failed).toMatchObject({
+      status: "crashed",
+      urls: { local: null, mesh: null },
+      failure: { code: "E_SERVE_TIMEOUT", log_tail: [expect.stringContaining("never ready")] },
+    });
+    expect(failed.serve).toBeUndefined();
+    expect(pidAlive(processId)).toBe(false);
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8443 off");
+
+    const recoveryRepo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-recovery", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const recovered = await service.publish({ repo: recoveryRepo });
+    track(service, recovered.env as string);
+    const recoveredRecord = (await service.show(recovered.env as string)).env as {
+      serve: { upstream_port: number; tailnet_port: number };
+    };
+    expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500, tailnet_port: 8443 });
+  });
+
+  it("accepts an IPv6-loopback server and routes Tailscale Serve to the healthy address", async () => {
+    const { service, tailscaleLog } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-ipv6", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('"127.0.0.1"', '"::1"'),
+    });
+    const result = await service.publish({ repo });
+    track(service, result.env as string);
+    const local = (result.urls as { local: string }).local;
+    expect(local).toMatch(/^http:\/\/\[::1\]:45\d\d$/);
+    expect(await fetch(local).then(async (response) => response.text())).toBe("scrubbed");
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8443 ${local}`);
   });
 });
 
@@ -243,6 +291,30 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
 });
 
 describe("lifecycle, doctor, and cross-machine command adapters", () => {
+  it("marks same-node resolves and opens their local URL while packet fields remain mesh-canonical", async () => {
+    const { service, launchLog } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-self", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const published = await service.publish({ repo });
+    const env = published.env as string;
+    track(service, env);
+    expect(published.packet_fields).toMatchObject({ preview_url: "https://fixture.tailtest.ts.net:8443" });
+
+    const byFqdn = await service.resolve(`nectar://FIXTURE.TAILTEST.TS.NET/${env}`);
+    expect(byFqdn).toMatchObject({ env, host: "fixture.tailtest.ts.net", is_self: true });
+    const byShortName = await service.resolve(`nectar://FiXtUrE/${env}`);
+    expect(byShortName).toMatchObject({ env, host: "fixture", is_self: true });
+    const byBase = await service.resolve("fixture-self--main");
+    expect(byBase).toMatchObject({ env: "fixture-self--main", is_self: true });
+    expect("resolutions" in byBase && byBase.resolutions.every((item) => item.is_self)).toBe(true);
+
+    const opened = await service.open(`nectar://fixture/${env}`);
+    expect(opened.opened).toBe((published.urls as { local: string }).local);
+    expect((await readFile(launchLog, "utf8")).trim()).toBe((published.urls as { local: string }).local);
+  });
+
   it("expires, revives on the same URL, stops, cools, and trashes an env", async () => {
     const { service } = await harness();
     const repo = await initGitRepo({
@@ -305,6 +377,74 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect(checks.find((check) => check.name === "funnel")).toMatchObject({ name: "funnel", status: "fail" });
   });
 
+  it("reports dead loopback Serve entries and cleans them through doctor --fix and gc", async () => {
+    const { service, tailscaleLog } = await harness();
+    vi.stubEnv(
+      "FAKE_TS_SERVE_STATUS",
+      JSON.stringify({
+        Web: {
+          "fixture.tailtest.ts.net:8444": {
+            Handlers: { "/": { Proxy: "http://127.0.0.1:4598" } },
+          },
+        },
+      }),
+    );
+    const diagnosed = await service.doctor();
+    expect(diagnosed.healthy).toBe(false);
+    const diagnosedChecks = diagnosed.checks as Array<{ name: string; status: string; message: string }>;
+    const orphanCheck = diagnosedChecks.find((check) => check.name === "serve-orphans");
+    expect(orphanCheck).toMatchObject({ name: "serve-orphans", status: "fail" });
+    expect(orphanCheck?.message).toContain(":8444 -> http://127.0.0.1:4598");
+
+    const fixed = await service.doctor({ fix: true });
+    expect(fixed.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "serve-orphans", status: "pass", fixed: true })]),
+    );
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8444 off");
+
+    const orphanEnv = record({
+      name: "fixture-orphan--main--web",
+      serve: {
+        cmd: "node dead.mjs",
+        pid: 999_999,
+        pgid: 999_999,
+        upstream_port: 4597,
+        tailnet_port: 8445,
+      },
+      urls: { local: "http://127.0.0.1:4597", mesh: "https://fixture.tailtest.ts.net:8445" },
+    });
+    await service.store.writeEnv(orphanEnv);
+    vi.stubEnv(
+      "FAKE_TS_SERVE_STATUS",
+      JSON.stringify({
+        Web: {
+          "fixture.tailtest.ts.net:8445": {
+            Handlers: { "/": { Proxy: "http://127.0.0.1:4597" } },
+          },
+        },
+      }),
+    );
+    expect(await service.gc()).toMatchObject({
+      serve_orphans: [
+        {
+          tailnet_port: 8445,
+          target: "http://127.0.0.1:4597",
+          env: orphanEnv.name,
+          fixed: true,
+        },
+      ],
+    });
+    const cleaned = await service.store.readEnv(orphanEnv.name);
+    expect(cleaned).toMatchObject({
+      status: "crashed",
+      urls: { local: null, mesh: null },
+      failure: { code: "E_SERVE_ORPHAN" },
+    });
+    expect(cleaned.failure?.message).toContain(":8445");
+    expect(cleaned.serve).toBeUndefined();
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8445 off");
+  });
+
   it("resolves a mode-qualified remote ref through tailscale ssh and reports F9", async () => {
     const { service } = await harness();
     const remote = {
@@ -318,9 +458,10 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
       entry: null,
       host: "remote",
       status: "serving",
+      is_self: true,
     };
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", JSON.stringify({ ok: true, command: "resolve", result: remote }));
-    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual(remote);
+    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual({ ...remote, is_self: false });
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", "");
     vi.stubEnv("FAKE_TS_SSH_FAIL", "1");
     await expect(service.resolve("nectar://offline/remote-app--main--web")).rejects.toThrow(/Host 'offline' unreachable/);

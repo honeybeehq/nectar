@@ -734,6 +734,12 @@ Genuinely unresolved — flagged here rather than hedged inline:
    one streamed env per host (quota 1) until it does. Also: pin the serve-sim version as a
    nectar dependency — `npx serve-sim@latest` drift inside a publish path is not
    acceptable.
+   *Partially validated 2026-07-19 (serve-sim 0.1.45, macbook-pro-1):* (a) holds — the
+   full manual chain (dedicated `nectar-ios-poc` device on iOS 26.5 → Release build pinned
+   to its UDID → `simctl install/launch` → `serve-sim <device> -p 3210` →
+   `tailscale serve --https=8460`) streamed an interactive simulator to the tailnet;
+   serve-sim binds loopback by default, which fits the exposure model. (b) multi-instance
+   remains unverified.
 9. **`ios` in the packet kind vocabulary.** The desk contract's `ReviewPacketKind` is
    `web | desktop | cli | code`; ios packets need their own kind (glyph, "open simpack"
    affordance, Test-tab sizing for a phone aspect ratio). Nectar's emitted fields already

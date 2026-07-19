@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, rename } from "node:fs/promises";
 import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo } from "./git.js";
-import { allocatePort, portAvailable, portOpen } from "./ports.js";
+import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
   pidAlive,
@@ -25,6 +25,7 @@ import { logTail, prepareLog } from "./logs.js";
 import {
   remoteNectar,
   servePackStore,
+  serveProxyEntries,
   serveStatus,
   serveWeb,
   statusHasFunnel,
@@ -32,6 +33,7 @@ import {
   statusHasProxyTarget,
   stopServe,
   tailnetIdentity,
+  type ServeProxyEntry,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
@@ -88,6 +90,10 @@ interface MachineIdentity {
 interface PublishedWeb {
   record: EnvRecord;
   warnings: string[];
+}
+
+interface ServeOrphan extends ServeProxyEntry {
+  env?: string;
 }
 
 function hostAliases(value: string | undefined): Set<string> {
@@ -249,6 +255,52 @@ export class NectarService {
       ...(cleanupErrors.length === 0 ? {} : { cleanup_errors: cleanupErrors }),
     };
     await this.store.writeEnv(record);
+  }
+
+  private async deadServeProxies(status: unknown, config: MachineConfig): Promise<ServeOrphan[]> {
+    const records = await this.store.listEnvs();
+    const candidates = serveProxyEntries(status).filter(
+      (entry) =>
+        entry.tailnetPort >= config.tailnet_port_start &&
+        entry.tailnetPort <= config.tailnet_port_end &&
+        entry.tailnetPort !== 8440,
+    );
+    const inspected = await Promise.all(
+      candidates.map(async (entry): Promise<ServeOrphan | undefined> => {
+        const open =
+          entry.upstreamHost === "localhost"
+            ? await portOpen(entry.upstreamPort)
+            : await portOpenOnHost(entry.upstreamPort, entry.upstreamHost);
+        if (open) return undefined;
+        const owner = records.find((record) => record.serve?.tailnet_port === entry.tailnetPort);
+        return { ...entry, ...(owner === undefined ? {} : { env: owner.name }) };
+      }),
+    );
+    return inspected.filter((entry): entry is ServeOrphan => entry !== undefined);
+  }
+
+  private async cleanupServeOrphan(orphan: ServeOrphan): Promise<boolean> {
+    if (orphan.env === undefined) return stopServe(orphan.tailnetPort);
+    const env = orphan.env;
+    try {
+      return await this.store.withLock(env, async () => {
+        const record = await this.store.readEnv(env);
+        if (record.serve?.tailnet_port !== orphan.tailnetPort) return stopServe(orphan.tailnetPort);
+        const cleanupErrors = await this.cleanupRuntime(record);
+        record.status = "crashed";
+        record.failure = {
+          code: "E_SERVE_ORPHAN",
+          message: `Tailscale Serve :${orphan.tailnetPort} pointed at dead local target ${orphan.target}`,
+          failed_at: new Date().toISOString(),
+          log_tail: await logTail(this.paths, record.name),
+          ...(cleanupErrors.length === 0 ? {} : { cleanup_errors: cleanupErrors }),
+        };
+        await this.store.writeEnv(record);
+        return cleanupErrors.length === 0;
+      });
+    } catch {
+      return false;
+    }
   }
 
   private async releaseSim(record: EnvRecord): Promise<void> {
@@ -1086,6 +1138,18 @@ export class NectarService {
 
   async gc(options: { dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
     const now = new Date();
+    const config = await this.store.readConfig();
+    const serveOrphans = await this.deadServeProxies(await serveStatus(), config);
+    const orphanReport = [] as Array<{ tailnet_port: number; target: string; env: string | null; fixed: boolean }>;
+    for (const orphan of serveOrphans) {
+      const fixed = options.dryRun ? false : await this.cleanupServeOrphan(orphan);
+      orphanReport.push({
+        tailnet_port: orphan.tailnetPort,
+        target: orphan.target,
+        env: orphan.env ?? null,
+        fixed,
+      });
+    }
     const report: Array<{ env: string; action: GcTransition }> = [];
     for (const snapshot of await this.store.listEnvs()) {
       const action = gcTransition(snapshot, now);
@@ -1119,7 +1183,6 @@ export class NectarService {
         }
       });
     }
-    const config = await this.store.readConfig();
     const current = await this.store.listEnvs();
     const protectedPacks = new Set(
       current
@@ -1135,6 +1198,7 @@ export class NectarService {
     return {
       dry_run: options.dryRun ?? false,
       transitions: report,
+      serve_orphans: orphanReport,
       packs_pruned: packPrunes.map((file) => ({ file: path.relative(this.paths.root, file.path), size_bytes: file.size })),
       ran_at: now.toISOString(),
     };
@@ -1236,6 +1300,22 @@ export class NectarService {
       message: funnelOn
         ? "A Tailscale Funnel entry exists; Nectar never invokes Funnel and will not alter unrelated public exposure"
         : "Tailscale Funnel is off in the Serve configuration",
+    });
+    const serveOrphans = await this.deadServeProxies(status, config);
+    const orphanFixes = options.fix
+      ? await Promise.all(serveOrphans.map(async (orphan) => this.cleanupServeOrphan(orphan)))
+      : serveOrphans.map(() => false);
+    const remainingOrphans = serveOrphans.filter((_orphan, index) => orphanFixes[index] !== true);
+    checks.push({
+      name: "serve-orphans",
+      status: remainingOrphans.length === 0 ? "pass" : "fail",
+      message:
+        serveOrphans.length === 0
+          ? "No Nectar Serve entries point at dead local ports"
+          : remainingOrphans.length === 0
+            ? `Removed ${serveOrphans.length} Nectar Serve ${serveOrphans.length === 1 ? "entry" : "entries"} pointing at dead local ports`
+            : `${remainingOrphans.length} Nectar Serve ${remainingOrphans.length === 1 ? "entry points" : "entries point"} at dead local ports: ${remainingOrphans.map((orphan) => `:${orphan.tailnetPort} -> ${orphan.target}`).join(", ")}`,
+      ...(serveOrphans.length > 0 && remainingOrphans.length === 0 ? { fixed: true } : {}),
     });
     let packServerLive = await this.packServerAlive(config);
     let packServerFixed = false;

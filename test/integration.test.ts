@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
 import { extractTestpack } from "../src/testpack.js";
-import { fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
+import { fakeExecutable, fakeTailscale, initGitRepo, record, tempDir } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -375,6 +375,74 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect(checks.find((check) => check.name === "serve-443")).toMatchObject({ name: "serve-443", status: "fail" });
     expect(checks.find((check) => check.name === "serve-443")?.message).toContain("portless");
     expect(checks.find((check) => check.name === "funnel")).toMatchObject({ name: "funnel", status: "fail" });
+  });
+
+  it("reports dead loopback Serve entries and cleans them through doctor --fix and gc", async () => {
+    const { service, tailscaleLog } = await harness();
+    vi.stubEnv(
+      "FAKE_TS_SERVE_STATUS",
+      JSON.stringify({
+        Web: {
+          "fixture.tailtest.ts.net:8444": {
+            Handlers: { "/": { Proxy: "http://127.0.0.1:4598" } },
+          },
+        },
+      }),
+    );
+    const diagnosed = await service.doctor();
+    expect(diagnosed.healthy).toBe(false);
+    const diagnosedChecks = diagnosed.checks as Array<{ name: string; status: string; message: string }>;
+    const orphanCheck = diagnosedChecks.find((check) => check.name === "serve-orphans");
+    expect(orphanCheck).toMatchObject({ name: "serve-orphans", status: "fail" });
+    expect(orphanCheck?.message).toContain(":8444 -> http://127.0.0.1:4598");
+
+    const fixed = await service.doctor({ fix: true });
+    expect(fixed.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "serve-orphans", status: "pass", fixed: true })]),
+    );
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8444 off");
+
+    const orphanEnv = record({
+      name: "fixture-orphan--main--web",
+      serve: {
+        cmd: "node dead.mjs",
+        pid: 999_999,
+        pgid: 999_999,
+        upstream_port: 4597,
+        tailnet_port: 8445,
+      },
+      urls: { local: "http://127.0.0.1:4597", mesh: "https://fixture.tailtest.ts.net:8445" },
+    });
+    await service.store.writeEnv(orphanEnv);
+    vi.stubEnv(
+      "FAKE_TS_SERVE_STATUS",
+      JSON.stringify({
+        Web: {
+          "fixture.tailtest.ts.net:8445": {
+            Handlers: { "/": { Proxy: "http://127.0.0.1:4597" } },
+          },
+        },
+      }),
+    );
+    expect(await service.gc()).toMatchObject({
+      serve_orphans: [
+        {
+          tailnet_port: 8445,
+          target: "http://127.0.0.1:4597",
+          env: orphanEnv.name,
+          fixed: true,
+        },
+      ],
+    });
+    const cleaned = await service.store.readEnv(orphanEnv.name);
+    expect(cleaned).toMatchObject({
+      status: "crashed",
+      urls: { local: null, mesh: null },
+      failure: { code: "E_SERVE_ORPHAN" },
+    });
+    expect(cleaned.failure?.message).toContain(":8445");
+    expect(cleaned.serve).toBeUndefined();
+    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8445 off");
   });
 
   it("resolves a mode-qualified remote ref through tailscale ssh and reports F9", async () => {

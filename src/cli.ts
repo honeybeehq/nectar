@@ -123,7 +123,7 @@ program
 program
   .command("doctor")
   .description("check local dependencies, serve entries, ports, and quotas")
-  .option("--fix", "configure only the mechanical :8440 pack-store serve entry")
+  .option("--fix", "repair the :8440 pack-store chain and remove dead Nectar Serve entries")
   .action(async (options: { fix?: boolean }) =>
     execute("doctor", async () => new NectarService().doctor({ fix: options.fix ?? false })),
   );

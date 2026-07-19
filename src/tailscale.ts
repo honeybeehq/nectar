@@ -6,6 +6,13 @@ export interface TailnetIdentity {
   dnsName: string;
 }
 
+export interface ServeProxyEntry {
+  tailnetPort: number;
+  target: string;
+  upstreamHost: string;
+  upstreamPort: number;
+}
+
 function binary(): string {
   return process.env.NECTAR_TAILSCALE_BIN ?? "tailscale";
 }
@@ -63,6 +70,53 @@ function scalarStrings(value: unknown): string[] {
     return Object.entries(value).flatMap(([key, item]) => [key, ...scalarStrings(item)]);
   }
   return [];
+}
+
+function portFromServeKey(key: string): number | undefined {
+  const match = key.match(/(?:^|:)(\d{1,5})$/);
+  if (match?.[1] === undefined) return undefined;
+  const port = Number(match[1]);
+  return port > 0 && port <= 65_535 ? port : undefined;
+}
+
+function loopbackProxy(value: string): Omit<ServeProxyEntry, "tailnetPort" | "target"> | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") return undefined;
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined;
+  return { upstreamHost: host, upstreamPort: port };
+}
+
+export function serveProxyEntries(status: unknown): ServeProxyEntry[] {
+  const found = new Map<string, ServeProxyEntry>();
+  const walk = (value: unknown, inheritedPort?: number): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, inheritedPort);
+      return;
+    }
+    if (typeof value !== "object" || value === null) return;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const tailnetPort = portFromServeKey(key) ?? inheritedPort;
+      if (typeof child === "string" && tailnetPort !== undefined) {
+        const upstream = loopbackProxy(child);
+        if (upstream !== undefined) {
+          const entry = { tailnetPort, target: child, ...upstream };
+          found.set(`${entry.tailnetPort}\0${entry.target}`, entry);
+        }
+      } else {
+        walk(child, tailnetPort);
+      }
+    }
+  };
+  walk(status);
+  return [...found.values()].sort((a, b) => a.tailnetPort - b.tailnetPort || a.target.localeCompare(b.target));
 }
 
 export function statusHasPort(status: unknown, port: number): boolean {

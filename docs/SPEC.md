@@ -476,6 +476,27 @@ RAM-heavy.
 serving simulator directly. serve-sim's gesture/log APIs are a future hook for scripted
 walkthroughs recorded as evidence.
 
+**The AX channel.** serve-sim exposes `/ax` on the stream port — an SSE stream of the
+normalized accessibility snapshot: `{screen, elements[]}` with per-element
+`{id, path, label, value, role, type, enabled, frame}`. Verified live 2026-07-19 (0.1.45):
+the full semantic tree of the foreground app, updating as the UI changes. Because it rides
+the same origin as `preview_url`, packets get it for free — no extra port, no extra nectar
+work. Two consumers are designed-for:
+
+- *Element-anchored feedback (desk).* The Test tab overlays AX frames on the stream
+  (scale by `screen` vs. video size); an inspect-mode click hit-tests client-side and
+  inserts a structured element chip into the verdict composer —
+  `[tap me · Button · path 0.4]` — so steers carry machine-readable anchors instead of
+  "the button lower left". Apiary-side work; coordination item alongside OQ9.
+- *Structured assertions (reviewer bees).* An e2e/scout bee curls `/ax` and asserts on
+  roles/labels — cheaper and more robust than screenshot reading. v0.1's
+  `nectar evidence` can snapshot `/ax` at publish as a baseline evidence line.
+
+Caveat: AX `path`s are positional and shift with layout; the durable anchor is the app's
+own accessibility identifier (RN `testID` → AX id). House rule for reviewable apps: set
+`testID` on interactive elements. serve-sim also defines an unavailability error for
+sims without AX — treat `/ax` as best-effort, never gate publish on it.
+
 **Packet mapping.** `packet_fields` emits `preview_url` (stream) + `testpack_ref`
 (simpack) — both fit the existing Forum schema unchanged. The desk-side
 `ReviewPacketKind` vocabulary (`web | desktop | cli | code`) has no `ios` yet; until

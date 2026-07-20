@@ -3,7 +3,9 @@
 *2026-07-20 · design memo, nothing built. The v0.2 exposure design (V0.2 §5, D21)
 assumes every publisher and the relay share one tailnet. This memo works out what a
 future looks like when they don't — external teams using nectar without joining the
-operator's tailnet — and how much of it is worth building, when.*
+operator's tailnet — and how much of it is worth building, when. For the product framing
+(the three tiers, and the Cloudflare-native architecture for the hosted tier) see
+[FUTURE-productization.md](FUTURE-productization.md).*
 
 ## 1. What the tailnet is quietly doing today
 

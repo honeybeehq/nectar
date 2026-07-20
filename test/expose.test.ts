@@ -76,9 +76,9 @@ http.createServer((_q, r) => { r.writeHead(200); r.end("ok"); }).listen(Number(p
 
 describe("exposureSub", () => {
   it("builds a DNS label and adds an unguessable suffix only when public", () => {
-    const base = record({ name: "kontiki--agent-coupons--web", app: "kontiki", branch: "agent/coupons", eid: "e7f3" });
-    expect(exposureSub(base, false)).toBe("kontiki-agent-coupons-e7f3");
-    expect(exposureSub(base, true)).toMatch(/^kontiki-agent-coupons-e7f3-[0-9a-f]{8}$/);
+    const base = record({ name: "acme--agent-coupons--web", app: "acme", branch: "agent/coupons", eid: "e7f3" });
+    expect(exposureSub(base, false)).toBe("acme-agent-coupons-e7f3");
+    expect(exposureSub(base, true)).toMatch(/^acme-agent-coupons-e7f3-[0-9a-f]{8}$/);
   });
 
   it("caps at 63 chars", () => {

@@ -16,13 +16,13 @@ $ nectar publish --json
   "ok": true,
   "command": "publish",
   "result": {
-    "env": "kontiki--coupons-stack--web",
+    "env": "acme--coupons-stack--web",
     "mode": "web",
     "urls": {
-      "local": "https://coupons-stack.kontiki.localhost",
-      "mesh":  "https://trmd-metal-1.tailca9707.ts.net:8444"
+      "local": "https://coupons-stack.acme.localhost",
+      "mesh":  "https://builder-1.tailnet.ts.net:8444"
     },
-    "ref": "nectar://trmd-metal-1/kontiki--coupons-stack--web",
+    "ref": "nectar://builder-1/acme--coupons-stack--web",
     "expires_at": "2026-07-21T12:04:11Z"
   }
 }

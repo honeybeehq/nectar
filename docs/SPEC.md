@@ -55,7 +55,7 @@ Agents of any harness call it directly; the packet carries only strings.
   exist in the desk contract's kind vocabulary yet — coordination item, see §6.5 and open
   question 9.)
 - **ref** — the canonical cross-machine handle: `nectar://<host>/<env-name>`, where `<host>`
-  is the machine's tailnet hostname (`trmd-metal-1`). Refs are resolved by `nectar resolve`
+  is the machine's tailnet hostname (`builder-1`). Refs are resolved by `nectar resolve`
   and consumed by `nectar open` / `nectar shell` on any mesh machine. Emitted refs are
   always mode-qualified. `nectar resolve <app>--<branch-slug>` accepts the mode-less base
   name as a discovery form and returns every mode record for that pair.
@@ -108,7 +108,7 @@ servers surface honestly as `status: crashed` with a log tail.
   envs/<name>.json          # <name> includes --web/--desktop; source of truth
   work/<name>/              # nectar-owned git worktree/clone of the branch
   packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
-    kontiki-desktop--agent-coupons-stack.testpack.zip
+    acme-desktop--agent-coupons-stack.testpack.zip
   evidence/<name>/          # shell recordings, smoke output, screenshots
     shell-20260718T1204.cast
     smoke-20260718T1204.txt
@@ -129,33 +129,33 @@ lifecycle, and composes the publish envelope's packet fields from both.
 ```json
 {
   "eid": "e7f3",
-  "name": "kontiki--agent-coupons-stack--web",
+  "name": "acme--agent-coupons-stack--web",
   "mode": "web",
-  "app": "kontiki",
-  "repo": "/Users/tormodhaugland/Projects/kontiki/repos/kontiki",
+  "app": "acme",
+  "repo": "/home/you/Projects/acme/repos/acme",
   "branch": "agent/coupons-stack",
   "commit": "8f3ab21d",
-  "worktree": "/Users/tormodhaugland/.nectar/work/kontiki--agent-coupons-stack--web",
+  "worktree": "/home/you/.nectar/work/acme--agent-coupons-stack--web",
   "status": "serving",
   "serve": {
     "cmd": "pnpm dev",
     "pid": 48213,
     "pgid": 48213,
     "upstream_port": 4117,
-    "portless_name": "agent-coupons-stack.kontiki",
+    "portless_name": "agent-coupons-stack.acme",
     "tailnet_port": 8444
   },
   "urls": {
-    "local": "https://agent-coupons-stack.kontiki.localhost",
-    "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444"
+    "local": "https://agent-coupons-stack.acme.localhost",
+    "mesh": "https://builder-1.tailnet.ts.net:8444"
   },
-  "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack--web",
+  "ref": "nectar://builder-1/acme--agent-coupons-stack--web",
   "published_at": "2026-07-18T12:04:11Z",
   "expires_at": "2026-07-21T12:04:11Z",
   "last_touched_at": "2026-07-18T12:04:11Z",
   "publisher": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "user": "tormodhaugland" },
   "packet_hint": "fp-0244",
-  "evidence": ["evidence/kontiki--agent-coupons-stack--web/smoke-20260718T1204.txt"]
+  "evidence": ["evidence/acme--agent-coupons-stack--web/smoke-20260718T1204.txt"]
 }
 ```
 
@@ -196,7 +196,7 @@ reaped mid-session: `gc` skips envs touched in the last 6 h.
 Checked into the repo root. Names the repo's own commands; nectar adds no build logic.
 
 ```toml
-name = "kontiki"                # app name; default: repo dir name
+name = "acme"                # app name; default: repo dir name
 
 [web]
 serve = "pnpm dev"              # must respect $PORT
@@ -212,7 +212,7 @@ embed_url = "web"               # electron only: "web" = reuse this repo's [web]
 
 [cli]
 build = "pnpm build"
-bin = "dist/bin/kontiki"        # file or dir prepended to PATH in provisioned shells
+bin = "dist/bin/acme"        # file or dir prepended to PATH in provisioned shells
 
 [backend]
 seed = "pnpm db:seed:review"    # idempotent; runs in the env worktree
@@ -220,13 +220,13 @@ smoke = "pnpm test:smoke"       # output captured as evidence
 
 [ios]
 pack = "pnpm ios:sim-release"   # must place the built *simulator* .app at $NECTAR_PACK_OUT
-bundle_id = "no.kontrol.kontiki"
+bundle_id = "no.kontrol.acme"
 device = "iPhone 16"            # simctl device type for the streamed simulator
 runtime = "latest"              # iOS runtime pin; default: newest installed
 stream = true                   # false = simpack-only publish (no serve-sim stream)
 
 [secrets]                       # optional; resolved via `hem get` at publish time (§9.2)
-STRIPE_KEY = "project/kontiki/stripe-test"
+STRIPE_KEY = "project/acme/stripe-test"
 ```
 
 Sections are independent; a repo declares only the modes it supports. **Fallback without a
@@ -255,7 +255,7 @@ The easy, important case: embed a live branch build in the desk's Test tab.
 2. Allocate an **upstream port** from the machine's range (default 4100–4199) and spawn the
    recipe's `serve` with `PORT=<p>`, detached, logs to `logs/<name>/serve.log`.
 3. Register the **local name** with portless so the same-machine URL follows portless
-   grammar: `agent-coupons-stack.kontiki.localhost`. Nectar runs the serve command itself
+   grammar: `agent-coupons-stack.acme.localhost`. Nectar runs the serve command itself
    and points portless at the already-allocated port; if portless is absent or its proxy is
    down, the local URL degrades to the healthy loopback origin (`http://127.0.0.1:<p>` or
    `http://[::1]:<p>`) with a warning in the envelope — never a failure (DECISIONS D3, F1).
@@ -269,7 +269,7 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    443 and `nectar doctor` flags any existing 443 serve entry as a portless-breaker.
 6. Write the env record; emit the envelope.
 
-**URLs.** `urls.mesh` (`https://<host>.tailca9707.ts.net:<tport>`) is the primary reference
+**URLs.** `urls.mesh` (`https://<host>.tailnet.ts.net:<tport>`) is the primary reference
 for other authorized tailnet devices. `urls.local` is the loopback/portless URL for
 same-machine consumers. **`preview_url` on the packet remains `urls.mesh`** because packets
 are location-independent; consumers choose at resolve time (DECISIONS D4). One tailnet
@@ -305,11 +305,11 @@ standard is the **testpack**.
 **Layout** — a zip, name `<app>--<branch-slug>--<platform>.testpack.zip`:
 
 ```text
-kontiki-desktop--agent-coupons-stack--darwin-arm64.testpack/
+acme-desktop--agent-coupons-stack--darwin-arm64.testpack/
   testpack.json            # manifest — see below
   app/
-    Kontiki.app/           # darwin: the .app bundle
-                           # (win: app/Kontiki/Kontiki.exe · linux: app/kontiki.AppImage)
+    Acme.app/           # darwin: the .app bundle
+                           # (win: app/Acme/Acme.exe · linux: app/acme.AppImage)
 ```
 
 **Manifest** — `testpack.json`:
@@ -317,18 +317,18 @@ kontiki-desktop--agent-coupons-stack--darwin-arm64.testpack/
 ```json
 {
   "testpack": 1,
-  "app": "kontiki-desktop",
+  "app": "acme-desktop",
   "branch": "agent/coupons-stack",
   "commit": "8f3ab21d",
   "platform": "darwin-arm64",
   "kind": "electron",
-  "entry": "app/Kontiki.app",
+  "entry": "app/Acme.app",
   "embed": {
     "mode": "webview",
-    "url": "https://trmd-metal-1.tailca9707.ts.net:8444"
+    "url": "https://builder-1.tailnet.ts.net:8444"
   },
   "built_at": "2026-07-18T12:04:11Z",
-  "built_by": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "host": "trmd-metal-1" }
+  "built_by": { "hive_bee": "drone-11", "hive_session": "CL.9fc", "host": "builder-1" }
 }
 ```
 
@@ -363,7 +363,7 @@ dependency for zero threat-model gain.
 well-known port **8440**, set up by `nectar doctor --fix` once per machine. The packet's
 `testpack_ref` is the `nectar://` ref;
 `nectar resolve` maps it to the concrete
-`https://<host>.tailca9707.ts.net:8440/<name>/<file>.testpack.zip`, and `nectar open <ref>`
+`https://<host>.tailnet.ts.net:8440/<name>/<file>.testpack.zip`, and `nectar open <ref>`
 on any mesh machine fetches (cached in its own pack store by sha256), verifies, and launches
 `entry`. Cross-platform: `nectar open` errors with `E_PLATFORM` if the pack's platform
 doesn't match — publishing multi-platform packs is one publish per platform (usually the
@@ -417,7 +417,7 @@ data*, plus a pokeable env for the skeptical reviewer.
 
 Packet: no `preview_url`/`testpack_ref`; the agent puts the smoke summary lines into
 `test_evidence` and may append the env ref as a final evidence line
-(`nectar://trmd-metal-1/kontiki-api--agent-rate-limit · seeded env, `nectar shell` to poke`).
+(`nectar://builder-1/acme-api--agent-rate-limit · seeded env, `nectar shell` to poke`).
 The desk renders backend packets diff-first, exactly as designed.
 
 ### 6.5 ios — the simpack + the streamed simulator
@@ -443,7 +443,7 @@ Xcode + simulator runtimes (serve-sim is arm64-only). Non-Mac hosts fail fast wi
 `E_PLATFORM` — iOS publishes route to the Mac fleet (the `trmd-*-mini*` machines are the
 intended publish hosts). Every other mode stays platform-agnostic.
 
-*Field notes (2026-07-19 spike, macbook-pro-1):* two failure modes observed that v0.1 must
+*Field notes (2026-07-19 spike, desk-mac):* two failure modes observed that v0.1 must
 design around. (1) Xcode's destination matcher prefers *physical* devices when one is
 paired — builds must always pin `-destination` to the nectar-created simulator's UDID,
 never a device name. (2) Xcode/runtime skew is real: Xcode 26.6 refused the installed
@@ -460,7 +460,7 @@ must surface the `xcodebuild -downloadPlatform iOS` remedy.
    `xcodebuild -sdk iphonesimulator` or `expo run:ios --configuration Release`; nectar
    doesn't care, per the not-a-build-system rule.
 3. Finalize the simpack into the pack store — testpack format with
-   `platform: "ios-sim-arm64"`, `kind: "ios-sim"`, `entry: "app/Kontiki.app"`, and the
+   `platform: "ios-sim-arm64"`, `kind: "ios-sim"`, `entry: "app/Acme.app"`, and the
    ios-kind-required manifest field `bundle_id` (simctl launches by bundle id, not path).
    Post-zip digest in the env record per §6.2. Emits `testpack_ref`.
 4. Stream (default, `stream = true`): create a **dedicated simulator per env**
@@ -615,15 +615,15 @@ nectar doctor [--fix]
   "command": "publish",
   "result": {
     "eid": "e7f3",
-    "env": "kontiki--agent-coupons-stack--web",
+    "env": "acme--agent-coupons-stack--web",
     "mode": "web",
     "branch": "agent/coupons-stack",
     "commit": "8f3ab21d",
-    "ref": "nectar://trmd-metal-1/kontiki--agent-coupons-stack--web",
-    "urls": { "local": "https://agent-coupons-stack.kontiki.localhost",
-              "mesh": "https://trmd-metal-1.tailca9707.ts.net:8444" },
+    "ref": "nectar://builder-1/acme--agent-coupons-stack--web",
+    "urls": { "local": "https://agent-coupons-stack.acme.localhost",
+              "mesh": "https://builder-1.tailnet.ts.net:8444" },
     "packet_fields": {
-      "preview_url": "https://trmd-metal-1.tailca9707.ts.net:8444",
+      "preview_url": "https://builder-1.tailnet.ts.net:8444",
       "testpack_ref": null,
       "shell_recipe": null
     },
@@ -671,7 +671,7 @@ hive integration surface. No hive API calls, no harness detection.
 - Exposure = tailnet-only, on ports **8440** (pack store, read-only static) and
   **8443–8542** (web envs). Nothing binds public interfaces; funnel is never used.
 - Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
-  a shared external node (`kontikicms`, user `mbtz@`). Deploy rule (ops task, not code):
+  a shared external node (`shared-node`, user `mbtz@`). Deploy rule (ops task, not code):
   ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`
   reminds; it cannot verify ACLs.
 - Dev servers are dev servers: debug endpoints, sourcemaps, verbose errors. Acceptable
@@ -811,7 +811,7 @@ Genuinely unresolved — flagged here rather than hedged inline:
    one streamed env per host (quota 1) until it does. Also: pin the serve-sim version as a
    nectar dependency — `npx serve-sim@latest` drift inside a publish path is not
    acceptable.
-   *Resolved 2026-07-19 (serve-sim 0.1.45, macbook-pro-1):* (a) holds — device-targeted
+   *Resolved 2026-07-19 (serve-sim 0.1.45, desk-mac):* (a) holds — device-targeted
    streaming works and binds loopback by default, fitting the exposure model. (b) is
    **refuted**: starting a second serve-sim instance killed the first one's encoder
    (`error encoding frame: encodingFailed`, then exit). The planned fallback shipped:

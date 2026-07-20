@@ -64,11 +64,11 @@ issues an idempotent Serve-off for the allocated port.
 
 ## D4 — `preview_url` is always the tailnet URL; refs are machine-bound
 
-**Chose:** the packet's `preview_url` carries `https://<host>.tailca9707.ts.net:<port>`;
+**Chose:** the packet's `preview_url` carries `https://<host>.tailnet.ts.net:<port>`;
 canonical refs are `nectar://<host>/<env>`; there is no global registry — envs live and die
 on their publishing machine.
 **Alternatives:** (a) carry the portless localhost URL and teach the desk to rewrite;
-(b) a mesh-wide nectar registry with location-transparent refs (`nectar://kontiki--branch`)
+(b) a mesh-wide nectar registry with location-transparent refs (`nectar://acme--branch`)
 and per-machine resolution.
 **Why:** (a) only works when reviewer and publisher share a machine — the actual fleet is a
 Mac reviewing work from linux/mini hosts. The mesh URL is the only location-independent
@@ -152,7 +152,7 @@ no Apiary at all (humans, other tools). The desk's recipe row stays a *pointer*
 
 **Chose:** no nectar-level auth in v0/v1; exposure bounded to ports 8440–8542; documented
 ops rule to ACL those ports to operator devices (the tailnet already has one non-operator
-node — kontikicms/mbtz); scrubbed child env + hem-mediated test secrets; explicit statement
+node — shared-node/mbtz); scrubbed child env + hem-mediated test secrets; explicit statement
 that branch code runs at the operator's existing agent trust level, unsandboxed.
 **Alternatives:** (a) signed short-lived URLs on every env (nectar proxy in front);
 (b) per-env basic auth; (c) run publishes in a jail/VM now.
@@ -340,7 +340,7 @@ VM with a dedicated public IP joins the tailnet and reverse-proxies
 `<sub>.nctr.site` to publishers' existing tailscale-serve URLs. Caddy with one DNS-01
 wildcard cert; routes are expiring files managed by a small `nectar-relay` command over
 Tailscale SSH; the D19 gate is basic-auth in the route blocks, built once, centrally.
-Host: `trmd-vps01` (already public-IP'd, tailnet-joined, Caddy-running). Cloudflare named
+Host: `relay-1` (already public-IP'd, tailnet-joined, Caddy-running). Cloudflare named
 tunnels are deliberately not built. exe.dev VMs cannot host the relay — they have no
 dedicated public IP (NAT behind exe.dev's proxy).
 **Alternatives:** (a) cloudflared named tunnels first (the codex and kimi panelists' pick);

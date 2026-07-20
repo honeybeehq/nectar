@@ -4,3 +4,8 @@ coverage/
 *.log
 RESULT.json
 .DS_Store
+
+# Local operator setup — real hosts/IPs/tailnet; placeholders are used in tracked files
+docs/LOCAL-SETUP.md
+*.local.md
+.nectar.local.json

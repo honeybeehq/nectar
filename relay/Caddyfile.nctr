@@ -1,6 +1,6 @@
 # nctr.site public-preview relay — the wildcard site block (D21).
 # Imported/appended into the relay VM's /etc/caddy/Caddyfile beside any other sites
-# (e.g. hooks.trmd.me). Needs a Caddy build with the caddy-dns/cloudflare module and
+# (e.g. hooks.example.com). Needs a Caddy build with the caddy-dns/cloudflare module and
 # CLOUDFLARE_API_TOKEN in the environment (systemd EnvironmentFile=/etc/caddy/nctr.env).
 #
 # One wildcard cert (*.nctr.site) covers every ephemeral preview subdomain — DNS-01 is

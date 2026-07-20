@@ -214,7 +214,7 @@ name; local records cannot provide global ownership.
 
 The single-label rule matters. In a normal full Cloudflare zone, Universal SSL covers the
 apex and first-level subdomains, but not deeper names. Thus
-`env.preview.trmd.no` is **not** automatically covered merely because `trmd.no` is on
+`env.preview.example.com` is **not** automatically covered merely because `example.com` is on
 Cloudflare; it needs Advanced Certificate Manager/Total TLS, an uploaded certificate, or a
 separately delegated child-zone arrangement. `<env>.nectar.site` is covered by the normal
 wildcard. See [Universal SSL hostname coverage](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/).
@@ -229,11 +229,11 @@ the stored DNS record ID proves Nectar already owns it. Never overwrite an unrel
 Assume these local values after normal env resolution:
 
 ```text
-ENV=kontiki--agent-coupons-stack--web
+ENV=acme--agent-coupons-stack--web
 EID=e7f3
-HOSTNAME=kontiki--agent-coupons-stack--web-e7f3.nectar.site
+HOSTNAME=acme--agent-coupons-stack--web-e7f3.nectar.site
 ORIGIN=http://127.0.0.1:4117
-TUNNEL_NAME=nectar-trmd-metal-1-e7f3
+TUNNEL_NAME=nectar-builder-1-e7f3
 ```
 
 Nectar performs the following under the env lock.
@@ -253,7 +253,7 @@ curl --fail-with-body \
   --request POST \
   --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
   --header "Content-Type: application/json" \
-  --data '{"name":"nectar-trmd-metal-1-e7f3","config_src":"cloudflare"}'
+  --data '{"name":"nectar-builder-1-e7f3","config_src":"cloudflare"}'
 ```
 
 The response currently contains both `result.id` and `result.token`; record only the ID.
@@ -334,7 +334,7 @@ curl --fail-with-body \
   "content": "$TUNNEL_ID.cfargotunnel.com",
   "proxied": true,
   "ttl": 1,
-  "comment": "nectar host=trmd-metal-1 env=$ENV eid=$EID expires=$EXPIRES_AT"
+  "comment": "nectar host=builder-1 env=$ENV eid=$EID expires=$EXPIRES_AT"
 }
 JSON
 ```
@@ -580,7 +580,7 @@ The route the helper adds is conceptually:
 ```json
 {
   "@id": "nectar-e7f3",
-  "match": [{ "host": ["kontiki-e7f3.p.example.com"] }],
+  "match": [{ "host": ["acme-e7f3.p.example.com"] }],
   "handle": [{
     "handler": "reverse_proxy",
     "upstreams": [{ "dial": "127.0.0.1:49152" }]
@@ -608,7 +608,7 @@ ssh -S "$CONTROL_SOCKET" -O forward \
 
 ssh -S "$CONTROL_SOCKET" xe-1 \
   sudo /usr/local/sbin/nectar-route put \
-  nectar-e7f3 kontiki-e7f3.p.example.com "$REMOTE_PORT" "$EXPIRES_AT"
+  nectar-e7f3 acme-e7f3.p.example.com "$REMOTE_PORT" "$EXPIRES_AT"
 ```
 
 OpenSSH documents that remote port `0` requests dynamic server allocation and that, with
@@ -722,7 +722,7 @@ name = "nectar-e7f3"
 type = "http"
 localIP = "127.0.0.1"
 localPort = 4117
-subdomain = "kontiki-e7f3"
+subdomain = "acme-e7f3"
 httpUser = "nectar"
 httpPassword = "<review password>"
 ```
@@ -788,7 +788,7 @@ strength (no publishing machine must stay online) and its semantic mismatch with
   "team": "trmd",
   "default_gate": "vercel-auth",
   "projects": {
-    "kontiki": {
+    "acme": {
       "org_id": "team_...",
       "project_id": "prj_..."
     }

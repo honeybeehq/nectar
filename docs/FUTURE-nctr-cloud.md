@@ -63,7 +63,7 @@ new **kind: `nctr-cloud`** beside `relay`:
 
 ```jsonc
 "exposures": {
-  "site":  { "kind": "relay",      "host": "trmd-vps01", "domain": "nctr.site" },  // operator, tailnet
+  "site":  { "kind": "relay",      "host": "relay-1", "domain": "nctr.site" },  // operator, tailnet
   "cloud": { "kind": "nctr-cloud", "api": "https://api.nctr.site" }               // anyone, off-tailnet
 }
 ```

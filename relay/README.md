@@ -17,8 +17,8 @@ machines run no daemon and hold no credentials; they drive the relay over Tailsc
 
 ## Host requirements
 
-Public IPv4, tailnet member, ports 80/443 free-or-Caddy. Current host: `trmd-vps01`
-(`89.167.117.138`), which also serves `hooks.trmd.me` — the relay coexists.
+Public IPv4, tailnet member, ports 80/443 free-or-Caddy. Current host: `relay-1`
+(`203.0.113.10`), which also serves `hooks.example.com` — the relay coexists.
 
 ## One-time bootstrap
 
@@ -51,9 +51,9 @@ default is a password (basic-auth in the route block); `--gate none` needs `--pu
 
 ## Status (2026-07-19)
 
-Built and validated on `trmd-vps01`: custom Caddy v2.11.4 with the cloudflare-dns
+Built and validated on `relay-1`: custom Caddy v2.11.4 with the cloudflare-dns
 module installed via systemd drop-in (old apt binary backed up at
-`/root/caddy-2.6.2.bak`, `hooks.trmd.me` unaffected); `nectar-relay` installed and
+`/root/caddy-2.6.2.bak`, `hooks.example.com` unaffected); `nectar-relay` installed and
 smoke-tested (add/ls/prune/rm); the assembled Caddyfile parses. **Pending:** the
 Cloudflare token at `/etc/caddy/nctr.env`, then `install.sh --with-cert`; the tailnet
 ACL rule; and the `nectar expose`/`unexpose` CLI verbs (nectar-side, not yet built).

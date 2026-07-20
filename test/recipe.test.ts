@@ -10,7 +10,7 @@ describe("nectar.toml recipes", () => {
     await writeFile(
       path.join(repo, "nectar.toml"),
       `
-name = "Kontiki"
+name = "Acme"
 [web]
 serve = "pnpm dev"
 ready_path = "/health"
@@ -24,7 +24,7 @@ embed_url = "web"
     );
     const recipe = await loadRecipe(repo);
     expect(recipe).toEqual({
-      name: "kontiki",
+      name: "acme",
       source: "nectar.toml",
       web: {
         serve: "pnpm dev",

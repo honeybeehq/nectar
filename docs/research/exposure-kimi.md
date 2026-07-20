@@ -25,7 +25,7 @@ mechanism (least code, least ops, least credentials), and which should ship firs
 
 **Recommendation: ship `cloudflare-tunnel` first** (unchanged from D19), with two corrections from
 research: use a **dedicated preview zone** (free Universal SSL only covers first-level wildcards —
-`<env>.preview.trmd.no` is a second-level name and needs paid ACM otherwise), and manage the tunnel
+`<env>.preview.example.com` is a second-level name and needs paid ACM otherwise), and manage the tunnel
 **remotely by token** so per-env work is one API call. **Ship the sish-flavored `ssh-tunnel`
 immediately second** — it is one code path that subsumes exe.dev-as-VM, any generic VM, and later
 `nectar.site` with zero additional mechanism. If "no third party in the traffic path" is a hard
@@ -54,7 +54,7 @@ principle, invert the two: sish first, cloudflare second. Full reasoning in §8.
   ```jsonc
   "exposure": {
     "target": "vm",                        // key into machine config "exposures"
-    "public_url": "https://kontiki--coupons--web.p.example.com",
+    "public_url": "https://acme--coupons--web.p.example.com",
     "gate": "password",                    // access|password|exe-auth|none
     "exposed_at": "2026-07-19T12:00:00Z",
     "pid": 48213,                          // tunnel process, only for flavors that spawn one
@@ -102,12 +102,12 @@ principle, invert the two: sish first, cloudflare second. Full reasoning in §8.
    cloudflared's 404 — the URL dies cleanly.
 
 **The cert gotcha that changes the config shape.** Free Universal SSL covers `example.com` and
-`*.example.com` **only** — second-level wildcards like `*.preview.trmd.no` require Advanced
-Certificate Manager ($10/mo). The v0.2 example domain (`preview.trmd.no`) hits this wall the
-moment envs are `<env>.preview.trmd.no`. Cheapest fixes, in order: **(i) dedicated zone** with
+`*.example.com` **only** — second-level wildcards like `*.preview.example.com` require Advanced
+Certificate Manager ($10/mo). The v0.2 example domain (`preview.example.com`) hits this wall the
+moment envs are `<env>.preview.example.com`. Cheapest fixes, in order: **(i) dedicated zone** with
 first-level env names (`<env>.trmdpreview.com`) — free, and doubles as the future `nectar.site`
 zone (§d); (ii) ACM at $10/mo; (iii) flatten names into the first level of the main zone
-(`pv-<env>.trmd.no` under a `*.trmd.no` wildcard CNAME — works but the wildcard swallows every
+(`pv-<env>.example.com` under a `*.example.com` wildcard CNAME — works but the wildcard swallows every
 unclaimed subdomain of your real domain; sloppy). Take (i).
 
 **Credentials.** Exactly one API token (Account: Cloudflare Tunnel:Edit; Zone: DNS:Edit on the
@@ -300,8 +300,8 @@ ssh nectar-expose@vm 'cat > /etc/caddy/envs/<env>.caddy' <<'EOF'
 @<env> host <env>.p.example.com
 handle @<env> {
 	basic_auth { reviewer <bcrypt-hash> }        # only when gate=password
-	reverse_proxy https://<host>.tailca9707.ts.net:8444 {
-		transport http { tls_server_name <host>.tailca9707.ts.net }
+	reverse_proxy https://<host>.tailnet.ts.net:8444 {
+		transport http { tls_server_name <host>.tailnet.ts.net }
 	}
 }
 EOF

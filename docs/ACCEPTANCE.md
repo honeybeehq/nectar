@@ -225,7 +225,7 @@ The final real Forum/Apiary desk taste remains `needs-second-machine`.
 
 ## ios mode + AX channel (2026-07-19)
 
-Implemented post-v0 (SPEC §6.5, D14) and live-smoked on macbook-pro-1:
+Implemented post-v0 (SPEC §6.5, D14) and live-smoked on desk-mac:
 
 - **ios publish, real chain**: `/tmp/nectar-dummy-ios` (the swiftc dummy fixture as a repo
   with `[ios]` recipe) → `nectar publish --mode ios --json` exited 0 with zero warnings:
@@ -237,7 +237,7 @@ Implemented post-v0 (SPEC §6.5, D14) and live-smoked on macbook-pro-1:
   running manual serve-sim instance (`error encoding frame: encodingFailed`). Consequence
   shipped: `serving_sim_limit` defaults to 1; a second streamed ios publish fails
   `E_QUOTA` loudly instead of silently breaking the first packet's stream.
-- **desktop AX bridge, real chain**: `nectar open nectar://macbook-pro-1/flyt--main--desktop`
+- **desktop AX bridge, real chain**: `nectar open nectar://desk-mac/flyt--main--desktop`
   launched the cached testpack, compiled `ax-dump` via swiftc, and returned
   `ax_url`/`ax_pid`; `/health` reported trusted, `/ax` streamed Flyt's real macOS
   accessibility tree (Electron `AXManualAccessibility` handshake) in the serve-sim schema.

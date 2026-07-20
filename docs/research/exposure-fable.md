@@ -37,7 +37,7 @@ the gate/TTL requirements. **Recommendation: build the nectar.site relay first**
 Tunnels (cloudflared, frp, ssh -R, sish) exist to traverse NAT from machines that have no
 stable inbound path. **Our machines already have one — the tailnet.** A relay that is
 itself a tailnet node can open an ordinary outbound-from-its-perspective HTTPS connection
-to `https://trmd-metal-1.tailca9707.ts.net:8444` and serve the response publicly. That
+to `https://builder-1.tailnet.ts.net:8444` and serve the response publicly. That
 deletes the entire per-publisher half of every tunnel design:
 
 | | tunnel model (cf/ssh/frp) | relay-routing model |
@@ -62,11 +62,11 @@ does this natively; needed for HMR and serve-sim streams).
   without restarts — current Cloudflare guidance steers to this mode
   ([docs](https://developers.cloudflare.com/tunnel/configuration/),
   [setup](https://developers.cloudflare.com/tunnel/setup/))). Per expose:
-  1 API call to add a DNS CNAME `<env>.preview.trmd.no → <tunnel-uuid>.cfargotunnel.com`
+  1 API call to add a DNS CNAME `<env>.preview.example.com → <tunnel-uuid>.cfargotunnel.com`
   ([DNS routing](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/))
   + 1 API call to PUT the tunnel's ingress config with the new hostname→`localhost:<port>`
   rule. Unexpose/gc reverses both.
-- **Gate.** Cloudflare Access supports a **wildcard application** (`*.preview.trmd.no`)
+- **Gate.** Cloudflare Access supports a **wildcard application** (`*.preview.example.com`)
   configured *once* — every exposed env is then behind email-OTP/IdP login with no per-env
   auth work ([Access wildcard](https://blog.cloudflare.com/access-wildcard-subdomain/)).
   Free plan covers 50 users
@@ -194,7 +194,7 @@ for remote refs. No daemon, no token, no config beyond the `exposures` entry.
 
 ### 6.4 Per-env subdomain allocation
 
-- Subdomain = env name (`kontiki--coupons-stack--web.nectar.site`). Hyphens (including
+- Subdomain = env name (`acme--coupons-stack--web.nectar.site`). Hyphens (including
   `--`) are legal DNS labels; guard the 63-char label limit by truncating to 54 chars +
   `-` + 8-char hash. Embedded `--` never lands at positions 3–4, but the slugger should
   reject a leading/trailing hyphen anyway.

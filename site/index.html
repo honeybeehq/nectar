@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>nctr.site — taste it before it becomes honey</title>
+<meta name="description" content="Nectar is the preview substrate on the mesh. When an agent calls its work review-ready, nectar turns the branch into a tasteable surface and hands back a small, stable reference." />
+<meta name="color-scheme" content="dark" />
+<style>
+  :root {
+    --bg: #0e0d0b;
+    --panel: #161411;
+    --ink: #f4efe6;
+    --muted: #a9a094;
+    --line: #2a251e;
+    --honey: #f5b53d;
+    --honey-dim: #c98a1e;
+    --accent: #ffd989;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 70% -10%, #1c1712 0%, var(--bg) 55%) no-repeat, var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+    letter-spacing: 0.1px;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 88px 0 8px; }
+  .mark {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-weight: 650; letter-spacing: 0.4px; color: var(--accent);
+    font-size: 15px; text-transform: lowercase;
+  }
+  .mark svg { width: 22px; height: 22px; }
+  h1 {
+    margin: 22px 0 0; font-size: clamp(34px, 6vw, 56px); line-height: 1.05;
+    font-weight: 700; letter-spacing: -0.02em;
+  }
+  h1 .glow { color: var(--honey); }
+  .tag { margin: 18px 0 0; font-size: clamp(17px, 2.4vw, 21px); color: var(--muted); max-width: 60ch; }
+  .lede { margin: 30px 0 0; font-size: 17px; color: var(--ink); max-width: 64ch; }
+  .lede b { color: var(--accent); font-weight: 600; }
+
+  .cmd {
+    margin: 34px 0 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+  }
+  .cmd .bar { display: flex; gap: 7px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .cmd .bar i { width: 11px; height: 11px; border-radius: 50%; background: #34302a; display: block; }
+  .cmd pre {
+    margin: 0; padding: 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.7;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; color: #e7dfd1;
+  }
+  .cmd .p { color: var(--honey); } .cmd .c { color: #6f6656; } .cmd .s { color: #9fd39a; } .cmd .k { color: var(--accent); }
+
+  h2 { margin: 64px 0 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--honey-dim); }
+  .grid { margin: 20px 0 0; display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card h3 { margin: 0; font-size: 15px; color: var(--accent); font-weight: 600; }
+  .card p { margin: 6px 0 0; font-size: 14px; color: var(--muted); }
+
+  footer { margin: 72px 0 60px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13.5px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--honey); box-shadow: 0 0 10px var(--honey); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="mark">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 2c3 2.2 6 4.4 6 8.2C18 15 15.3 18 12 22 8.7 18 6 15 6 10.2 6 6.4 9 4.2 12 2Z" fill="#f5b53d" opacity="0.92"/>
+        <path d="M12 7c1.6 1.1 3 2.3 3 4.3C15 13.6 13.6 15.2 12 17c-1.6-1.8-3-3.4-3-5.7 0-2 1.4-3.2 3-4.3Z" fill="#0e0d0b"/>
+      </svg>
+      nctr.site
+    </span>
+    <h1>Taste it before<br>it becomes <span class="glow">honey</span>.</h1>
+    <p class="tag">Nectar is the preview substrate on the mesh — the tool an agent calls the moment it declares work review-ready.</p>
+    <p class="lede">Reviewing agent work means <b>testing</b> it, fast. Nectar packages a testable build of the branch, serves it on the mesh, and hands back a small, stable reference. The review desk renders whatever the reference points at — web preview, desktop testpack, streamed iOS simulator. One command, and the work is tasteable from any device.</p>
+  </header>
+
+  <div class="cmd">
+    <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="c"># at review-ready, on the machine where the agent runs</span>
+<span class="p">$</span> nectar publish <span class="k">--json</span>
+<span class="p">$</span> nectar expose <span class="k">--to</span> site        <span class="c"># when a preview needs to leave the tailnet</span>
+  <span class="s">→ https://&lt;env&gt;.nctr.site</span>  <span class="c">(gated, TTL'd, torn down on expiry)</span></pre>
+  </div>
+
+  <h2>Five modalities, one grammar</h2>
+  <div class="grid">
+    <div class="card"><h3>web</h3><p>The branch dev server, named on the mesh. Embeds straight into the review desk's Test tab.</p></div>
+    <div class="card"><h3>desktop</h3><p>A signed, immutable testpack — one-click openable, sha256-verified before it ever launches.</p></div>
+    <div class="card"><h3>ios</h3><p>A simulator build plus an interactive streamed simulator you can tap and type in, from a browser.</p></div>
+    <div class="card"><h3>cli &amp; backend</h3><p>A provisioned shell, or a seeded environment with smoke evidence — no surface, just proof.</p></div>
+  </div>
+
+  <h2>How it stays honest</h2>
+  <div class="grid">
+    <div class="card"><h3>Machine-bound, TTL'd</h3><p>Envs live and die on the machine that published them. Nothing is forever; garbage collection reaps on schedule.</p></div>
+    <div class="card"><h3>Tailnet-first</h3><p>Previews are private by default. Public exposure is an explicit, gated, per-preview escalation — never the default.</p></div>
+  </div>
+
+  <footer>
+    <span class="pill"><span class="dot"></span> served from the nctr.site relay</span>
+    <span>nectar — the preview substrate · <a href="https://github.com/trmd">trmd</a></span>
+  </footer>
+</div>
+</body>
+</html>

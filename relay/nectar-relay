@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# nectar-relay — the nctr.site public-preview relay control command (D21).
+# nectar-relay — the public-preview relay control command (D21). Domain-agnostic: run it
+# for nctr.site or any `<domain>.site` you own (see install.sh).
 #
 # Runs on the relay VM (a public-IP host that has joined the tailnet). Each exposed
-# env is one route file under $ROUTES; Caddy imports them all inside the *.nctr.site
+# env is one route file under $ROUTES; Caddy imports them all inside the *.<domain>
 # wildcard site block. Publishing machines drive this over Tailscale SSH — they hold
 # no credentials and run no daemon. Routes carry their own expiry so a dead publisher
 # can never leak a public URL: `prune` (hourly cron) removes them regardless.
 #
 # Usage:
-#   nectar-relay add <sub> <upstream-url> <expires-epoch> [--password-hash <bcrypt> | --public]
+#   nectar-relay add <sub> <upstream-url> <expires-epoch> [--domain <d>] [--password <p> | --password-hash <bcrypt> | --public]
 #   nectar-relay rm  <sub>
 #   nectar-relay prune
 #   nectar-relay ls   [--json]
 #   nectar-relay health [--json]
 set -euo pipefail
+
+# install.sh writes the relay's domain (and any overrides) here; sourcing it lets a
+# bare `nectar-relay ls`/`health` on the box know its own domain.
+CONF="${NECTAR_RELAY_CONF:-/etc/nectar-relay.conf}"
+[[ -r "$CONF" ]] && . "$CONF"
 
 ROUTES="${NECTAR_RELAY_ROUTES:-/etc/caddy/nctr-routes}"
 DOMAIN="${NECTAR_RELAY_DOMAIN:-nctr.site}"
@@ -33,9 +39,12 @@ reload() { $RELOAD >/dev/null 2>&1 || die "caddy reload failed (config left in p
 
 cmd_add() {
   local sub="$1" upstream="$2" expires="$3"; shift 3
-  local pwhash="" public=0
+  local pwhash="" public=0 domain="$DOMAIN"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      # nectar passes the target's configured domain, so one relay box can front any
+      # domain its wildcard cert covers; falls back to the box's own $DOMAIN.
+      --domain) domain="$2"; shift 2;;
       --password-hash) pwhash="$2"; shift 2;;
       # Plaintext convenience: hash it here so callers never precompute bcrypt. The
       # plaintext transits only this argv (briefly visible in ps) and is never stored.
@@ -53,10 +62,10 @@ cmd_add() {
   local file="$ROUTES/$sub.caddy" tmp
   tmp="$(mktemp "$ROUTES/.$sub.XXXXXX")"
   {
-    echo "# nctr-relay route — do not edit by hand"
+    echo "# nectar-relay route — do not edit by hand"
     echo "# expires $expires"
     echo "# upstream $upstream"
-    echo "@$sub host $sub.$DOMAIN"
+    echo "@$sub host $sub.$domain"
     echo "handle @$sub {"
     if [[ -n "$pwhash" ]]; then
       echo "    basic_auth {"
@@ -77,7 +86,7 @@ cmd_add() {
   chgrp caddy "$tmp" 2>/dev/null && chmod 0640 "$tmp" || chmod 0644 "$tmp"
   mv -f "$tmp" "$file"   # atomic swap; a concurrent reload sees old-or-new, never half
   reload
-  echo "https://$sub.$DOMAIN"
+  echo "https://$sub.$domain"
 }
 
 cmd_rm() {
@@ -143,7 +152,7 @@ cmd_health() {
 [[ $# -ge 1 ]] || die "usage: nectar-relay add|rm|prune|ls|health ..."
 sub="$1"; shift
 case "$sub" in
-  add)    [[ $# -ge 3 ]] || die "add <sub> <upstream> <expires-epoch> [--password-hash H | --public]"; cmd_add "$@";;
+  add)    [[ $# -ge 3 ]] || die "add <sub> <upstream> <expires-epoch> [--domain d] [--password p | --public]"; cmd_add "$@";;
   rm)     [[ $# -ge 1 ]] || die "rm <sub>"; cmd_rm "$@";;
   prune)  cmd_prune;;
   ls)     cmd_ls "${1:-}";;

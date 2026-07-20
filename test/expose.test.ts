@@ -104,9 +104,10 @@ describe("expose / unexpose", () => {
     expect((exposed.credentials as { user: string; password: string }).user).toBe("reviewer");
     expect((exposed.packet_fields as { public_url: string }).public_url).toBe(exposed.url);
 
-    // The relay was driven over `tailscale ssh` with a password (hashed on the relay).
+    // The relay was driven over `tailscale ssh` with the target's domain and a password
+    // (hashed on the relay).
     const calls = await readFile(relayLog, "utf8");
-    expect(calls).toMatch(/^add fixture-exp-main-\S+ https:\/\/\S+ \d+ --password /m);
+    expect(calls).toMatch(/^add fixture-exp-main-\S+ https:\/\/\S+ \d+ --domain nctr\.site --password /m);
 
     // The public URL is stamped on the record and survives republish (stable mesh URL).
     const republished = await service.publish({ repo, ttl: "1h" });

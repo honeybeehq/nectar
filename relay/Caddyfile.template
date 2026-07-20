@@ -1,0 +1,29 @@
+# Public-preview relay — the wildcard site block (D21). install.sh substitutes __DOMAIN__
+# and appends this to /etc/caddy/Caddyfile beside any other sites. Needs a Caddy build
+# with the caddy-dns/cloudflare module and CLOUDFLARE_API_TOKEN in the environment
+# (systemd EnvironmentFile=/etc/caddy/nctr.env).
+#
+# One wildcard cert (*.__DOMAIN__) covers every ephemeral preview subdomain — DNS-01 is
+# used specifically so churning preview envs never hit Let's Encrypt per-name rate
+# limits. The DNS record is gray-cloud (DNS-only); TLS terminates here.
+
+*.__DOMAIN__ {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	# Per-env route files, each a `handle @<sub> { … }` matcher block, written by
+	# `nectar-relay add`. Atomic files: no database, survives reboot, greppable.
+	import /etc/caddy/nctr-routes/*.caddy
+
+	# Anything with no live route: an unrouted or expired preview.
+	handle {
+		respond "__DOMAIN__ — this preview has expired or does not exist" 404
+	}
+
+	# A routed subdomain whose publisher fell off the tailnet 502s here (same truth
+	# as F9: references are machine-bound). The message aids diagnosis.
+	handle_errors {
+		respond "__DOMAIN__ — the publishing machine for this preview is offline" {http.error.status_code}
+	}
+}

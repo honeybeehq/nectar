@@ -63,11 +63,15 @@ export async function relayAdd(options: {
     options.gate === "password"
       ? ["--password", options.password ?? ""]
       : ["--public"];
+  // Pass the target's configured domain so one relay box can front any domain its
+  // wildcard cert covers, and the returned URL is always on the right domain.
+  const domainArgs = options.target.domain === undefined ? [] : ["--domain", options.target.domain];
   const url = await relayExec(options.target, [
     "add",
     options.sub,
     options.upstream,
     String(options.expiresEpoch),
+    ...domainArgs,
     ...gateArgs,
   ]);
   return { url, sub: options.sub };

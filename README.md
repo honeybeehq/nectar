@@ -2,13 +2,12 @@
 
 **Taste it before it becomes honey.**
 
-Nectar is the preview substrate on the mesh. When an agent finishes work and calls it
-review-ready, reviewing that work means *testing* it — fast. Nectar is the standalone tool the
-agent invokes at that moment: it packages a testable build of the branch and serves it on the
-tailnet, then hands back small, stable references. The Forum packet carries only those
-references; the review desk's Test tab renders whatever the packet points at.
+Reviewing an agent's work means *testing* it — and testing should cost seconds, not
+minutes. Nectar is the tool you run the moment work is review-ready: it turns a branch
+into a **tasteable preview** on your mesh and hands back a small, stable reference.
+Agents call it, humans call it, the review desk renders whatever the reference points at.
 
-One command at review-ready:
+## One command
 
 ```bash
 $ nectar publish --json
@@ -18,75 +17,75 @@ $ nectar publish --json
   "result": {
     "env": "acme--coupons-stack--web",
     "mode": "web",
-    "urls": {
-      "local": "https://coupons-stack.acme.localhost",
-      "mesh":  "https://builder-1.tailnet.ts.net:8444"
-    },
+    "urls":          { "mesh": "https://builder-1.tailnet.ts.net:8444" },
+    "packet_fields": { "preview_url": "https://builder-1.tailnet.ts.net:8444" },
     "ref": "nectar://builder-1/acme--coupons-stack--web",
-    "expires_at": "2026-07-21T12:04:11Z"
+    "expires_at": "2026-07-23T12:04:11Z"
   }
 }
 ```
 
-Five modalities, one grammar:
+Put `packet_fields` on the review packet, flip to review-ready, done. Fix feedback and
+re-publish — the URL stays stable, so the packet's references keep working.
 
-| kind | what nectar produces | what the packet carries |
+## Five modalities, one grammar
+
+| kind | what nectar serves | the reference it hands back |
 | --- | --- | --- |
-| **web** | branch dev server, named URL on the mesh (portless grammar) | `preview_url` — embeds in the Test tab |
-| **desktop** | a **testpack** — packaged build, one-click openable; Electron also embeds as webview | `testpack_ref` |
-| **ios** | a **simpack** (simulator build, testpack format) + an interactive streamed simulator via [serve-sim](https://github.com/EvanBacon/serve-sim) | `preview_url` (stream) + `testpack_ref` (simpack) |
-| **cli** | provisioned shell, branch build on PATH, session recorded to evidence | `shell_recipe` |
-| **backend** | no surface — seeded env + smoke evidence | evidence lines + env ref |
+| **web** | the branch dev server, named on the mesh | `preview_url` — embeds in the review desk |
+| **desktop** | a signed, sha256-verified **testpack**, one-click openable | `testpack_ref` |
+| **ios** | a streamed simulator you can drive, plus a simpack | `preview_url` + `testpack_ref` |
+| **cli** | a provisioned shell, session recorded to evidence | `shell_recipe` |
+| **backend** | a seeded environment + smoke evidence | evidence + env ref |
 
-Nectar lives **outside Apiary**. Agents call it; humans call it; the desk shells it. It knows
-nothing about packets beyond emitting reference strings shaped to fit them.
+## Take a preview public
+
+Previews are tailnet-private by default. To share one on the internet, route it through a
+relay (e.g. `nctr.site`):
+
+```bash
+$ nectar expose acme--coupons-stack--web --to site
+  → https://acme-coupons-stack-e7f3.nctr.site   # password-gated, torn down on expiry
+```
+
+Gated by default; add `--public` for an ungated link with an unguessable URL.
+See [relay/](relay/) to run your own `<domain>.site` relay.
+
+## Quick start
+
+```bash
+pnpm install && pnpm build && pnpm link --global
+nectar doctor --fix          # check deps, ports, and serve entries
+```
+
+Then, in any repo with a `dev` script (or a `nectar.toml`):
+
+```bash
+nectar publish --json
+```
+
+## The CLI
+
+`publish` · `ls` · `show` · `open` · `resolve` · `touch` · `stop` · `rm` · `gc` ·
+`doctor` · `expose` / `unexpose`.
+
+Everything speaks `--json` with one envelope — `{ ok, command, result | error }`, exit
+non-zero iff `ok:false` — so any harness already knows how to read it. Nectar is
+per-machine and tailnet-first; every preview is disposable and carries a TTL.
 
 ## Status
 
-**v0 implemented + ios/AX (2026-07-19).** Web publish/lifecycle, Darwin desktop testpacks,
-cross-machine resolution/open, atomic file state, doctor, and GC are built and covered by
-unit plus fixture-backed integration tests. `--mode ios` ships: simpacks + a dedicated
-per-env simulator streamed to the tailnet via pinned serve-sim, with `/ax` (the
-accessibility snapshot channel) on every stream. Desktop testpacks get the same AX channel
-via a swiftc-compiled bridge started by `nectar open` (`ax_url` in the envelope). Live
-smokes recorded in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
+**Built and tested.** Web / desktop / iOS publish, cross-machine resolve & open, atomic
+file state, garbage collection, `doctor`, and public exposure (`expose`/`unexpose` via the
+nctr.site relay) are implemented and covered by unit + fixture-backed integration tests.
+`cli` and `backend` modes are next.
+
+## Docs
 
 - [docs/SPEC.md](docs/SPEC.md) — the full specification
-- [docs/V0.md](docs/V0.md) — the thinnest end-to-end slice, with acceptance criteria
-- [docs/V0.2.md](docs/V0.2.md) — the review-experience wave (scenarios/auto-login, deps,
-  taste, drops, expose) — design, not yet built
+- [docs/V0.md](docs/V0.md) · [docs/V0.2.md](docs/V0.2.md) — the first slice, and the
+  review-experience wave (scenarios, deps, taste, drops, expose)
 - [docs/DECISIONS.md](docs/DECISIONS.md) — every contested choice, alternatives, and why
-
-Build and link locally:
-
-```bash
-pnpm install
-pnpm build
-pnpm link --global
-nectar doctor --fix --json
-```
-
-## On the name
-
-"Nectar" is a placeholder — what bees gather and bring back before it is transformed into
-honey, i.e. the work in its raw, tasteable state. Alternatives considered:
-
-- **waggle** — the waggle dance is how a returning forager tells the hive *exactly where the
-  nectar is*; that is this tool's entire job: a pointer any bee or keeper can follow to the
-  testable thing.
-- **taster** — drops the metaphor and says what you do with it: `taster open` is the command
-  you run before approving anything.
-- **forage** — names the act of bringing samples back to the hive; frames `publish` as the
-  forager's return.
-
-Verdict: **waggle** is the strongest bee-canon fit (it's about *pointing at* the goods, which
-is exactly the reference-passing architecture), but nectar reads better next to hive, comb,
-and honey, and the tagline writes itself. Proceeding as **nectar** until someone objects.
-
-## Where the implementation lives
-
-Own repo — this one (`trmd/nectar`), shipped as a global CLI like `hive` and `portless`.
-Not a hive or pollinate capability. Reasoning in [docs/SPEC.md §11](docs/SPEC.md) and
-[docs/DECISIONS.md D10](docs/DECISIONS.md), short version: nectar must be callable by any
-harness (Claude bees, Codex bees, humans, the desk) with its own lifecycle, state, and release
-cadence; hive integration is env-var stamping, pollinate integration is a scheduled `nectar gc`.
+- [docs/FUTURE-nctr-cloud.md](docs/FUTURE-nctr-cloud.md) ·
+  [docs/FUTURE-productization.md](docs/FUTURE-productization.md) — hosted & multi-tenant
+- [relay/](relay/) — the public-preview relay

@@ -1485,8 +1485,16 @@ export class NectarService {
       const version = await runCommand(portlessBin, ["--version"], { timeoutMs: 2_000 });
       portlessPresent = version.exitCode === 0;
       if (portlessPresent) {
-        const proxy = await runCommand(portlessBin, ["status", "--json"], { timeoutMs: 2_000 });
-        portlessProxy = proxy.exitCode === 0;
+        // Current Portless exposes proxy liveness through a human-readable
+        // `service status` command. Older releases used `status --json`, so retain
+        // that probe as a fallback for machines that have not upgraded yet.
+        const serviceStatus = await runCommand(portlessBin, ["service", "status"], { timeoutMs: 2_000 });
+        const serviceOutput = `${serviceStatus.stdout}\n${serviceStatus.stderr}`;
+        portlessProxy = serviceStatus.exitCode === 0 && /Proxy on \d+:\s*responding\b/i.test(serviceOutput);
+        if (!portlessProxy) {
+          const legacyStatus = await runCommand(portlessBin, ["status", "--json"], { timeoutMs: 2_000 });
+          portlessProxy = legacyStatus.exitCode === 0;
+        }
       }
     } catch {
       // Missing portless is the expected v0 degraded-local case.

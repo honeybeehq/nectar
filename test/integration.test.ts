@@ -422,6 +422,47 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect(checks.find((check) => check.name === "funnel")).toMatchObject({ name: "funnel", status: "fail" });
   });
 
+  it.each(["service", "legacy"] as const)("recognizes a healthy %s Portless proxy", async (mode) => {
+    const { service, fakeDir } = await harness();
+    const portlessLog = path.join(fakeDir, "portless.log");
+    const portless = await fakeExecutable(
+      fakeDir,
+      "portless",
+      `
+printf '%s\\n' "$*" >> "$FAKE_PORTLESS_LOG"
+if [ "$1" = "--version" ]; then
+  printf '0.15.4\\n'
+  exit 0
+fi
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  if [ "$FAKE_PORTLESS_MODE" = "service" ]; then
+    printf 'portless service\\n  Manager state: running\\n  Proxy on 443: responding\\n'
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = "status" ] && [ "$2" = "--json" ] && [ "$FAKE_PORTLESS_MODE" = "legacy" ]; then
+  printf '{"running":true}\\n'
+  exit 0
+fi
+exit 1
+`,
+    );
+    vi.stubEnv("NECTAR_PORTLESS_BIN", portless);
+    vi.stubEnv("FAKE_PORTLESS_LOG", portlessLog);
+    vi.stubEnv("FAKE_PORTLESS_MODE", mode);
+
+    const diagnosed = await service.doctor();
+    const checks = diagnosed.checks as Array<{ name: string; status: string; message: string }>;
+    const portlessCheck = checks.find((check) => check.name === "portless");
+    expect(portlessCheck).toMatchObject({ name: "portless", status: "pass" });
+    expect(portlessCheck?.message).toContain("proxy are up");
+    const commands = await readFile(portlessLog, "utf8");
+    expect(commands).toContain("--version");
+    expect(commands).toContain("service status");
+    expect(commands.includes("status --json")).toBe(mode === "legacy");
+  });
+
   it("reports dead loopback Serve entries and cleans them through doctor --fix and gc", async () => {
     const { service, tailscaleLog } = await harness();
     vi.stubEnv(

@@ -13,6 +13,10 @@ async function portAvailableOnHost(port: number, host: string): Promise<boolean>
 }
 
 export async function portAvailable(port: number): Promise<boolean> {
+  // macOS can allow a second bind beside a wildcard listener (for example a
+  // process using SO_REUSEPORT), so bind-only probing can call an actively
+  // served port "free". A successful connection is definitive occupancy.
+  if (await portOpen(port)) return false;
   const [ipv4, ipv6] = await Promise.all([
     portAvailableOnHost(port, "127.0.0.1"),
     portAvailableOnHost(port, "::1"),

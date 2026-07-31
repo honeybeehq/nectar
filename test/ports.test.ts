@@ -42,6 +42,17 @@ async function freeBase(span: number): Promise<number> {
 }
 
 describe("port allocator (F5)", () => {
+  it("treats a connectable wildcard listener as occupied", async () => {
+    const base = await freeBase(0);
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ port: base }, resolve);
+    });
+    servers.push(server);
+    expect(await portAvailable(base)).toBe(false);
+  });
+
   it("skips occupied and reserved ports and honors a free preferred port", async () => {
     const base = await freeBase(4);
     await occupy(base);

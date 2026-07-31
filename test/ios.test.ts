@@ -120,6 +120,7 @@ describe("ios publish", () => {
     expect(result.packet_fields).toEqual({
       preview_url: "https://fixture.tailtest.ts.net:8700",
       testpack_ref: `nectar://fixture/${env}`,
+      dev_ref: null,
       shell_recipe: null,
       public_url: null,
     });

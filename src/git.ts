@@ -39,6 +39,7 @@ export async function prepareWorktree(options: {
   commit: string;
   destination: string;
   borrowed?: string;
+  preserve?: string[];
 }): Promise<{ worktree: string; borrowed: boolean; commit: string }> {
   if (options.borrowed !== undefined) {
     const worktree = path.resolve(options.borrowed);
@@ -60,7 +61,21 @@ export async function prepareWorktree(options: {
     await git(["worktree", "add", "--detach", options.destination, options.commit], options.repo);
   } else {
     await git(["reset", "--hard", options.commit], options.destination);
-    await git(["clean", "-fdx", "-e", "node_modules/"], options.destination);
+    const preserve = options.preserve ?? ["node_modules/"];
+    const cleanArgs = ["clean", "-fdx"];
+    for (const entry of preserve) {
+      const normalized = entry.replaceAll("\\", "/").replace(/^\.\/+/, "");
+      if (
+        !normalized ||
+        normalized.startsWith("-") ||
+        normalized.startsWith("/") ||
+        normalized.split("/").includes("..")
+      ) {
+        throw new NectarError("E_CHECKOUT", `Unsafe worktree cache allowlist entry '${entry}'`);
+      }
+      cleanArgs.push("-e", normalized);
+    }
+    await git(cleanArgs, options.destination);
   }
   return { worktree: options.destination, borrowed: false, commit: await shortCommit(options.destination) };
 }

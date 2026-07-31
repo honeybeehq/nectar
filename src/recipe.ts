@@ -5,7 +5,7 @@ import { parse } from "smol-toml";
 import { parseDuration } from "./duration.js";
 import { NectarError } from "./errors.js";
 import { appSlug } from "./refs.js";
-import type { DesktopRecipe, IosRecipe, Mode, Recipe, WebRecipe } from "./types.js";
+import type { DesktopRecipe, DevRecipe, IosRecipe, Mode, Recipe, WebRecipe } from "./types.js";
 
 type TomlTable = Record<string, unknown>;
 
@@ -88,6 +88,29 @@ function parseDesktop(value: unknown): DesktopRecipe | undefined {
   };
 }
 
+function parseDev(value: unknown): DevRecipe | undefined {
+  if (value === undefined) return undefined;
+  const dev = table(value, "[dev]");
+  rejectUnknownKeys(dev, ["run", "kind", "warm", "ready_timeout"], "[dev]");
+  if (dev.kind !== "electron") {
+    throw new NectarError("E_NO_RECIPE", "[dev].kind must be 'electron'");
+  }
+  const warm = dev.warm;
+  if (warm !== undefined && (typeof warm !== "string" || !warm.trim())) {
+    throw new NectarError("E_NO_RECIPE", "[dev].warm must be a non-empty string");
+  }
+  return {
+    run: requiredString(dev.run, "[dev].run"),
+    kind: "electron",
+    ...(warm === undefined ? {} : { warm }),
+    readyTimeoutMs: parseDuration(
+      dev.ready_timeout === undefined ? "60s" : requiredString(dev.ready_timeout, "[dev].ready_timeout"),
+      "[dev].ready_timeout",
+      "E_NO_RECIPE",
+    ),
+  };
+}
+
 function parseIos(value: unknown): IosRecipe | undefined {
   if (value === undefined) return undefined;
   const ios = table(value, "[ios]");
@@ -131,17 +154,19 @@ export async function loadRecipe(repo: string): Promise<Recipe> {
         throw new NectarError("E_NO_RECIPE", `[${section}] is deferred to v0.1 and would be silently ignored; remove it from nectar.toml`);
       }
     }
-    rejectUnknownKeys(value, ["name", "web", "desktop", "ios"], "nectar.toml");
+    rejectUnknownKeys(value, ["name", "web", "desktop", "ios", "dev"], "nectar.toml");
     const name = value.name === undefined ? fallbackName : appSlug(requiredString(value.name, "name"));
     const web = parseWeb(value.web);
     const desktop = parseDesktop(value.desktop);
     const ios = parseIos(value.ios);
+    const dev = parseDev(value.dev);
     return {
       name,
       source: "nectar.toml",
       ...(web === undefined ? {} : { web }),
       ...(desktop === undefined ? {} : { desktop }),
       ...(ios === undefined ? {} : { ios }),
+      ...(dev === undefined ? {} : { dev }),
     };
   }
 
@@ -181,7 +206,7 @@ export function selectMode(recipe: Recipe, requested?: string): Mode {
     if (requested === "cli" || requested === "backend") {
       throw new NectarError("E_NO_MODE", `Mode '${requested}' is deferred to v0.1`);
     }
-    if (requested !== "web" && requested !== "desktop" && requested !== "ios") {
+    if (requested !== "web" && requested !== "desktop" && requested !== "ios" && requested !== "dev") {
       throw new NectarError("E_NO_MODE", `Mode '${requested}' is not supported`);
     }
     if (recipe[requested] === undefined) {
@@ -193,7 +218,8 @@ export function selectMode(recipe: Recipe, requested?: string): Mode {
   if (recipe.web !== undefined) declared.push("web");
   if (recipe.desktop !== undefined) declared.push("desktop");
   if (recipe.ios !== undefined) declared.push("ios");
+  if (recipe.dev !== undefined) declared.push("dev");
   if (declared.length === 1) return declared[0] ?? "web";
   if (recipe.web !== undefined) return "web";
-  throw new NectarError("E_NO_MODE", "Choose a declared mode with --mode web|desktop|ios");
+  throw new NectarError("E_NO_MODE", "Choose a declared mode with --mode web|desktop|ios|dev");
 }

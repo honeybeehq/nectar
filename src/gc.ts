@@ -3,23 +3,40 @@ import type { Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import type { EnvRecord } from "./types.js";
 
-export type GcTransition = "expire" | "cold" | "reap";
+export type GcTransition = "idle-stop" | "expire" | "cold" | "reap";
 
 const SIX_HOURS = 6 * 60 * 60 * 1_000;
 const ONE_DAY = 24 * 60 * 60 * 1_000;
 const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1_000;
+export const DEFAULT_DEV_IDLE_STOP_MS = 45 * 60 * 1_000;
 
-export function gcTransition(record: EnvRecord, now: Date): GcTransition | undefined {
+export function gcTransition(
+  record: EnvRecord,
+  now: Date,
+  devIdleStopMs = DEFAULT_DEV_IDLE_STOP_MS,
+): GcTransition | undefined {
   const nowMs = now.getTime();
   const touched = new Date(record.last_touched_at).getTime();
   const published = new Date(record.published_at).getTime();
+  const expiry = new Date(record.expires_at).getTime();
   // The initial record stamps both fields equally. Grace is for a reviewer touch,
   // not an implicit six-hour minimum TTL that would make --ttl 1m meaningless.
-  if (touched > published && nowMs - touched < SIX_HOURS) return undefined;
-  const expiry = new Date(record.expires_at).getTime();
   if (nowMs >= expiry + ONE_DAY + FOURTEEN_DAYS) return "reap";
   if (nowMs >= expiry + ONE_DAY) return "cold";
-  if (nowMs >= expiry && record.status !== "expired" && record.status !== "cold") return "expire";
+  const recentlyTouched = touched > published && nowMs - touched < SIX_HOURS;
+  if (nowMs >= expiry && !recentlyTouched && record.status !== "expired" && record.status !== "cold") return "expire";
+  // Resolve/touch may keep the record alive, but only an explicit open keeps a
+  // dev process alive. The process clock therefore deliberately ignores touch.
+  if (
+    record.mode === "dev" &&
+    record.status === "serving" &&
+    record.pinned !== true &&
+    record.last_opened_at !== undefined &&
+    nowMs - new Date(record.last_opened_at).getTime() >= devIdleStopMs
+  ) {
+    return "idle-stop";
+  }
+  if (recentlyTouched) return undefined;
   return undefined;
 }
 

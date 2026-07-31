@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, rename } from "node:fs/promises";
-import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo } from "./git.js";
+import { mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo, shortCommit } from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
@@ -59,6 +59,7 @@ import { ensureAxHelper, findAppPid } from "./ax.js";
 import { exposureSub, relayAdd, relayHealth, relayRm } from "./relay.js";
 import type {
   DesktopRecipe,
+  DevRecipe,
   EnvRecord,
   IosRecipe,
   MachineConfig,
@@ -84,6 +85,7 @@ interface PublishOptions {
   ttl?: string;
   worktree?: string;
   packet?: string;
+  verify?: boolean;
 }
 
 interface MachineIdentity {
@@ -147,6 +149,9 @@ export class NectarService {
     const branch = options.branch ?? (await currentBranch(repo));
     const recipe = await loadRecipe(repo);
     const mode = selectMode(recipe, options.mode);
+    if (options.verify === true && mode !== "dev") {
+      throw new NectarError("E_USAGE", "--verify is supported only with --mode dev");
+    }
     const publishOptions = {
       repo,
       branch,
@@ -154,12 +159,14 @@ export class NectarService {
       ttlMs,
       ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
       ...(options.packet === undefined ? {} : { packet: options.packet }),
+      ...(options.verify === undefined ? {} : { verify: options.verify }),
     };
     if (mode === "web") {
       const web = await this.publishWeb(publishOptions);
       return this.publishResult(web.record, this.packetFields(web.record), web.warnings);
     }
     if (mode === "ios") return this.publishIos(publishOptions);
+    if (mode === "dev") return this.publishDev(publishOptions);
     return this.publishDesktop(publishOptions);
   }
 
@@ -202,6 +209,8 @@ export class NectarService {
       ttl_ms: options.ttlMs,
       evidence: old?.evidence ?? [],
       ...(old?.install_hash === undefined ? {} : { install_hash: old.install_hash }),
+      ...(old?.pinned === undefined ? {} : { pinned: old.pinned }),
+      ...(old?.last_opened_at === undefined ? {} : { last_opened_at: old.last_opened_at }),
     };
     // Stop the old runtime while its pid/pgid are still on disk — overwriting the
     // record first would orphan the running server if we die before stopping it.
@@ -210,7 +219,12 @@ export class NectarService {
     return { record, ...(old === undefined ? {} : { old }), identity };
   }
 
-  private async checkout(record: EnvRecord, old: EnvRecord | undefined, borrowed: string | undefined): Promise<EnvRecord> {
+  private async checkout(
+    record: EnvRecord,
+    old: EnvRecord | undefined,
+    borrowed: string | undefined,
+    cacheAllowlist: string[],
+  ): Promise<EnvRecord> {
     try {
       const commit = await resolveCommit(record.repo, record.branch);
       const checkout = await prepareWorktree({
@@ -219,6 +233,7 @@ export class NectarService {
         commit,
         destination: record.worktree,
         ...(borrowed === undefined ? {} : { borrowed }),
+        preserve: cacheAllowlist,
       });
       record.worktree = checkout.worktree;
       record.borrowed_worktree = checkout.borrowed;
@@ -237,7 +252,9 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      await Promise.all([stopProcessGroup(record.serve.pgid), stopServe(record.serve.tailnet_port)]);
+      const stops: Array<Promise<unknown>> = [stopProcessGroup(record.serve.pgid)];
+      if (record.serve.tailnet_port !== undefined) stops.push(stopServe(record.serve.tailnet_port));
+      await Promise.all(stops);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
   }
@@ -246,15 +263,21 @@ export class NectarService {
     const cleanupErrors: string[] = [];
     if (record.serve !== undefined) {
       const owned = record.serve;
-      const [processCleanup, serveCleanup] = await Promise.allSettled([
-        stopProcessGroup(owned.pgid),
-        stopServe(owned.tailnet_port),
-      ]);
-      if (processCleanup.status === "rejected") {
-        cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.reason)}`);
+      const processCleanup = await Promise.resolve(stopProcessGroup(owned.pgid)).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      if (!processCleanup.ok) {
+        cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.error)}`);
       }
-      if (serveCleanup.status === "rejected" || !serveCleanup.value) {
-        cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+      if (owned.tailnet_port !== undefined) {
+        const serveCleanup = await Promise.resolve(stopServe(owned.tailnet_port)).then(
+          (removed) => ({ ok: removed }),
+          () => ({ ok: false }),
+        );
+        if (!serveCleanup.ok) {
+          cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+        }
       }
     }
     delete record.serve;
@@ -359,7 +382,12 @@ export class NectarService {
         throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
-      const record = await this.checkout(initial.record, initial.old, options.worktree);
+      const record = await this.checkout(
+        initial.record,
+        initial.old,
+        options.worktree,
+        initial.identity.config.worktree_cache_allowlist,
+      );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
         const web = branchRecipe.web;
@@ -485,6 +513,129 @@ export class NectarService {
     return undefined;
   }
 
+  private async publishDev(options: {
+    repo: string;
+    branch: string;
+    recipe: Recipe;
+    ttlMs: number;
+    worktree?: string;
+    packet?: string;
+    verify?: boolean;
+  }): Promise<Record<string, unknown>> {
+    if (options.recipe.dev === undefined) throw new NectarError("E_NO_RECIPE", "Recipe does not declare [dev]");
+    const name = envName(options.recipe.name, options.branch, "dev");
+    return this.store.withLock(name, async () => {
+      const initial = await this.initialRecord({ ...options, mode: "dev" });
+      const record = await this.checkout(
+        initial.record,
+        initial.old,
+        options.worktree,
+        initial.identity.config.worktree_cache_allowlist,
+      );
+      try {
+        const branchRecipe = await loadRecipe(record.worktree);
+        const dev = branchRecipe.dev;
+        if (dev === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [dev]");
+        record.dev = {
+          run: dev.run,
+          kind: dev.kind,
+          ready_timeout_ms: dev.readyTimeoutMs,
+          ...(dev.warm === undefined
+            ? {}
+            : { warm_hash: crypto.createHash("sha256").update(`${record.commit}\0${dev.warm}`).digest("hex") }),
+        };
+        if (dev.warm !== undefined) {
+          const warmed = await runShell(
+            dev.warm,
+            record.worktree,
+            scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree }),
+          );
+          if (warmed.exitCode !== 0) {
+            throw new NectarError("E_INSTALL", `Dev warm command failed: ${dev.warm}`, {
+              log_tail: [...warmed.stdout.split("\n"), ...warmed.stderr.split("\n")].filter(Boolean).slice(-40),
+            });
+          }
+        }
+        record.status = "warm";
+        delete record.failure;
+        await this.store.writeEnv(record);
+        if (options.verify === true) {
+          await this.startDevRuntime(record, dev);
+          await this.stopRuntime(record);
+          delete record.serve;
+          record.status = "warm";
+          await this.store.writeEnv(record);
+        }
+        return this.publishResult(record, this.packetFields(record), [], {
+          status: record.status,
+          verified: options.verify === true,
+        });
+      } catch (error) {
+        if (record.serve !== undefined) {
+          await this.rollbackRuntime(record, error);
+        } else {
+          const failure = asNectarError(error);
+          record.status = "crashed";
+          record.failure = {
+            code: failure.code,
+            message: failure.message,
+            failed_at: new Date().toISOString(),
+            log_tail: Array.isArray(failure.details.log_tail)
+              ? failure.details.log_tail.filter((line): line is string => typeof line === "string")
+              : [],
+          };
+          await this.store.writeEnv(record);
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async startDevRuntime(
+    record: EnvRecord,
+    recipe: DevRecipe,
+    target?: string,
+  ): Promise<void> {
+    const readyFile = path.join(record.worktree, "ready");
+    await trashPaths([readyFile], record.worktree);
+    const config = await this.store.readConfig();
+    const log = await prepareLog(this.paths, record.name, config.log_max_bytes);
+    const childEnv = scrubbedEnvironment({
+      NECTAR_ENV: record.name,
+      NECTAR_ENV_DIR: record.worktree,
+      ...(target === undefined ? {} : { NECTAR_OPEN_TARGET: target }),
+    });
+    const child = spawnDetached(recipe.run, record.worktree, childEnv, log);
+    record.serve = { cmd: recipe.run, pid: child.pid, pgid: child.pgid };
+    record.status = "publishing";
+    await this.store.writeEnv(record);
+    if (!(await this.waitDevReady(readyFile, child.pid, recipe.readyTimeoutMs))) {
+      throw new NectarError(
+        "E_SERVE_TIMEOUT",
+        `Dev instance did not stay alive and write ${readyFile} within ${recipe.readyTimeoutMs}ms`,
+        { log_tail: await logTail(this.paths, record.name) },
+      );
+    }
+    record.status = "serving";
+    delete record.failure;
+    await this.store.writeEnv(record);
+  }
+
+  private async waitDevReady(readyFile: string, pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!pidAlive(pid)) return false;
+      try {
+        const info = await stat(readyFile);
+        if (info.isFile()) return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
   private async publishDesktop(options: {
     repo: string;
     branch: string;
@@ -510,7 +661,12 @@ export class NectarService {
     const name = envName(options.recipe.name, options.branch, "desktop");
     return this.store.withLock(name, async () => {
       const initial = await this.initialRecord({ ...options, mode: "desktop" });
-      const record = await this.checkout(initial.record, initial.old, options.worktree);
+      const record = await this.checkout(
+        initial.record,
+        initial.old,
+        options.worktree,
+        initial.identity.config.worktree_cache_allowlist,
+      );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
         if (branchRecipe.desktop === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [desktop]");
@@ -518,6 +674,7 @@ export class NectarService {
         const packetFields: PacketFields = {
           preview_url: embeddedWeb === undefined ? null : embeddedWeb.record.urls.mesh ?? embeddedWeb.record.urls.local,
           testpack_ref: record.ref,
+          dev_ref: null,
           shell_recipe: null,
           public_url: record.exposure?.url ?? null,
         };
@@ -685,7 +842,12 @@ export class NectarService {
         initial.record.sim_device = initial.old.sim_device ?? `nectar-${name}`;
         await this.store.writeEnv(initial.record);
       }
-      const record = await this.checkout(initial.record, initial.old, options.worktree);
+      const record = await this.checkout(
+        initial.record,
+        initial.old,
+        options.worktree,
+        initial.identity.config.worktree_cache_allowlist,
+      );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
         const ios = branchRecipe.ios;
@@ -824,6 +986,7 @@ export class NectarService {
     return {
       preview_url: record.mode === "web" || record.mode === "ios" ? record.urls.mesh ?? record.urls.local : null,
       testpack_ref: record.mode === "desktop" || record.mode === "ios" ? record.ref : null,
+      dev_ref: record.mode === "dev" ? record.ref : null,
       shell_recipe: null,
       public_url: record.exposure?.url ?? null,
     };
@@ -853,7 +1016,10 @@ export class NectarService {
 
   private async refreshLiveness(record: EnvRecord): Promise<EnvRecord> {
     if (record.status !== "serving" || record.serve === undefined) return record;
-    if (!pidAlive(record.serve.pid) || !(await portOpen(record.serve.upstream_port))) {
+    const processDead = !pidAlive(record.serve.pid);
+    const portDead =
+      record.serve.upstream_port !== undefined && !(await portOpen(record.serve.upstream_port));
+    if (processDead || portDead) {
       record.status = "crashed";
       // Locked, best-effort: writing this stale snapshot back directly would
       // clobber a concurrent republish's fresh serve block (a lost update that
@@ -906,7 +1072,17 @@ export class NectarService {
   }
 
   private isQualified(name: string): boolean {
-    return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios") || name.endsWith("--cli") || name.endsWith("--backend");
+    return name.endsWith("--web") || name.endsWith("--desktop") || name.endsWith("--ios") || name.endsWith("--dev") || name.endsWith("--cli") || name.endsWith("--backend");
+  }
+
+  private async commitState(record: EnvRecord): Promise<{ currentCommit: string | null; stale: boolean }> {
+    if (record.mode !== "dev") return { currentCommit: record.commit, stale: false };
+    try {
+      const currentCommit = await shortCommit(record.worktree);
+      return { currentCommit, stale: currentCommit !== record.commit };
+    } catch {
+      return { currentCommit: null, stale: true };
+    }
   }
 
   private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
@@ -935,9 +1111,13 @@ export class NectarService {
         }
       }
       const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
+      const commitState = await this.commitState(record);
       resolutions.push({
         env: record.name,
         mode: record.mode,
+        commit: record.commit,
+        current_commit: commitState.currentCommit,
+        stale: commitState.stale,
         is_self: isSelf,
         urls: record.urls,
         testpack_url: record.testpack?.url ?? null,
@@ -996,11 +1176,15 @@ export class NectarService {
     return envelope.result as T;
   }
 
-  async open(input: string, options: { noAx?: boolean } = {}): Promise<Record<string, unknown>> {
+  async open(
+    input: string,
+    options: { noAx?: boolean; target?: string; keep?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
     const resolved = await this.resolve(input);
     if ("resolutions" in resolved) {
       throw new NectarError("E_NO_MODE", `Environment '${resolved.env}' has multiple modes; use a mode-qualified ref`);
     }
+    if (resolved.mode === "dev") return this.openDev(resolved, options);
     if (resolved.mode === "web") {
       const url = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
       if (url === null) throw new NectarError("E_NOT_FOUND", `Web environment '${resolved.env}' has no reachable URL`);
@@ -1036,6 +1220,103 @@ export class NectarService {
       sha256: resolved.sha256,
       ...ax,
     };
+  }
+
+  private async openDev(
+    resolved: ResolveResult,
+    options: { target?: string; keep?: boolean },
+  ): Promise<Record<string, unknown>> {
+    if (!resolved.is_self) {
+      return this.remoteResult(resolved.host, [
+        "open",
+        resolved.env,
+        "--json",
+        ...(options.target === undefined ? [] : ["--target", options.target]),
+        ...(options.keep === true ? ["--keep"] : []),
+      ]);
+    }
+    const name = validateEnvName(resolved.env);
+    return this.store.withLock(name, async () => {
+      const record = await this.store.readEnv(name);
+      if (record.mode !== "dev") throw new NectarError("E_NO_MODE", `Environment '${name}' is not a dev environment`);
+      if (record.status === "expired" || record.status === "cold") {
+        throw new NectarError(
+          "E_NOT_FOUND",
+          `Dev environment '${name}' is ${record.status}; republish it or use a sibling --desktop testpack`,
+        );
+      }
+      if (record.dev === undefined) {
+        throw new NectarError("E_NOT_FOUND", `Dev environment '${name}' has no registered launch command; republish it`);
+      }
+      if (record.status === "serving" && (record.serve === undefined || !pidAlive(record.serve.pid))) {
+        if (record.serve !== undefined) await this.stopRuntime(record);
+        delete record.serve;
+        record.status = "crashed";
+      }
+      if (record.status !== "serving" && record.serve !== undefined) {
+        await this.stopRuntime(record);
+        delete record.serve;
+      }
+      const openedAt = new Date().toISOString();
+      const targetMessage =
+        options.target === undefined
+          ? undefined
+          : {
+              target: options.target,
+              opened_at: openedAt,
+              nonce: crypto.randomUUID(),
+            };
+      if (targetMessage !== undefined) await this.writeOpenTarget(record, targetMessage);
+      record.last_opened_at = openedAt;
+      if (options.keep === true) record.pinned = true;
+      await this.store.writeEnv(record);
+
+      let launched = false;
+      if (record.status !== "serving") {
+        if (record.status !== "warm" && record.status !== "crashed" && record.status !== "stopped") {
+          throw new NectarError("E_BUSY", `Dev environment '${name}' is ${record.status}; retry shortly`);
+        }
+        const recipe: DevRecipe = {
+          run: record.dev.run,
+          kind: record.dev.kind,
+          readyTimeoutMs: record.dev.ready_timeout_ms,
+        };
+        try {
+          await this.startDevRuntime(record, recipe, options.target);
+        } catch (error) {
+          await this.rollbackRuntime(record, error);
+          throw error;
+        }
+        launched = true;
+        // The boot-time env var handles startup; rewriting the mailbox after
+        // readiness also reaches consumers whose watcher attached during boot.
+        if (targetMessage !== undefined) await this.writeOpenTarget(record, targetMessage);
+      }
+      if (record.serve === undefined) {
+        throw new NectarError("E_INTERNAL", `Dev environment '${name}' reached serving without a process handle`);
+      }
+      return {
+        env: record.name,
+        mode: record.mode,
+        status: record.status,
+        launched,
+        focused: !launched,
+        handle: { pid: record.serve.pid, pgid: record.serve.pgid },
+        target: options.target ?? null,
+        pinned: record.pinned === true,
+        last_opened_at: record.last_opened_at,
+      };
+    });
+  }
+
+  private async writeOpenTarget(
+    record: EnvRecord,
+    message: { target: string; opened_at: string; nonce: string },
+  ): Promise<void> {
+    const targetFile = path.join(record.worktree, "open-target.json");
+    const temporary = `${targetFile}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(message)}\n`, { mode: 0o600 });
+    await rename(temporary, targetFile);
   }
 
   private async launch(target: string): Promise<void> {
@@ -1195,9 +1476,16 @@ export class NectarService {
       await this.stopRuntime(current);
       // A stopped env's public URL would 502; take it down with the serve.
       await this.tearDownExposure(current).catch(() => undefined);
+      if (current.mode === "dev") {
+        delete current.serve;
+        if (current.status !== "expired" && current.status !== "cold") current.status = "warm";
+      }
       // Only running-ish states collapse to stopped; expired/cold stay where gc
       // put them so ls/resolve keep telling the truth.
-      if (current.status === "serving" || current.status === "publishing" || current.status === "crashed") {
+      if (
+        current.mode !== "dev" &&
+        (current.status === "serving" || current.status === "publishing" || current.status === "crashed")
+      ) {
         current.status = "stopped";
       }
       await this.store.writeEnv(current);
@@ -1346,7 +1634,7 @@ export class NectarService {
     const report: Array<{ env: string; action: GcTransition }> = [];
     const skipped: Array<{ env: string; reason: string }> = [];
     for (const snapshot of await this.store.listEnvs()) {
-      const action = gcTransition(snapshot, now);
+      const action = gcTransition(snapshot, now, config.idle_stop_ms);
       if (action === undefined) continue;
       if (options.dryRun) {
         report.push({ env: snapshot.name, action });
@@ -1357,16 +1645,23 @@ export class NectarService {
       try {
         await this.store.withLock(snapshot.name, async () => {
           const record = await this.store.readEnv(snapshot.name);
-          const currentAction = gcTransition(record, now);
+          const currentAction = gcTransition(record, now, config.idle_stop_ms);
           if (currentAction === undefined) return;
           report.push({ env: record.name, action: currentAction });
-          if (currentAction === "expire") {
+          if (currentAction === "idle-stop") {
             await this.stopRuntime(record);
+            delete record.serve;
+            record.status = "warm";
+            await this.store.writeEnv(record);
+          } else if (currentAction === "expire") {
+            await this.stopRuntime(record);
+            if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
             record.status = "expired";
             await this.store.writeEnv(record);
           } else if (currentAction === "cold") {
             await this.stopRuntime(record);
+            if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
             if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);

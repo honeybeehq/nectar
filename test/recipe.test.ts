@@ -77,6 +77,41 @@ embed_url = "web"
     await expect(loadRecipe(repo)).rejects.toThrow(/bundle_id/);
   });
 
+  it("parses [dev], applies the readiness default, and selects it as a mode", async () => {
+    const repo = await tempDir("recipe-dev");
+    await writeFile(
+      path.join(repo, "nectar.toml"),
+      `
+name = "bench"
+[dev]
+run = "pnpm dev"
+kind = "electron"
+warm = "pnpm native:build"
+ready_timeout = "75s"
+`,
+    );
+    const recipe = await loadRecipe(repo);
+    expect(recipe.dev).toEqual({
+      run: "pnpm dev",
+      kind: "electron",
+      warm: "pnpm native:build",
+      readyTimeoutMs: 75_000,
+    });
+    expect(selectMode(recipe)).toBe("dev");
+    expect(selectMode(recipe, "dev")).toBe("dev");
+
+    await writeFile(path.join(repo, "nectar.toml"), `[dev]\nrun = "pnpm dev"\nkind = "electron"\n`);
+    expect((await loadRecipe(repo)).dev?.readyTimeoutMs).toBe(60_000);
+  });
+
+  it("rejects unsupported dev kinds and typo'd dev keys", async () => {
+    const repo = await tempDir("recipe-dev-invalid");
+    await writeFile(path.join(repo, "nectar.toml"), `[dev]\nrun = "pnpm dev"\nkind = "native"\n`);
+    await expect(loadRecipe(repo)).rejects.toThrow(/\[dev\]\.kind must be 'electron'/);
+    await writeFile(path.join(repo, "nectar.toml"), `[dev]\nrun = "pnpm dev"\nkind = "electron"\nready_timout = "5s"\n`);
+    await expect(loadRecipe(repo)).rejects.toThrow(/Unknown key 'ready_timout'/);
+  });
+
   it("returns stable contract errors for unsupported modes and missing recipes", async () => {
     const repo = await tempDir("recipe-missing");
     await expect(loadRecipe(repo)).rejects.toMatchObject({ code: "E_NO_RECIPE" });

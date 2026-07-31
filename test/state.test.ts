@@ -11,9 +11,21 @@ describe("file-per-env state", () => {
     const store = new StateStore(getPaths(root));
     const web = record();
     const desktop = record({ name: "demo--main--desktop", mode: "desktop", urls: { local: null, mesh: null } });
-    await Promise.all([store.writeEnv(web), store.writeEnv(desktop)]);
-    expect((await store.listEnvs()).map((item) => item.name)).toEqual(["demo--main--desktop", "demo--main--web"]);
+    const dev = record({
+      name: "demo--main--dev",
+      mode: "dev",
+      status: "warm",
+      urls: { local: null, mesh: null },
+      dev: { run: "pnpm dev", kind: "electron", ready_timeout_ms: 60_000 },
+    });
+    await Promise.all([store.writeEnv(web), store.writeEnv(desktop), store.writeEnv(dev)]);
+    expect((await store.listEnvs()).map((item) => item.name)).toEqual([
+      "demo--main--desktop",
+      "demo--main--dev",
+      "demo--main--web",
+    ]);
     expect(JSON.parse(await readFile(path.join(root, "envs", "demo--main--web.json"), "utf8"))).toEqual(web);
+    expect(JSON.parse(await readFile(path.join(root, "envs", "demo--main--dev.json"), "utf8"))).toEqual(dev);
     expect((await readdir(path.join(root, "envs"))).every((name) => name.endsWith(".json"))).toBe(true);
   });
 

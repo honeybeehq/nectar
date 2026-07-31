@@ -50,13 +50,14 @@ program
 
 program
   .command("publish")
-  .description("publish a web, desktop, or ios review environment")
-  .addOption(new Option("--mode <mode>", "web, desktop, or ios"))
+  .description("publish a web, desktop, ios, or crystallized dev review environment")
+  .addOption(new Option("--mode <mode>", "web, desktop, ios, or dev"))
   .option("--branch <branch>", "branch to publish")
   .option("--ttl <duration>", "time to live", "72h")
   .option("--worktree <path>", "borrow an existing clean worktree")
   .option("--packet <hint>", "optional packet lineage hint")
-  .action(async (options: { mode?: string; branch?: string; ttl: string; worktree?: string; packet?: string }) =>
+  .option("--verify", "launch a dev env through readiness, then return it to warm")
+  .action(async (options: { mode?: string; branch?: string; ttl: string; worktree?: string; packet?: string; verify?: boolean }) =>
     execute("publish", async () => {
       const globals = program.opts<{ repo: string }>();
       return new NectarService().publish({
@@ -66,6 +67,7 @@ program
         ...(options.branch === undefined ? {} : { branch: options.branch }),
         ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
         ...(options.packet === undefined ? {} : { packet: options.packet }),
+        ...(options.verify === undefined ? {} : { verify: options.verify }),
       });
     }),
   );
@@ -86,10 +88,18 @@ program
 
 program
   .command("open <env-or-ref>")
-  .description("open a web environment, verified testpack, or ios simpack/stream")
+  .description("open a web env, verified pack, ios stream, or launch-on-open dev env")
   .option("--no-ax", "skip starting the desktop AX bridge")
-  .action(async (input: string, options: { ax?: boolean }) =>
-    execute("open", async () => new NectarService().open(input, { noAx: options.ax === false })),
+  .option("--target <string>", "deliver a consumer-defined target to a dev env")
+  .option("--keep", "pin a dev instance so idle GC does not stop it")
+  .action(async (input: string, options: { ax?: boolean; target?: string; keep?: boolean }) =>
+    execute("open", async () =>
+      new NectarService().open(input, {
+        noAx: options.ax === false,
+        ...(options.target === undefined ? {} : { target: options.target }),
+        ...(options.keep === undefined ? {} : { keep: options.keep }),
+      }),
+    ),
   );
 
 program

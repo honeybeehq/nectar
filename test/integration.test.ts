@@ -92,6 +92,7 @@ describe("fixture-backed web publish", () => {
     expect(first.packet_fields).toEqual({
       preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: null,
+      dev_ref: null,
       shell_recipe: null,
       public_url: null,
     });
@@ -229,6 +230,7 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
     expect(result.packet_fields).toEqual({
       preview_url: "https://fixture.tailtest.ts.net:8600",
       testpack_ref: `nectar://fixture/${desktopEnv}`,
+      dev_ref: null,
       shell_recipe: null,
       public_url: null,
     });
@@ -296,6 +298,188 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
     await writeFile(cacheZip, "corrupt-cache-again");
     await writeFile(sourceZip, "corrupt-source");
     await expect(service.open(result.ref as string)).rejects.toThrow(/sha256 mismatch after one retry/);
+  });
+});
+
+describe("fixture-backed crystallized dev environments", () => {
+  const devToml = (name: string): string => `
+name = "${name}"
+[dev]
+run = "node dev.mjs"
+kind = "electron"
+warm = "node warm.mjs"
+ready_timeout = "5s"
+`;
+  const devProcess = `
+import path from "node:path";
+import { writeFile } from "node:fs/promises";
+await writeFile(path.join(process.env.NECTAR_ENV_DIR, "ready"), "ready\\n");
+await writeFile(path.join(process.env.NECTAR_ENV_DIR, "boot-target.txt"), process.env.NECTAR_OPEN_TARGET ?? "");
+console.log("dev ready", process.pid);
+setInterval(() => {}, 1000);
+`;
+  const warmProcess = `
+import path from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+await mkdir(path.join(process.env.NECTAR_ENV_DIR, ".vite"), { recursive: true });
+await mkdir(path.join(process.env.NECTAR_ENV_DIR, "out"), { recursive: true });
+await writeFile(path.join(process.env.NECTAR_ENV_DIR, ".vite", "warmed.txt"), "warm\\n");
+await writeFile(path.join(process.env.NECTAR_ENV_DIR, "out", "native.txt"), "native\\n");
+`;
+
+  it("publishes warm, verifies without leaking a process, reports staleness, opens with target/keep, and stops warm", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "nectar.toml": devToml("fixture-dev"),
+      "dev.mjs": devProcess,
+      "warm.mjs": warmProcess,
+    });
+    const published = await service.publish({ repo, mode: "dev", ttl: "1h", verify: true });
+    const env = "fixture-dev--main--dev";
+    track(service, env);
+    expect(published).toMatchObject({
+      env,
+      mode: "dev",
+      status: "warm",
+      verified: true,
+      packet_fields: {
+        preview_url: null,
+        testpack_ref: null,
+        dev_ref: `nectar://fixture/${env}`,
+        shell_recipe: null,
+        public_url: null,
+      },
+    });
+    const warm = await service.store.readEnv(env);
+    expect(warm).toMatchObject({
+      status: "warm",
+      borrowed_worktree: false,
+      dev: { run: "node dev.mjs", kind: "electron", ready_timeout_ms: 5_000 },
+    });
+    expect(warm.dev?.warm_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(warm.serve).toBeUndefined();
+
+    const fresh = await service.resolve(env);
+    expect(fresh).toMatchObject({
+      env,
+      mode: "dev",
+      status: "warm",
+      commit: warm.commit,
+      current_commit: warm.commit,
+      stale: false,
+    });
+    expect((await service.store.readEnv(env)).serve).toBeUndefined();
+
+    await writeFile(path.join(warm.worktree, "branch-change.txt"), "new commit\n");
+    expect((await runCommand("git", ["add", "branch-change.txt"], { cwd: warm.worktree })).exitCode).toBe(0);
+    expect((await runCommand("git", ["commit", "-m", "advance crystallized checkout"], { cwd: warm.worktree })).exitCode).toBe(0);
+    const stale = await service.resolve(env);
+    expect(stale).toMatchObject({ commit: warm.commit, stale: true });
+    expect("resolutions" in stale ? null : stale.current_commit).not.toBe(warm.commit);
+
+    await writeFile(path.join(warm.worktree, ".vite", "kept.txt"), "vite cache\n");
+    await writeFile(path.join(warm.worktree, "out", "kept.txt"), "native cache\n");
+    const republished = await service.publish({ repo, mode: "dev", ttl: "1h" });
+    expect(republished).toMatchObject({ env, status: "warm", verified: false });
+    expect(await readFile(path.join(warm.worktree, ".vite", "kept.txt"), "utf8")).toBe("vite cache\n");
+    expect(await readFile(path.join(warm.worktree, "out", "kept.txt"), "utf8")).toBe("native cache\n");
+
+    const opened = await service.open(republished.ref as string, { target: "review:settings", keep: true });
+    expect(opened).toMatchObject({
+      env,
+      mode: "dev",
+      status: "serving",
+      launched: true,
+      target: "review:settings",
+      pinned: true,
+    });
+    const running = await service.store.readEnv(env);
+    expect(running.serve?.cmd).toBe("node dev.mjs");
+    expect(running.serve?.pid).toBeTypeOf("number");
+    expect(running.serve?.pgid).toBeTypeOf("number");
+    expect(running.serve).not.toHaveProperty("upstream_port");
+    expect(running.serve).not.toHaveProperty("tailnet_port");
+    const targetMessage = JSON.parse(
+      await readFile(path.join(running.worktree, "open-target.json"), "utf8"),
+    ) as { target: string; opened_at: string; nonce: string };
+    expect(targetMessage).toMatchObject({
+      target: "review:settings",
+      opened_at: running.last_opened_at,
+    });
+    expect(targetMessage.nonce).toBeTypeOf("string");
+    expect(await readFile(path.join(running.worktree, "boot-target.txt"), "utf8")).toBe("review:settings");
+
+    const firstOpenedAt = running.last_opened_at;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const focused = await service.open(env, { target: "review:editor" });
+    expect(focused).toMatchObject({
+      launched: false,
+      handle: { pid: running.serve?.pid, pgid: running.serve?.pgid },
+      target: "review:editor",
+    });
+    const focusedRecord = await service.store.readEnv(env);
+    expect(focusedRecord.last_opened_at).not.toBe(firstOpenedAt);
+    const openClock = focusedRecord.last_opened_at;
+    await service.resolve(env);
+    await service.touch(env, "1h");
+    expect((await service.store.readEnv(env)).last_opened_at).toBe(openClock);
+
+    const pid = focusedRecord.serve?.pid;
+    expect(await service.stop(env)).toEqual({ env, status: "warm" });
+    const stopped = await service.store.readEnv(env);
+    expect(stopped.status).toBe("warm");
+    expect(stopped.serve).toBeUndefined();
+    expect(pid === undefined ? true : pidAlive(pid)).toBe(false);
+  }, 30_000);
+
+  it("idle-stops an unpinned dev serve even after a recent resolve touch", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "nectar.toml": devToml("fixture-dev-idle"),
+      "dev.mjs": devProcess,
+      "warm.mjs": warmProcess,
+    });
+    const published = await service.publish({ repo, mode: "dev", ttl: "1h" });
+    const env = published.env as string;
+    track(service, env);
+    await service.open(env);
+    await service.resolve(env);
+    const running = await service.store.readEnv(env);
+    const pid = running.serve?.pid;
+    running.last_opened_at = new Date(Date.now() - 60_000).toISOString();
+    running.last_touched_at = new Date().toISOString();
+    await service.store.writeEnv(running);
+    const config = await service.store.readConfig();
+    await service.store.writeConfig({ ...config, idle_stop_ms: 1_000 });
+
+    expect((await service.gc()).transitions).toEqual([{ env, action: "idle-stop" }]);
+    const idled = await service.store.readEnv(env);
+    expect(idled).toMatchObject({ status: "warm", last_opened_at: running.last_opened_at });
+    expect(idled.serve).toBeUndefined();
+    expect(pid === undefined ? true : pidAlive(pid)).toBe(false);
+  }, 30_000);
+
+  it("borrows an agent worktree without taking ownership of it", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "nectar.toml": `name = "fixture-dev-borrowed"\n[dev]\nrun = "node dev.mjs"\nkind = "electron"\n`,
+      "dev.mjs": devProcess,
+    });
+    const borrowed = await import("node:fs/promises").then(({ realpath }) => realpath(repo));
+    const published = await service.publish({ repo, mode: "dev", worktree: borrowed });
+    const env = published.env as string;
+    track(service, env);
+    expect(await service.store.readEnv(env)).toMatchObject({
+      status: "warm",
+      worktree: borrowed,
+      borrowed_worktree: true,
+    });
+    expect(await service.remove(env)).toMatchObject({
+      env,
+      removed: true,
+      borrowed_worktree_preserved: true,
+    });
+    expect(await import("node:fs/promises").then(({ stat }) => stat(borrowed))).toBeTruthy();
   });
 });
 

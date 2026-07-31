@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { runCommand } from "../src/commands.js";
-import { fakeTailscale, tempDir } from "./helpers.js";
+import { fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
 
 // The --json envelope + exit code IS the product contract for agents, so this
 // suite drives the real built CLI, not NectarService.
@@ -74,5 +74,56 @@ describe("cli --json contract", () => {
     const result = await cli("--help", "--json");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage");
+  });
+
+  it("accepts dev publish mode and emits the dev packet reference", async () => {
+    const repo = await initGitRepo({
+      "nectar.toml": `name = "cli-dev"\n[dev]\nrun = "node dev.mjs"\nkind = "electron"\n`,
+      "dev.mjs": `setInterval(() => {}, 1000);\n`,
+    });
+    const result = await cli("--repo", repo, "publish", "--mode", "dev", "--json");
+    expect(result.exitCode).toBe(0);
+    expect(envelope(result.stdout)).toMatchObject({
+      ok: true,
+      command: "publish",
+      result: {
+        env: "cli-dev--main--dev",
+        mode: "dev",
+        status: "warm",
+        packet_fields: {
+          preview_url: null,
+          testpack_ref: null,
+          dev_ref: "nectar://fixture/cli-dev--main--dev",
+          shell_recipe: null,
+        },
+      },
+    });
+  });
+
+  it("recognizes open --target/--keep and publish --verify as contract flags", async () => {
+    const missing = await cli("open", "missing--main--dev", "--target", "review:settings", "--keep", "--json");
+    expect(missing.exitCode).not.toBe(0);
+    expect(envelope(missing.stdout)).toMatchObject({
+      ok: false,
+      command: "open",
+      error: { code: "E_NOT_FOUND" },
+    });
+
+    const help = await cli("open", "--help", "--json");
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).toContain("--target <string>");
+    expect(help.stdout).toContain("--keep");
+
+    const webRepo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "verify-web", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": `setInterval(() => {}, 1000);\n`,
+    });
+    const invalidVerify = await cli("--repo", webRepo, "publish", "--verify", "--json");
+    expect(invalidVerify.exitCode).not.toBe(0);
+    expect(envelope(invalidVerify.stdout)).toMatchObject({
+      ok: false,
+      command: "publish",
+      error: { code: "E_USAGE" },
+    });
   });
 });

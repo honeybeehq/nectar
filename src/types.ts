@@ -1,7 +1,8 @@
-export type Mode = "web" | "desktop" | "ios";
+export type Mode = "web" | "desktop" | "ios" | "dev";
 
 export type EnvStatus =
   | "publishing"
+  | "warm"
   | "serving"
   | "expired"
   | "cold"
@@ -21,6 +22,13 @@ export interface DesktopRecipe {
   embedUrl?: string;
 }
 
+export interface DevRecipe {
+  run: string;
+  kind: "electron";
+  warm?: string;
+  readyTimeoutMs: number;
+}
+
 export interface IosRecipe {
   pack: string;
   bundleId: string;
@@ -36,14 +44,22 @@ export interface Recipe {
   web?: WebRecipe;
   desktop?: DesktopRecipe;
   ios?: IosRecipe;
+  dev?: DevRecipe;
 }
 
 export interface ServeRecord {
   cmd: string;
   pid: number;
   pgid: number;
-  upstream_port: number;
-  tailnet_port: number;
+  upstream_port?: number;
+  tailnet_port?: number;
+}
+
+export interface DevRecord {
+  run: string;
+  kind: "electron";
+  ready_timeout_ms: number;
+  warm_hash?: string;
 }
 
 export interface EnvUrls {
@@ -133,6 +149,9 @@ export interface EnvRecord {
   borrowed_worktree: boolean;
   status: EnvStatus;
   serve?: ServeRecord;
+  dev?: DevRecord;
+  pinned?: boolean;
+  last_opened_at?: string;
   sim_udid?: string;
   sim_device?: string;
   urls: EnvUrls;
@@ -157,6 +176,8 @@ export interface MachineConfig {
   tailnet_port_end: number;
   serving_web_limit: number;
   serving_sim_limit: number;
+  idle_stop_ms: number;
+  worktree_cache_allowlist: string[];
   pack_quota_bytes: number;
   evidence_quota_bytes: number;
   log_max_bytes: number;
@@ -172,6 +193,9 @@ export interface MachineConfig {
 export interface ResolveResult {
   env: string;
   mode: Mode;
+  commit: string;
+  current_commit: string | null;
+  stale: boolean;
   is_self: boolean;
   urls: EnvUrls;
   testpack_url: string | null;
@@ -196,6 +220,7 @@ export interface MultiResolveResult {
 export interface PacketFields {
   preview_url: string | null;
   testpack_ref: string | null;
+  dev_ref: string | null;
   shell_recipe: string | null;
   public_url: string | null;
 }

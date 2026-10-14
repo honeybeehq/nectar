@@ -32,6 +32,8 @@ export interface DoctorCheck {
   fixed?: boolean;
   binary?: string | null;
   binary_source?: string;
+  api?: "localapi" | "cli";
+  localapi?: string | null;
 }
 
 export interface DoctorAction {

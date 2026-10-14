@@ -60,6 +60,7 @@ import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
 import { logTail, prepareLog } from "./logs.js";
 import {
+  apiNote,
   loopbackProxy,
   OPERATOR_HINT,
   probeServeRights,
@@ -1175,7 +1176,7 @@ export class NectarService {
     delete record.failure;
     delete record.liveness;
     await this.store.writeEnv(record);
-    return { record, warnings, meshError: mesh === undefined ? (identity.offline ?? null) : mesh.ok ? null : mesh.message };
+    return { record, warnings, meshError: mesh === undefined ? (identity.offline ?? null) : mesh.ok ? null : `${mesh.message} ${apiNote(mesh.api, mesh.unreachable)}` };
   }
 
   private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {
@@ -2775,11 +2776,13 @@ export class NectarService {
       name: "tailscale",
       status: identity === undefined ? "fail" : "pass",
       message:
-        tailscale.source === "none"
-          ? `No tailscale CLI found in NECTAR_TAILSCALE_BIN, PATH, ${TAILSCALE_FALLBACKS.join(", ")}; publishes will be local-only`
-          : identity === undefined
-            ? `Tailscale is not usable: ${tailnet.reason}; publishes will be local-only`
-            : `Tailscale is up as ${identity.dnsName} via ${tailscale.path} (${tailscale.source})`,
+        identity !== undefined
+          ? `Tailscale is up as ${identity.dnsName} via ${tailnet.api === "localapi" ? `the LocalAPI at ${tailnet.endpoint}` : `${tailscale.path} (${tailscale.source})`}`
+          : tailscale.source === "none" && tailnet.api === "cli"
+            ? `No Tailscale LocalAPI and no tailscale CLI found in NECTAR_TAILSCALE_BIN, PATH, ${TAILSCALE_FALLBACKS.join(", ")} (${tailnet.reason}); publishes will be local-only`
+            : `Tailscale is not usable: ${tailnet.reason}; publishes will be local-only`,
+      api: tailnet.api,
+      localapi: tailnet.endpoint ?? null,
       binary: tailscale.source === "none" ? null : tailscale.path,
       binary_source: tailscale.source,
     });

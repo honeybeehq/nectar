@@ -519,6 +519,14 @@ describe("tailscale-serve doctor check", () => {
       let received = "";
       request.on("data", (chunk: Buffer) => (received += chunk.toString()));
       request.on("end", () => {
+        if (request.method === "GET" && request.url === "/localapi/v0/status") {
+          response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ BackendState: "Running", Self: { DNSName: "fixture.tailtest.ts.net." } }));
+          return;
+        }
+        if (request.method === "GET") {
+          response.writeHead(200, { "Content-Type": "application/json", Etag: "e1" }).end("null");
+          return;
+        }
         seen.push(`${request.method} ${request.url} ${received}`);
         response.writeHead(status, { "Content-Type": "text/plain" }).end(body);
       });
@@ -540,6 +548,7 @@ describe("tailscale-serve doctor check", () => {
     const check = (denied.checks as DoctorCheck[]).find((item) => item.name === "tailscale-serve");
     expect(check).toMatchObject({ status: "fail", hint: expect.stringContaining("sudo tailscale set --operator=$USER") as unknown });
     expect(check?.message).toContain("serve config denied");
+    expect((denied.checks as DoctorCheck[]).find((item) => item.name === "tailscale")).toMatchObject({ status: "pass", api: "localapi", localapi: expect.stringMatching(/^unix:/) as unknown });
     expect(denied.healthy).toBe(false);
     expect(seen).toEqual(["POST /localapi/v0/serve-config not json"]);
 

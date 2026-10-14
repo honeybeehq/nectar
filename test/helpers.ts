@@ -287,3 +287,84 @@ process.exit(2);
   await chmod(binary, 0o755);
   return { binary, log, stateFile, read: async () => JSON.parse(await readFile(stateFile, "utf8")) as FakeDockerState };
 }
+
+export interface FakeLocalApiOptions {
+  token?: string;
+  status?: unknown;
+  config?: unknown;
+  whois?: Record<string, unknown>;
+  postStatus?: number;
+  postBody?: string;
+  conflicts?: number;
+  onConflict?: (config: Record<string, unknown>) => void;
+}
+
+export interface FakeLocalApi {
+  socket?: string;
+  port?: number;
+  requests: Array<{ method: string; url: string; body: string; ifMatch?: string; authorization?: string }>;
+  config: () => Record<string, unknown>;
+  close: () => Promise<void>;
+}
+
+export async function fakeLocalApi(listen: { socket: string } | { tcp: true }, options: FakeLocalApiOptions = {}): Promise<FakeLocalApi> {
+  const { createServer } = await import("node:http");
+  const { createHash } = await import("node:crypto");
+  let config = (options.config ?? null) as Record<string, unknown> | null;
+  let conflicts = options.conflicts ?? 0;
+  const etag = (): string => createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  const requests: FakeLocalApi["requests"] = [];
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk: Buffer) => (body += chunk.toString()));
+    request.on("end", () => {
+      const authorization = request.headers.authorization;
+      requests.push({
+        method: request.method ?? "",
+        url: request.url ?? "",
+        body,
+        ...(typeof request.headers["if-match"] === "string" ? { ifMatch: request.headers["if-match"] } : {}),
+        ...(authorization === undefined ? {} : { authorization }),
+      });
+      if (options.token !== undefined && authorization !== `Basic ${Buffer.from(`:${options.token}`).toString("base64")}`) {
+        response.writeHead(401).end("invalid localapi credentials\n");
+        return;
+      }
+      const url = new URL(request.url ?? "/", "http://local-tailscaled.sock");
+      if (url.pathname === "/localapi/v0/status") {
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(options.status ?? { BackendState: "Running", Self: { DNSName: "fixture.tailtest.ts.net." } }));
+      } else if (url.pathname === "/localapi/v0/whois") {
+        const found = options.whois?.[url.searchParams.get("addr") ?? ""];
+        if (found === undefined) response.writeHead(404).end("no match for IP:port\n");
+        else response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(found));
+      } else if (url.pathname === "/localapi/v0/serve-config" && request.method === "GET") {
+        response.writeHead(200, { "Content-Type": "application/json", Etag: etag() }).end(JSON.stringify(config));
+      } else if (url.pathname === "/localapi/v0/serve-config" && request.method === "POST") {
+        if (options.postStatus !== undefined) {
+          response.writeHead(options.postStatus).end(options.postBody ?? "");
+        } else if (conflicts > 0) {
+          conflicts -= 1;
+          config ??= {};
+          options.onConflict?.(config);
+          response.writeHead(412).end("etag mismatch\n");
+        } else if (request.headers["if-match"] !== etag()) {
+          response.writeHead(412).end("etag mismatch\n");
+        } else {
+          config = JSON.parse(body) as Record<string, unknown>;
+          response.writeHead(200).end();
+        }
+      } else {
+        response.writeHead(404).end("not found\n");
+      }
+    });
+  });
+  if ("socket" in listen) await new Promise<void>((resolve) => server.listen(listen.socket, resolve));
+  else await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  return {
+    ...("socket" in listen ? { socket: listen.socket } : { port: typeof address === "object" && address !== null ? address.port : 0 }),
+    requests,
+    config: () => structuredClone(config ?? {}),
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}

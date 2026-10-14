@@ -97,7 +97,7 @@ describe("tailscale calls", () => {
     await fake(`printf '{"BackendState":"Running","Self":{}}\\n'`);
     expect((await tailnetStatus()).reason).toMatch(/status JSON has no Self.DNSName/);
     await fake(`printf '{"BackendState":"Running","Self":{"DNSName":"mini03.tail0.ts.net."}}\\n'`);
-    expect(await tailnetStatus()).toEqual({ identity: { host: "mini03", dnsName: "mini03.tail0.ts.net" } });
+    expect(await tailnetStatus()).toEqual({ identity: { host: "mini03", dnsName: "mini03.tail0.ts.net" }, api: "cli" });
   });
 
   it("logs failures always and every call only at debug level", async () => {

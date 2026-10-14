@@ -179,8 +179,9 @@ exit 0`,
     pgids.push(record.serve.pgid);
     const cause = `tailscale status --json via ${broken} (env) exited 1: "failed to connect to local Tailscale service; is Tailscale running?"`;
     expect(result.urls.mesh).toBeNull();
-    expect(result.mesh_error).toBe(cause);
-    expect(result.warnings).toContainEqual(expect.stringContaining(`tailscale unavailable: ${cause} — mesh URL unavailable`));
+    const offline = `${cause} (api: cli; Tailscale LocalAPI unreachable: unix:${process.env.NECTAR_TAILSCALE_SOCKET}: ENOENT)`;
+    expect(result.mesh_error).toBe(offline);
+    expect(result.warnings).toContainEqual(expect.stringContaining(`tailscale unavailable: ${offline} — mesh URL unavailable`));
     expect(result.warnings.join("\n")).not.toContain("logged out");
     expect(events[0]).toMatchObject({
       event: "tailscale",

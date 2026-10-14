@@ -1,8 +1,22 @@
-import { accessSync, constants, existsSync } from "node:fs";
-import http from "node:http";
+import { accessSync, constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CommandTimeout, runCommand, type CommandResult } from "./commands.js";
+import {
+  bodyExcerpt,
+  callLocalApi,
+  describeEndpoint,
+  editServeConfig,
+  readServeConfig,
+  readStatus,
+  removeWebHandlers,
+  setProxyHandler,
+  type LocalApiEndpoint,
+  type ServeConfigEdit,
+  type StatusJson,
+} from "./localapi.js";
+
+export { TAILSCALE_SOCKETS } from "./localapi.js";
 
 export interface TailnetIdentity {
   host: string;
@@ -101,6 +115,27 @@ export function tailscaleEnvironment(env: NodeJS.ProcessEnv = process.env): Node
   return Object.fromEntries(Object.entries(env).filter(([key]) => !LAUNCHD_JOB_ENV.includes(key)));
 }
 
+export type TailscaleApi = "localapi" | "cli";
+
+export function apiNote(api: TailscaleApi, unreachable: string | undefined): string {
+  return api === "localapi" || unreachable === undefined ? `(api: ${api})` : `(api: cli; ${unreachable})`;
+}
+
+function traceLocalApi(event: { ok: boolean; endpoint?: LocalApiEndpoint; method: string; path: string; status?: number; started: number; cause?: string }): void {
+  if (trace === undefined || (event.ok && !trace.all)) return;
+  trace.log({
+    event: "tailscale",
+    api: "localapi",
+    ok: event.ok,
+    endpoint: event.endpoint === undefined ? null : describeEndpoint(event.endpoint),
+    method: event.method,
+    path: event.path,
+    status: event.status ?? (event.ok ? 200 : null),
+    duration_ms: Date.now() - event.started,
+    ...(event.ok || event.cause === undefined ? {} : { cause: event.cause }),
+  });
+}
+
 export interface TailscaleRun {
   ok: boolean;
   stdout: string;
@@ -108,7 +143,12 @@ export interface TailscaleRun {
   cause: string;
 }
 
-export async function runTailscale(args: string[], timeoutMs: number, check: (stdout: string) => string | undefined = () => undefined): Promise<TailscaleRun> {
+export async function runTailscale(
+  args: string[],
+  timeoutMs: number,
+  check: (stdout: string) => string | undefined = () => undefined,
+  unreachable?: string,
+): Promise<TailscaleRun> {
   const binary = resolveTailscale();
   const label = `tailscale ${args.join(" ")} via ${binary.path} (${binary.source})`;
   const started = Date.now();
@@ -140,6 +180,7 @@ export async function runTailscale(args: string[], timeoutMs: number, check: (st
   if (trace !== undefined && (trace.all || !ok)) {
     trace.log({
       event: "tailscale",
+      api: "cli",
       ok,
       binary: binary.path,
       source: binary.source,
@@ -149,17 +190,16 @@ export async function runTailscale(args: string[], timeoutMs: number, check: (st
       stderr,
       duration_ms: durationMs,
       ...(ok ? {} : { cause }),
+      ...(unreachable === undefined ? {} : { localapi: unreachable }),
     });
   }
   return { ok, stdout: result?.stdout ?? "", stderr: result?.stderr ?? "", cause };
 }
 
-export type TailnetStatus = { identity: TailnetIdentity; reason?: undefined } | { identity?: undefined; reason: string };
-
-interface StatusJson {
-  BackendState?: string;
-  Self?: { DNSName?: string };
-}
+export type TailnetStatus = ({ identity: TailnetIdentity; reason?: undefined } | { identity?: undefined; reason: string }) & {
+  api: TailscaleApi;
+  endpoint?: string;
+};
 
 function parseStatus(stdout: string): StatusJson | string {
   try {
@@ -171,23 +211,53 @@ function parseStatus(stdout: string): StatusJson | string {
 
 function statusProblem(stdout: string): string | undefined {
   const status = parseStatus(stdout);
-  if (typeof status === "string") return status;
+  return typeof status === "string" ? status : statusJsonProblem(status);
+}
+
+function statusJsonProblem(status: StatusJson): string | undefined {
   if (status.BackendState !== "Running") return `Tailscale is ${status.BackendState ?? "in no BackendState"}, not Running (logged out or stopped)`;
   if (!status.Self?.DNSName) return "status JSON has no Self.DNSName";
   return undefined;
 }
 
-export async function tailnetStatus(): Promise<TailnetStatus> {
-  const run = await runTailscale(["status", "--json"], STATUS_TIMEOUT_MS, statusProblem);
-  if (!run.ok) return { reason: run.cause };
-  const status = parseStatus(run.stdout) as StatusJson;
+function identityOf(status: StatusJson): TailnetIdentity {
   const dnsName = (status.Self?.DNSName ?? "").replace(/\.$/, "");
-  return { identity: { host: dnsName.split(".")[0] ?? os.hostname().split(".")[0] ?? "localhost", dnsName } };
+  return { host: dnsName.split(".")[0] ?? os.hostname().split(".")[0] ?? "localhost", dnsName };
+}
+
+type LocalStatus =
+  | { kind: "up"; status: StatusJson; endpoint: LocalApiEndpoint }
+  | { kind: "problem"; problem: string; endpoint?: LocalApiEndpoint }
+  | { kind: "unreachable"; unreachable: string };
+
+async function localStatus(): Promise<LocalStatus> {
+  const started = Date.now();
+  const read = await readStatus();
+  if (!read.ok && !read.reachable) return { kind: "unreachable", unreachable: read.reason };
+  const endpoint = read.endpoint;
+  const problem = read.ok ? statusJsonProblem(read.status) : undefined;
+  const cause = read.ok ? (problem === undefined ? undefined : `Tailscale LocalAPI ${describeEndpoint(read.endpoint)}: ${problem}`) : read.reason;
+  traceLocalApi({ ok: cause === undefined, ...(endpoint === undefined ? {} : { endpoint }), method: "GET", path: "/localapi/v0/status", started, ...(cause === undefined ? {} : { cause }) });
+  if (read.ok && cause === undefined) return { kind: "up", status: read.status, endpoint: read.endpoint };
+  return { kind: "problem", problem: cause ?? "", ...(endpoint === undefined ? {} : { endpoint }) };
+}
+
+export async function tailnetStatus(): Promise<TailnetStatus> {
+  const local = await localStatus();
+  if (local.kind === "up") return { identity: identityOf(local.status), api: "localapi", endpoint: describeEndpoint(local.endpoint) };
+  if (local.kind === "problem") {
+    return { reason: `${local.problem} ${apiNote("localapi", undefined)}`, api: "localapi", ...(local.endpoint === undefined ? {} : { endpoint: describeEndpoint(local.endpoint) }) };
+  }
+  const run = await runTailscale(["status", "--json"], STATUS_TIMEOUT_MS, statusProblem, local.unreachable);
+  if (!run.ok) return { reason: `${run.cause} ${apiNote("cli", local.unreachable)}`, api: "cli" };
+  return { identity: identityOf(parseStatus(run.stdout) as StatusJson), api: "cli" };
 }
 
 export interface ServeOutcome {
   ok: boolean;
   message: string;
+  api: TailscaleApi;
+  unreachable?: string;
 }
 
 export const OPERATOR_HINT = "sudo tailscale set --operator=$USER";
@@ -196,50 +266,52 @@ export function serveDenied(message: string): boolean {
   return /access denied|serve config denied/i.test(message);
 }
 
-function outcome(run: TailscaleRun): ServeOutcome {
-  return { ok: run.ok, message: run.stderr.trim() || run.stdout.trim() || run.cause };
+function outcome(run: TailscaleRun, unreachable: string | undefined): ServeOutcome {
+  return { ok: run.ok, message: run.stderr.trim() || run.stdout.trim() || run.cause, api: "cli", ...(unreachable === undefined ? {} : { unreachable }) };
+}
+
+async function changeServe(args: string[], edit: (config: Parameters<ServeConfigEdit>[0], dnsName: string) => string | undefined): Promise<ServeOutcome> {
+  const local = await localStatus();
+  if (local.kind !== "unreachable") {
+    if (local.kind === "problem") return { ok: false, message: local.problem, api: "localapi" };
+    const dnsName = identityOf(local.status).dnsName;
+    const started = Date.now();
+    const write = await editServeConfig((config) => edit(config, dnsName));
+    if (write.ok || write.reachable) {
+      traceLocalApi({
+        ok: write.ok,
+        ...(write.endpoint === undefined ? {} : { endpoint: write.endpoint }),
+        method: "POST",
+        path: "/localapi/v0/serve-config",
+        started,
+        ...(write.ok ? {} : { cause: `${args.join(" ")}: ${write.reason}`, ...(write.status === undefined ? {} : { status: write.status }) }),
+      });
+      return { ok: write.ok, message: write.ok ? "" : write.reason, api: "localapi" };
+    }
+    return outcome(await runTailscale(args, SERVE_TIMEOUT_MS, undefined, write.reason), write.reason);
+  }
+  return outcome(await runTailscale(args, SERVE_TIMEOUT_MS, undefined, local.unreachable), local.unreachable);
 }
 
 export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<ServeOutcome> {
-  return outcome(await runTailscale(["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl], SERVE_TIMEOUT_MS));
+  return changeServe(["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl], (config, dnsName) => setProxyHandler(config, dnsName, tailnetPort, upstreamUrl));
 }
 
-export const TAILSCALE_SOCKETS = ["/var/run/tailscale/tailscaled.sock", "/run/tailscale/tailscaled.sock"];
+export type ServeRights = { state: "allowed"; api: "localapi" } | { state: "denied"; message: string; api: "localapi" } | { state: "unknown"; message: string };
 
-export type ServeRights = { state: "allowed" } | { state: "denied"; message: string } | { state: "unknown"; message: string };
-
-export async function probeServeRights(socket = process.env.NECTAR_TAILSCALE_SOCKET ?? TAILSCALE_SOCKETS.find((file) => existsSync(file))): Promise<ServeRights> {
-  if (socket === undefined) return { state: "unknown", message: `no tailscaled socket at ${TAILSCALE_SOCKETS.join(" or ")}` };
-  return new Promise((resolve) => {
-    const request = http.request(
-      {
-        socketPath: socket,
-        path: "/localapi/v0/serve-config",
-        method: "POST",
-        headers: { Host: "local-tailscaled.sock", "Sec-Tailscale": "localapi", "Content-Type": "application/json" },
-        timeout: 5_000,
-      },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          const body = Buffer.concat(chunks).toString().trim();
-          resolve(response.statusCode === 403 && serveDenied(body) ? { state: "denied", message: body } : { state: "allowed" });
-        });
-      },
-    );
-    request.on("timeout", () => request.destroy(new Error(`tailscaled socket ${socket} did not answer`)));
-    request.on("error", (error) => resolve({ state: "unknown", message: error.message }));
-    request.end("not json");
-  });
+export async function probeServeRights(): Promise<ServeRights> {
+  const call = await callLocalApi("POST", "/localapi/v0/serve-config", { body: "not json" });
+  if (!call.ok) return { state: "unknown", message: call.reason };
+  const body = call.response.body.trim();
+  return call.response.status === 403 && serveDenied(body) ? { state: "denied", message: body, api: "localapi" } : { state: "allowed", api: "localapi" };
 }
 
 export async function servePackStore(target: string): Promise<ServeOutcome> {
-  return outcome(await runTailscale(["serve", "--bg", "--yes", "--https=8440", target], SERVE_TIMEOUT_MS));
+  return changeServe(["serve", "--bg", "--yes", "--https=8440", target], (config, dnsName) => setProxyHandler(config, dnsName, 8440, target));
 }
 
 export async function stopServe(tailnetPort: number): Promise<boolean> {
-  return (await runTailscale(["serve", `--https=${tailnetPort}`, "off"], SERVE_TIMEOUT_MS)).ok;
+  return (await changeServe(["serve", `--https=${tailnetPort}`, "off"], (config, dnsName) => removeWebHandlers(config, dnsName, tailnetPort))).ok;
 }
 
 function jsonProblem(stdout: string): string | undefined {
@@ -252,7 +324,20 @@ function jsonProblem(stdout: string): string | undefined {
 }
 
 export async function serveStatus(): Promise<unknown> {
-  const run = await runTailscale(["serve", "status", "--json"], STATUS_TIMEOUT_MS, jsonProblem);
+  const started = Date.now();
+  const read = await readServeConfig();
+  if (read.ok || read.reachable) {
+    traceLocalApi({
+      ok: read.ok,
+      ...(read.endpoint === undefined ? {} : { endpoint: read.endpoint }),
+      method: "GET",
+      path: "/localapi/v0/serve-config",
+      started,
+      ...(read.ok ? {} : { cause: bodyExcerpt(read.reason), ...(read.status === undefined ? {} : { status: read.status }) }),
+    });
+    return read.ok ? read.config : undefined;
+  }
+  const run = await runTailscale(["serve", "status", "--json"], STATUS_TIMEOUT_MS, jsonProblem, read.reason);
   return run.ok ? (JSON.parse(run.stdout) as unknown) : undefined;
 }
 

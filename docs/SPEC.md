@@ -54,7 +54,7 @@ Agents of any harness call it directly; the packet carries only strings.
   another clone of the same repository (a second Cell, or the same Cell after a move): same
   normalized `remote.origin.url` and a shared root commit, with the recorded branch or with
   the recorded `repo` gone. A different repository that only names the same origin is
-  refused (DECISIONS D26 amendment).
+  refused. Replace refs and grafts are ignored (DECISIONS D26 amendment).
 - **app** — the repo's short name, from `--name`, else the recipe (`name` in `nectar.toml`,
   `package.json`, `[project].name`), else the repo directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
@@ -1166,7 +1166,10 @@ status, worktree add/remove/prune, reset) runs with global and system config ign
 (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`; a Linux Cell can write
 `~/.config/git/config`). It runs with every transport refused (`GIT_ALLOW_PROTOCOL=none`,
 `protocol.*.allow=never`) and lazy fetch off (`GIT_NO_LAZY_FETCH=1`), so a planted
-promisor or `ext::` remote never runs. It pins `core.hooksPath=/dev/null`,
+promisor or `ext::` remote never runs. Replace refs and grafts are ignored
+(`GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null`) and the commit-graph is not read
+(`core.commitGraph=false`), so what Nectar checks out and the root commits it compares (§3)
+come from the repo's real objects. It pins `core.hooksPath=/dev/null`,
 `core.fsmonitor=false`, `gc.auto=0`, `maintenance.auto=false` and submodule recursion off.
 Every filter driver and `hook.*` entry in the repo's config (including `include.path`,
 `includeIf` and worktree config) is neutralized. The filter's `smudge`, `clean` and

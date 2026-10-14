@@ -522,7 +522,7 @@ export class NectarService {
       const other = owned === slot ? `${slot}.alt` : slot;
       if (existsSync(other)) await this.discardWorktree(options.repo, other);
       if (options.recipe.source !== "static" && existsSync(owned) && !(await this.checkedOutFrom(owned, options.repo))) {
-        await this.discardWorktree(options.repo, owned);
+        await this.discardWorktree(options.repo, owned, old?.repo);
       }
     }
     return { record, ...(old === undefined ? {} : { old }), identity };
@@ -909,7 +909,7 @@ export class NectarService {
     }
     await this.stopRuntime(old);
     await this.store.writeEnv(record);
-    if (site === undefined && old.worktree !== destination) await this.discardWorktree(record.repo, old.worktree);
+    if (site === undefined && old.worktree !== destination) await this.discardWorktree(record.repo, old.worktree, old.repo);
     try {
       const published = await this.startWeb(record, web, identity, old, depEnv);
       return { ...published, warnings: [...published.warnings, ...warnings] };
@@ -919,8 +919,10 @@ export class NectarService {
     }
   }
 
-  private async discardWorktree(repo: string, worktree: string): Promise<void> {
-    if ((await removeWorktree(repo, worktree)) && !existsSync(worktree)) return;
+  private async discardWorktree(repo: string, worktree: string, previous?: string): Promise<void> {
+    for (const owner of previous === undefined || previous === repo ? [repo] : [repo, previous]) {
+      if (existsSync(owner) && (await removeWorktree(owner, worktree)) && !existsSync(worktree)) return;
+    }
     await trashPaths([worktree], this.paths.root);
   }
 

@@ -493,12 +493,20 @@ into nectard's work dir so slots never belong to a Cell repo. **Why:** Honeybee 
 branch to a Cell: `HIVE_*` carries bee ids and the space name, and the Cell's `cell.json`
 has the origin and sha but no branch, so (a) has nothing to read. The origin URL is plain
 repo config that any repo can set, so (b) and (c) let an unrelated repo take an env by
-naming the same origin. A shared root commit needs the same history, which a different
-project cannot fake. `git config --get` and `rev-list` run through the hardened `runGit`
-and execute nothing from the repo's config. (d) remains the D29 follow-up. A record from
-before this amendment has no `origin`, so once its `repo` is gone it still needs
-`nectar rm <env> --force`. A Cell whose HEAD is past every branch gets a new
-`detached-<sha>` env for each commit; pass `--branch` to keep one URL.
+naming the same origin. Requiring a shared root commit stops an unrelated repo that
+only names the origin. `runGit` ignores replace refs and grafts
+(`GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null`), so those can't fake a root.
+The guard is against accidental collisions, not a deliberate actor running as the same
+user: a repo that merges the origin's history in (`--allow-unrelated-histories`) shares
+its root and passes. That actor could also `nectar rm --force` the env, so no history
+check is a security boundary here. `git config --get` and `rev-list` run through the
+hardened `runGit` and execute nothing from the repo's config. (d) remains the D29
+follow-up. Limits: a shallow clone's root is its shallow boundary, so it never matches
+another clone. A record from before this amendment has no `origin`, so once its `repo`
+is gone it still needs `nectar rm <env> --force`. A Cell whose HEAD is past every branch
+gets a new `detached-<sha>` env for each commit; pass `--branch` to keep one URL. When
+another clone takes an env over, Nectar removes its old slot through the old clone if
+that clone still exists, so no stale worktree entry is left behind.
 
 ## D27 — `doctor --fix` removes only what it can prove is Nectar's
 

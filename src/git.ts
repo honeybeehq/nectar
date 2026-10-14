@@ -9,6 +9,8 @@ import type { BranchSource } from "./types.js";
 const PINNED: Array<[string, string]> = [
   ["core.hooksPath", "/dev/null"],
   ["core.fsmonitor", "false"],
+  ["core.commitGraph", "false"],
+  ["advice.graftFileDeprecated", "false"],
   ["gc.auto", "0"],
   ["maintenance.auto", "false"],
   ["submodule.recurse", "false"],
@@ -22,6 +24,8 @@ function isolatedEnvironment(settings: Array<[string, string]>): NodeJS.ProcessE
   env.GIT_CONFIG_GLOBAL = "/dev/null";
   env.GIT_CONFIG_NOSYSTEM = "1";
   env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_NO_REPLACE_OBJECTS = "1";
+  env.GIT_GRAFT_FILE = "/dev/null";
   env.GIT_ALLOW_PROTOCOL = "none";
   env.GIT_TERMINAL_PROMPT = "0";
   env.GIT_CONFIG_COUNT = String(settings.length);

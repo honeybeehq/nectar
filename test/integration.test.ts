@@ -191,6 +191,9 @@ describe("fixture-backed web publish", () => {
     track(service, first.env as string);
     expect(first).toMatchObject({ env: "cells--main--web", branch: "main", branch_source: "contains" });
     expect((await service.show("cells--main--web")).env).toMatchObject({ origin, repo: a });
+    expect(await service.publish({ repo: b, ttl: "1h" })).toMatchObject({ urls: first.urls });
+    expect(await run(a, "worktree", "list", "--porcelain")).not.toContain("cells--main--web");
+    expect(await service.publish({ repo: a, ttl: "1h" })).toMatchObject({ urls: first.urls });
 
     await rm(a, { recursive: true, force: true });
     const second = await service.publish({ repo: b, ttl: "1h" });
@@ -203,6 +206,13 @@ describe("fixture-backed web publish", () => {
     await run(impostor, "checkout", "-q", "--detach");
     await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE", details: { existing_repo: b } });
     await rm(b, { recursive: true, force: true });
+    await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE" });
+    await run(impostor, "fetch", "-q", "origin");
+    const upstreamRoot = await run(upstream, "rev-list", "--max-parents=0", "HEAD");
+    await run(impostor, "replace", "--graft", "HEAD", upstreamRoot);
+    await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE" });
+    await run(impostor, "replace", "-d", await run(impostor, "rev-parse", "HEAD"));
+    await writeFile(path.join(impostor, ".git", "info", "grafts"), `${await run(impostor, "rev-parse", "HEAD")} ${upstreamRoot}\n`);
     await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE" });
     expect(await fetch((second.urls as { local: string }).local).then(async (response) => response.text())).toBe("upstream");
 

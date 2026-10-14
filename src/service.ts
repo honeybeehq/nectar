@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
-import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo, shortCommit } from "./git.js";
+import { currentBranch, installDependencies, prepareWorktree, removeWorktree, resolveCommit, resolveRepo, sameRepository, shortCommit } from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
@@ -173,10 +173,10 @@ export class NectarService {
     const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
     const site = await this.staticCandidate(options);
     if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
-    if (options.name !== undefined) throw new NectarError("E_USAGE", "--name applies only to static sites; set name in nectar.toml");
     const repo = await resolveRepo(options.repo ?? process.cwd());
     const branch = options.branch ?? (await currentBranch(repo));
-    const recipe = await loadRecipe(repo);
+    const loaded = await loadRecipe(repo);
+    const recipe = options.name === undefined ? loaded : { ...loaded, name: appSlug(options.name) };
     const mode = selectMode(recipe, options.mode);
     if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, branch);
     if (mode === "web") assertRuntimes(recipe);
@@ -325,10 +325,34 @@ export class NectarService {
   }): Promise<{ record: EnvRecord; old?: EnvRecord; identity: MachineIdentity }> {
     const name = envName(options.recipe.name, options.branch, options.mode);
     const old = await this.store.maybeEnv(name);
+    if (old !== undefined) await this.assertSameSource(old, options.repo, options.recipe.source === "static");
     const identity = await this.identity();
+    const record = this.nextRecord(options, name, options.worktree ?? path.join(this.paths.work, name), identity, old);
+    // Stop the old runtime while its pid/pgid are still on disk — overwriting the
+    // record first would orphan the running server if we die before stopping it.
+    if (old !== undefined) await this.stopRuntime(old);
+    await this.store.writeEnv(record);
+    return { record, ...(old === undefined ? {} : { old }), identity };
+  }
+
+  private async assertSameSource(old: EnvRecord, repo: string, isStatic: boolean): Promise<void> {
+    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await sameRepository(old.repo, repo)) return;
+    throw new NectarError(
+      "E_USAGE",
+      `Env '${old.name}' is published from ${old.repo}, not ${repo}; pass --name <other> to publish this one beside it, or run nectar rm ${old.name} --force first`,
+      { existing_repo: old.repo },
+    );
+  }
+
+  private nextRecord(
+    options: { repo: string; branch: string; recipe: Recipe; mode: Mode; ttlMs: number; worktree?: string; packet?: string },
+    name: string,
+    destination: string,
+    identity: MachineIdentity,
+    old: EnvRecord | undefined,
+  ): EnvRecord {
     const now = new Date();
-    const destination = options.worktree ?? path.join(this.paths.work, name);
-    const record: EnvRecord = {
+    return {
       eid: old?.eid ?? crypto.randomBytes(2).toString("hex"),
       name,
       mode: options.mode,
@@ -356,11 +380,6 @@ export class NectarService {
       ...(old?.pinned === undefined ? {} : { pinned: old.pinned }),
       ...(old?.last_opened_at === undefined ? {} : { last_opened_at: old.last_opened_at }),
     };
-    // Stop the old runtime while its pid/pgid are still on disk — overwriting the
-    // record first would orphan the running server if we die before stopping it.
-    if (old !== undefined) await this.stopRuntime(old);
-    await this.store.writeEnv(record);
-    return { record, ...(old === undefined ? {} : { old }), identity };
   }
 
   private async checkout(
@@ -370,21 +389,7 @@ export class NectarService {
     cacheAllowlist: string[],
   ): Promise<EnvRecord> {
     try {
-      const commit = await resolveCommit(record.repo, record.branch);
-      const checkout = await prepareWorktree({
-        repo: record.repo,
-        branch: record.branch,
-        commit,
-        destination: record.worktree,
-        ...(borrowed === undefined ? {} : { borrowed }),
-        preserve: cacheAllowlist,
-      });
-      record.worktree = checkout.worktree;
-      record.borrowed_worktree = checkout.borrowed;
-      record.commit = checkout.commit;
-      const installHash = await installDependencies(record.worktree, old?.install_hash);
-      if (installHash === undefined) delete record.install_hash;
-      else record.install_hash = installHash;
+      await this.checkoutInto(record, old, borrowed, cacheAllowlist);
       await this.store.writeEnv(record);
       return record;
     } catch (error) {
@@ -392,6 +397,29 @@ export class NectarService {
       await this.store.writeEnv(record);
       throw error;
     }
+  }
+
+  private async checkoutInto(
+    record: EnvRecord,
+    old: EnvRecord | undefined,
+    borrowed: string | undefined,
+    cacheAllowlist: string[],
+  ): Promise<void> {
+    const commit = await resolveCommit(record.repo, record.branch);
+    const checkout = await prepareWorktree({
+      repo: record.repo,
+      branch: record.branch,
+      commit,
+      destination: record.worktree,
+      ...(borrowed === undefined ? {} : { borrowed }),
+      preserve: cacheAllowlist,
+    });
+    record.worktree = checkout.worktree;
+    record.borrowed_worktree = checkout.borrowed;
+    record.commit = checkout.commit;
+    const installHash = await installDependencies(record.worktree, old?.install_hash);
+    if (installHash === undefined) delete record.install_hash;
+    else record.install_hash = installHash;
   }
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
@@ -527,10 +555,11 @@ export class NectarService {
         if (wasStatic !== (options.site !== undefined)) {
           throw new NectarError(
             "E_USAGE",
-            `Env '${name}' already holds a ${wasStatic ? "static copy" : "git checkout"} of ${old.repo}; run nectar rm ${name} --force first${options.site === undefined ? "" : ", or pass --name to publish the static site under another name"}`,
+            `Env '${name}' already holds a ${wasStatic ? "static copy" : "git checkout"} of ${old.repo}; run nectar rm ${name} --force first, or pass --name to publish under another name`,
           );
         }
       }
+      if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined);
       const records = await this.store.listEnvs();
       // The quota counts live web envs only — not ios streams, not silently-dead
       // servers a bee could never free by "running gc".
@@ -544,6 +573,13 @@ export class NectarService {
       const config = await this.store.readConfig();
       if (activeWeb.length >= config.serving_web_limit) {
         throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
+      }
+      if (
+        old !== undefined &&
+        holdsRuntime(old.status) &&
+        (options.site !== undefined || (!old.borrowed_worktree && options.worktree === undefined))
+      ) {
+        return this.republishWeb(options, old);
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
       const site = options.site;
@@ -565,6 +601,59 @@ export class NectarService {
         throw error;
       }
     });
+  }
+
+  private async republishWeb(
+    options: { repo: string; branch: string; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite },
+    old: EnvRecord,
+  ): Promise<PublishedWeb> {
+    const identity = await this.identity();
+    const site = options.site;
+    const slot = path.join(this.paths.work, old.name);
+    const destination = site !== undefined ? old.worktree : old.worktree === slot ? `${slot}.alt` : slot;
+    const record = this.nextRecord({ ...options, mode: "web" }, old.name, destination, identity, old);
+    const warnings: string[] = [];
+    let web: WebRecipe | undefined;
+    try {
+      if (site === undefined) {
+        await this.discardWorktree(record.repo, destination);
+        await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist);
+        web = (await loadRecipe(record.worktree)).web;
+      } else {
+        const staged = await stageStaticSite(site, record.worktree);
+        record.commit = staged.hash;
+        delete record.install_hash;
+        if (staged.skippedLinks > 0) {
+          warnings.push(`skipped ${staged.skippedLinks} symlink(s) while copying ${site.root}; static sites serve regular files only`);
+        }
+        web = options.recipe.web;
+      }
+      if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
+      if (web.build !== undefined) await this.runBuild(record, web.build);
+    } catch (error) {
+      if (site === undefined) await this.discardWorktree(record.repo, destination).catch(() => undefined);
+      const failure = asNectarError(error);
+      throw new NectarError(
+        failure.code,
+        `${failure.message}; ${old.name} still serves the previous publish (${old.commit})`,
+        { ...failure.details, still_serving: old.commit },
+      );
+    }
+    await this.stopRuntime(old);
+    await this.store.writeEnv(record);
+    if (site === undefined && old.worktree !== destination) await this.discardWorktree(record.repo, old.worktree);
+    try {
+      const published = await this.startWeb(record, web, identity, old);
+      return { ...published, warnings: [...published.warnings, ...warnings] };
+    } catch (error) {
+      await this.rollbackRuntime(record, error);
+      throw error;
+    }
+  }
+
+  private async discardWorktree(repo: string, worktree: string): Promise<void> {
+    if ((await removeWorktree(repo, worktree)) && !existsSync(worktree)) return;
+    await trashPaths([worktree], this.paths.root);
   }
 
   private async runBuild(record: EnvRecord, build: string): Promise<void> {

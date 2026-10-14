@@ -125,6 +125,88 @@ describe("fixture-backed web publish", () => {
     expect(await service.show(env)).toHaveProperty("log_tail");
   });
 
+  it("refuses a same-named env from another repo, leaves it serving, and publishes beside it with --name", async () => {
+    const { service } = await harness();
+    const files = (body: string): Record<string, string> => ({
+      "package.json": JSON.stringify({ name: "twin", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('process.env.VALHALL_HEM_TOKEN ?? "scrubbed"', JSON.stringify(body)),
+    });
+    const first = await initGitRepo(files("first"));
+    const second = await initGitRepo(files("second"));
+    const published = await service.publish({ repo: first, ttl: "1h" });
+    track(service, published.env as string);
+    const before = (await service.show("twin--main--web")).env as { serve: unknown; repo: string };
+
+    await expect(service.publish({ repo: second, ttl: "1h" })).rejects.toMatchObject({
+      code: "E_USAGE",
+      message: expect.stringMatching(new RegExp(`published from ${first}.*--name`)) as string,
+    });
+    const after = (await service.show("twin--main--web")).env as { serve: unknown; repo: string; status: string };
+    expect(after).toMatchObject({ status: "serving", repo: first, serve: before.serve });
+    expect(await fetch((published.urls as { local: string }).local).then(async (response) => response.text())).toBe("first");
+
+    const beside = await service.publish({ repo: second, name: "Twin B", ttl: "1h" });
+    track(service, beside.env as string);
+    expect(beside.env).toBe("twin-b--main--web");
+    expect(await fetch((beside.urls as { local: string }).local).then(async (response) => response.text())).toBe("second");
+    expect(await fetch((published.urls as { local: string }).local).then(async (response) => response.text())).toBe("first");
+
+    const worktree = path.join(await tempDir("twin"), "worktree");
+    expect((await runCommand("git", ["worktree", "add", "--detach", worktree, "main"], { cwd: first })).exitCode).toBe(0);
+    const again = await service.publish({ repo: worktree, branch: "main", ttl: "1h" });
+    expect(again.urls).toEqual(published.urls);
+  });
+
+  it("keeps the previous publish serving when a republish fails to install or check out", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "steady", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('process.env.VALHALL_HEM_TOKEN ?? "scrubbed"', '"v1"'),
+    });
+    const first = await service.publish({ repo, ttl: "1h" });
+    const env = first.env as string;
+    track(service, env);
+    const local = (first.urls as { local: string }).local;
+    const before = (await service.show(env)).env as { serve: unknown; worktree: string; commit: string };
+    const commit = async (files: Record<string, string>): Promise<void> => {
+      for (const [name, contents] of Object.entries(files)) await writeFile(path.join(repo, name), contents);
+      await runCommand("git", ["add", "."], { cwd: repo });
+      await runCommand("git", ["commit", "-m", "change"], { cwd: repo });
+    };
+    const steady = async (): Promise<void> => {
+      expect((await service.show(env)).env).toMatchObject({ status: "serving", serve: before.serve, worktree: before.worktree, commit: before.commit });
+      expect(await fetch(local).then(async (response) => response.text())).toBe("v1");
+      expect((await runCommand("git", ["worktree", "list"], { cwd: repo })).stdout).not.toContain(".alt");
+    };
+
+    await commit({ "package-lock.json": "{ not json", "server.mjs": server.replace('process.env.VALHALL_HEM_TOKEN ?? "scrubbed"', '"v2"') });
+    await expect(service.publish({ repo, ttl: "1h" })).rejects.toMatchObject({
+      code: "E_INSTALL",
+      message: expect.stringContaining(`still serves the previous publish (${before.commit})`) as string,
+      details: { log_tail: expect.any(Array) as unknown },
+    });
+    await steady();
+
+    expect((await runCommand("git", ["checkout", "-q", "-b", "elsewhere"], { cwd: repo })).exitCode).toBe(0);
+    expect((await runCommand("git", ["branch", "-D", "main"], { cwd: repo })).exitCode).toBe(0);
+    await expect(service.publish({ repo, branch: "main", ttl: "1h" })).rejects.toMatchObject({ code: "E_CHECKOUT" });
+    await steady();
+
+    expect((await runCommand("git", ["checkout", "-q", "-b", "main"], { cwd: repo })).exitCode).toBe(0);
+    await runCommand("git", ["rm", "-q", "package-lock.json"], { cwd: repo });
+    await runCommand("git", ["commit", "-m", "fix"], { cwd: repo });
+    const fixed = await service.publish({ repo, ttl: "1h" });
+    expect(fixed.urls).toEqual(first.urls);
+    expect(await fetch(local).then(async (response) => response.text())).toBe("v2");
+    const moved = (await service.show(env)).env as { worktree: string };
+    expect(moved.worktree).toBe(`${before.worktree}.alt`);
+    const worktrees = (await runCommand("git", ["worktree", "list"], { cwd: repo })).stdout;
+    expect(worktrees).not.toContain(`${before.worktree} `);
+    expect(worktrees).not.toContain("prunable");
+    await service.publish({ repo, ttl: "1h" });
+    expect(((await service.show(env)).env as { worktree: string }).worktree).toBe(before.worktree);
+  });
+
   it("implements F2 local-only fallback when Tailscale is down", async () => {
     const { service } = await harness();
     vi.stubEnv("FAKE_TS_DOWN", "1");
@@ -280,6 +362,12 @@ describe("static sites", () => {
     track(service, file.env as string);
     expect(file.env).toBe("coupons-report--static--web");
     expect(await fetch((file.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>coupons</h1>");
+    const namesake = path.join(await tempDir("static-single"), "Coupons Report.html");
+    await writeFile(namesake, "<h1>other coupons</h1>");
+    await expect(service.publish({ repo: namesake, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE", message: expect.stringContaining("--name") as string });
+    await writeFile(single, "<h1>coupons v2</h1>");
+    await service.publish({ repo: single, ttl: "1h" });
+    expect(await fetch((file.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>coupons v2</h1>");
 
     await expect(service.publish({ repo: app, mode: "static", name: "fixture-app", ttl: "1h" })).rejects.toMatchObject({
       code: "E_USAGE",
@@ -296,7 +384,6 @@ describe("static sites", () => {
 
     const empty = await tempDir("static-empty");
     await expect(service.publish({ repo: empty, mode: "static" })).rejects.toMatchObject({ code: "E_NO_RECIPE" });
-    await expect(service.publish({ repo: app, name: "x" })).rejects.toMatchObject({ code: "E_USAGE" });
   });
 });
 

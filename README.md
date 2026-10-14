@@ -26,7 +26,10 @@ $ nectar publish --json
 ```
 
 Put `packet_fields` on the review packet, flip to review-ready, done. Fix feedback and
-re-publish — the URL stays stable, so the packet's references keep working.
+re-publish — the URL stays stable, so the packet's references keep working. A republish
+that fails to check out, install or build leaves the previous version serving. Publishing
+a different repo whose app name and branch collide with a live env is refused with
+`E_USAGE`; pass `--name <app>` to publish it beside the other one.
 
 ## Five modalities, one grammar
 

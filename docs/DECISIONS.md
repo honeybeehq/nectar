@@ -446,3 +446,28 @@ entry back at its app. A proxy that dies with nectard costs one restart interval
 falls back to the direct mapping when it finds a dead proxy in front of a live app, so the
 preview never stays down for long. The probe-before-map rule (the proxy must name its env
 and current upstream) means a stale or foreign listener is never fronted.
+
+## D26 — An env belongs to its source; a live web republish stages before it stops
+
+**Chose:** an env record keeps the source it was published from. Publishing a different
+repo (or static path) into the same name is `E_USAGE`, as static-vs-git already was, and
+`--name` now works for every source so the second one can sit beside the first. A git
+worktree sharing the repo's `--git-common-dir` is the same source, because Nectar's own
+worktree can check out its commits. A republish of a serving web env checks out, installs
+and builds in a second worktree slot (`work/<name>` ↔ `work/<name>.alt`) and stops the old
+serve only after that succeeds; the old slot is then removed. (SPEC §3, §6.1.)
+**Alternatives:** (a) keep the old serve running but reset the worktree in place and
+restore it on failure; (b) stage in `work/<name>.next` and `git worktree move` it over the
+old one; (c) blue/green: run both serves and swap ports; (d) let a different repo take
+the name over.
+**Why:** two repos with the same `package.json`/`pyproject` name are common, and the
+takeover killed the first preview and then failed with `E_CHECKOUT`. (d) is that bug.
+(a) is not correct: `git clean` removes the build output the old serve depends on,
+dev servers hot-reload the new files, and installs change dependencies under the running
+process; restoring would need a second build. (b) moves directories whose venvs,
+node_modules shims and framework caches can embed absolute paths. Alternating slots keeps
+every path the serve sees the path it was built at. The cost is a cold dependency install
+on a live republish, because the new slot starts without the other slot's caches. (c)
+needs two ports per env and a reviewer-visible URL swap, which open question 6 already
+deferred. Only web envs stage: dev, desktop and iOS republish in place, and stopped or
+crashed envs have nothing to keep serving.

@@ -60,7 +60,7 @@ program
   .option("--worktree <path>", "borrow an existing clean worktree")
   .option("--packet <hint>", "optional packet lineage hint")
   .option("--verify", "launch a dev env through readiness, then return it to warm")
-  .option("--name <app>", "app name for a static site (default: directory or file name)")
+  .option("--name <app>", "app name for the env (default: the recipe name, or the directory or file name)")
   .option("--dry-run", "print the detected recipe source, build and serve commands without publishing")
   .action(
     async (

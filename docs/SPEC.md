@@ -45,9 +45,13 @@ Agents of any harness call it directly; the packet carries only strings.
 - **env** — one published test environment: a checkout + artifacts + (maybe) a serving
   process + a record. Identified per-machine by the mode-qualified **name**
   `<app>--<branch-slug>--<mode>` and a short random **eid** (`e7f3`). One env per
-  (app, branch, mode) per machine; republish upserts.
-- **app** — the repo's short name, from the recipe (`name` in `nectar.toml`), else the repo
-  directory name.
+  (app, branch, mode) per machine; republish upserts. The env belongs to the source it was
+  first published from (`repo`: the git toplevel, or the static source path). Publishing
+  another source into an existing name is `E_USAGE` naming that source and suggesting
+  `--name`, and the existing env is untouched. A git worktree of the same repository
+  (same `--git-common-dir`) counts as the same source.
+- **app** — the repo's short name, from `--name`, else the recipe (`name` in `nectar.toml`,
+  `package.json`, `[project].name`), else the repo directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
   lowercased, `[a-z0-9-]` only.
 - **mode** — `web | desktop | cli | backend | ios`. Matches the packet `kind` vocabulary
@@ -404,6 +408,19 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    443 and `nectar doctor` flags any existing 443 serve entry as a portless-breaker.
 6. Write the env record; emit the envelope.
 
+**Republish of a live env (amendment · 2026-10-14, DECISIONS D26).** When the env is
+`serving` or `unhealthy` and Nectar owns its worktree, steps 1 and the build step (§6.1.2)
+run in the env's other worktree slot (`work/<name>` and `work/<name>.alt` alternate) while
+the old serve keeps running and the record is left as it was. Only when checkout, install
+and build succeed does Nectar stop the old serve, write the new record, remove the old slot
+(`git worktree remove`) and continue at step 2 with the old ports. A failure removes the
+staging slot and returns its code (`E_CHECKOUT`, `E_INSTALL`, …) with the log tail; the
+message says the previous publish still serves and `details.still_serving` is its commit.
+Static sites stage through their existing copy-and-swap (§6.1.1) before the old serve
+stops. Republishing a stopped or crashed env, or a borrowed `--worktree`, works in place as
+before. A slot starts without the other slot's `node_modules` or `.nectar/` caches, so a
+live republish reinstalls dependencies.
+
 **URLs.** `urls.mesh` (`https://<host>.tailnet.ts.net:<tport>`) is the primary reference
 for other authorized tailnet devices. `urls.local` is the loopback/portless URL for
 same-machine consumers. **`preview_url` on the packet remains `urls.mesh`** because packets
@@ -461,7 +478,8 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   `static`. Re-publishing the same name is the usual idempotent upsert: same ports, same
   URL, fresh copy. If the name already belongs to a git-checkout env (or a static env when
   publishing a recipe), publish refuses with `E_USAGE` and leaves that env running:
-  `nectar rm <env> --force` first, or pick another `--name`.
+  `nectar rm <env> --force` first, or pick another `--name`. The same holds for a static
+  source at a different path with the same name.
 - **Serve.** The serve command is Nectar's own static server
   (`exec <node> <nectar>/dist/static-server.js`, cwd = the copy, `PORT` from the
   allocator). It is recorded in `serve.cmd` like any recipe's command, so anything that
@@ -471,7 +489,7 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
 - Everything after step 1 of §6.1 is identical: readiness, tailnet port, `preview_url`,
   quota (static envs count toward `serving_web_limit`), gc, `stop`/`rm`, `expose`. The
   envelope adds `source` (the path that was copied). `--worktree` and `--verify` are
-  `E_USAGE`; `--name` on a non-static publish is `E_USAGE`.
+  `E_USAGE`.
 
 #### 6.1.2 Python and Rails apps (amendment · 2026-10-14, DECISIONS D23)
 
@@ -780,7 +798,9 @@ plus (added post-v0 review, 2026-07-19):
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
                [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--dry-run] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
-    # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
+    # serve, keeps ports and URLs stable; a failed web republish leaves the old serve
+    # running (§6.1). --name overrides the app name for any source; a different source
+    # colliding with an existing env is E_USAGE. --worktree borrows an existing checkout instead
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
     # [path] overrides --repo. Static sites (a directory of HTML or one .html file) are
     # detected or forced with --mode static and publish as web envs (§6.1.1). Python and

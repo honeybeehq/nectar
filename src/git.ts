@@ -16,6 +16,23 @@ export async function resolveRepo(input: string): Promise<string> {
   return git(["rev-parse", "--show-toplevel"], path.resolve(input));
 }
 
+export async function sameRepository(a: string, b: string): Promise<boolean> {
+  if (path.resolve(a) === path.resolve(b)) return true;
+  try {
+    const [left, right] = await Promise.all(
+      [a, b].map(async (dir) => git(["rev-parse", "--path-format=absolute", "--git-common-dir"], dir)),
+    );
+    return left === right;
+  } catch {
+    return false;
+  }
+}
+
+export async function removeWorktree(repo: string, worktree: string): Promise<boolean> {
+  const result = await runCommand("git", ["worktree", "remove", "--force", worktree], { cwd: repo });
+  return result.exitCode === 0;
+}
+
 export async function currentBranch(repo: string): Promise<string> {
   const branch = await git(["branch", "--show-current"], repo);
   if (!branch) throw new NectarError("E_CHECKOUT", "Detached HEAD requires --branch <name>");

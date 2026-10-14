@@ -450,23 +450,28 @@ describe("service units", () => {
     const calls = path.join(fakeDir, "calls.log");
     vi.stubEnv("HOME", home);
     vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
-    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `echo "systemctl $*" >> ${calls}; [ "$2" = "is-active" ] && echo active; exit 0`));
+    vi.stubEnv(
+      "NECTAR_SYSTEMCTL_BIN",
+      await fakeExecutable(fakeDir, "systemctl", `echo "systemctl $*" >> ${calls}; [ "$2" = "show" ] && printf 'ActiveState=active\\nMainPID=${process.pid}\\n'; exit 0`),
+    );
     vi.stubEnv("NECTAR_LOGINCTL_BIN", await fakeExecutable(fakeDir, "loginctl", `echo "Linger=no"`));
     const paths = getPaths(path.join(home, ".nectar"));
     const installed = await installUnit(paths, "linux");
     const file = unitPath("linux");
     expect(file).toBe(path.join(home, ".config", "systemd", "user", "nectard.service"));
-    expect(installed).toMatchObject({ installed: true, unit: file, warnings: [expect.stringContaining("loginctl enable-linger")] });
+    expect(installed).toMatchObject({ installed: true, unit: file, pid: process.pid, warnings: [expect.stringContaining("loginctl enable-linger")] });
     expect(await readFile(file, "utf8")).toContain(`Environment="NECTAR_HOME=${paths.root}"`);
-    expect(await unitStatus(paths, "linux")).toMatchObject({ installed: true, active: "active", pid: null });
+    expect(await unitStatus(paths, "linux")).toMatchObject({ installed: true, active: "active", pid: process.pid, pid_source: "systemctl" });
     expect(await uninstallUnit(paths, "linux")).toMatchObject({ removed: true, envs_kept: true });
     await expect(access(file)).rejects.toThrow();
+    const show = "systemctl --user show --property=ActiveState --property=MainPID nectard.service";
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
       "systemctl --user show-environment",
       "systemctl --user daemon-reload",
       "systemctl --user enable nectard.service",
       "systemctl --user restart nectard.service",
-      "systemctl --user is-active nectard.service",
+      show,
+      show,
       "systemctl --user disable --now nectard.service",
       "systemctl --user daemon-reload",
     ]);
@@ -477,9 +482,9 @@ describe("service units", () => {
     const fakeDir = await tempDir("daemon-launchctl");
     const calls = path.join(fakeDir, "calls.log");
     vi.stubEnv("HOME", home);
-    vi.stubEnv("NECTAR_LAUNCHCTL_BIN", await fakeExecutable(fakeDir, "launchctl", `echo "launchctl $*" >> ${calls}; exit 0`));
+    vi.stubEnv("NECTAR_LAUNCHCTL_BIN", await fakeExecutable(fakeDir, "launchctl", `echo "launchctl $*" >> ${calls}; [ "$1" = "print" ] && exit 113; exit 0`));
     const paths = getPaths(path.join(home, ".nectar"));
-    await installUnit(paths, "darwin");
+    await installUnit(paths, "darwin", { waitMs: 0 });
     const file = path.join(home, "Library", "LaunchAgents", "com.honeybeehq.nectard.plist");
     expect(await readFile(file, "utf8")).toContain("<key>KeepAlive</key>");
     await uninstallUnit(paths, "darwin");
@@ -488,8 +493,51 @@ describe("service units", () => {
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
       `launchctl bootstrap gui/${uid} ${file}`,
+      `launchctl print gui/${uid}/com.honeybeehq.nectard`,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
     ]);
+  });
+
+  it("daemon status reads the live pid from launchctl print right after install", async () => {
+    const home = await tempDir("daemon-home");
+    const fakeDir = await tempDir("daemon-launchctl");
+    vi.stubEnv("HOME", home);
+    const printed = [
+      "gui/501/com.honeybeehq.nectard = {",
+      "\tactive count = 1",
+      "\tstate = running",
+      "\tprogram = /opt/homebrew/bin/node",
+      `\tpid = ${process.pid}`,
+      "\tlast exit code = (never exited)",
+      "}",
+    ].join("\\n");
+    vi.stubEnv("NECTAR_LAUNCHCTL_BIN", await fakeExecutable(fakeDir, "launchctl", `[ "$1" = "print" ] && printf '${printed}\\n'; exit 0`));
+    const paths = getPaths(path.join(home, ".nectar"));
+    expect(await installUnit(paths, "darwin")).toMatchObject({ active: "running", pid: process.pid, pid_source: "launchctl" });
+    expect(await unitStatus(paths, "darwin")).toMatchObject({ installed: true, active: "running", pid: process.pid, pid_source: "launchctl" });
+  });
+
+  it("daemon status falls back to nectard.pid and waits briefly for it while the unit is starting", async () => {
+    const home = await tempDir("daemon-home");
+    const fakeDir = await tempDir("daemon-systemctl");
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
+    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `printf 'ActiveState=activating\\nMainPID=0\\n'`));
+    const paths = getPaths(path.join(home, ".nectar"));
+    await mkdir(paths.root, { recursive: true });
+    setTimeout(() => void writeFile(path.join(paths.root, "nectard.pid"), `${process.pid}\n`), 300);
+    expect(await unitStatus(paths, "linux")).toMatchObject({ active: "activating", pid: process.pid, pid_source: "pidfile" });
+  });
+
+  it("daemon status does not wait when the unit is not running", async () => {
+    const home = await tempDir("daemon-home");
+    const fakeDir = await tempDir("daemon-systemctl");
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
+    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `printf 'ActiveState=inactive\\nMainPID=0\\n'`));
+    const started = Date.now();
+    expect(await unitStatus(getPaths(path.join(home, ".nectar")), "linux")).toMatchObject({ active: "inactive", pid: null, pid_source: null });
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it("fails clearly when there is no user systemd session", async () => {

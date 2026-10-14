@@ -823,6 +823,20 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect(rerun.transitions).toEqual([{ env, action: "expire" }]);
   });
 
+  it("doctor names the tailscale binary it used and only warns about a stopped pack server with no packs", async () => {
+    const { service } = await harness();
+    const report = await service.doctor();
+    const checks = report.checks as Array<{ name: string; status: string; message: string; binary_source?: string }>;
+    const tailscale = checks.find((check) => check.name === "tailscale");
+    expect(tailscale).toMatchObject({ status: "pass", binary_source: "env" });
+    expect(tailscale?.message).toContain("(env)");
+    for (const name of ["pack-loopback", "pack-store-8440"]) {
+      const check = checks.find((candidate) => candidate.name === name);
+      expect(check?.status).toBe("warn");
+      expect(check?.message).toContain("web previews do not use it");
+    }
+  });
+
   it("doctor fixes only 8440 and flags a planted 443 conflict", async () => {
     const { service, tailscaleLog } = await harness();
     const fixed = await service.doctor({ fix: true });

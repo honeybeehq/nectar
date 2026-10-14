@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { runCommand } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { branchSlug } from "./refs.js";
+import { tailscaleBinary } from "./tailscale.js";
 import type { EnvRecord, ExposureTarget } from "./types.js";
 
 // The nctr.site relay control path (DECISIONS D21). Publishing machines drive the
@@ -9,17 +10,13 @@ import type { EnvRecord, ExposureTarget } from "./types.js";
 // no relay credentials and run no daemon. Everything here just shells `nectar-relay`
 // on the configured VM.
 
-function tailscaleBin(): string {
-  return process.env.NECTAR_TAILSCALE_BIN ?? "tailscale";
-}
-
 // The control invocation: `tailscale ssh <dest> nectar-relay …` (default, keyless) or
 // `ssh <dest> nectar-relay …` for hosts with a system ssh key already trusted.
 function controlCommand(target: ExposureTarget, dest: string): { bin: string; prefix: string[] } {
   if (target.control === "ssh") {
     return { bin: process.env.NECTAR_SSH_BIN ?? "ssh", prefix: [dest] };
   }
-  return { bin: tailscaleBin(), prefix: ["ssh", dest] };
+  return { bin: tailscaleBinary(), prefix: ["ssh", dest] };
 }
 
 // A DNS label: <app>-<branch>-<eid>, sanitized and length-capped at 63. --public

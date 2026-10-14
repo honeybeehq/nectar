@@ -96,6 +96,31 @@ describe("liveness on read", () => {
     expect(await nectar.show("demo--main--web")).not.toHaveProperty("log_tail");
   });
 
+  it("show returns the record view at the top level: serve, pid, pgid, ports, urls, liveness, expiry", async () => {
+    const nectar = await service();
+    const { port } = await listen();
+    const processIds = await sleeper();
+    const stored = record({ status: "serving", serve: serve(processIds, port) });
+    await nectar.store.writeEnv(stored);
+
+    const shown = await nectar.show("demo--main--web");
+    expect(shown).toMatchObject({
+      name: "demo--main--web",
+      mode: "web",
+      status: "serving",
+      serve: { pid: processIds.pid, upstream_port: port },
+      pid: processIds.pid,
+      pgid: processIds.pgid,
+      ports: { upstream: port, tailnet: null },
+      urls: stored.urls,
+      liveness: { state: "serving", reason: "port_open" },
+      failure: null,
+      env: { name: "demo--main--web", serve: { pid: processIds.pid } },
+    });
+    expect(shown.expires_at).toBe((await nectar.store.readEnv("demo--main--web")).expires_at);
+    expect(shown.expires_in).toEqual(expect.stringMatching(/\d/));
+  });
+
   it("marks a serving env crashed when its process is gone and recovers it when the port returns", async () => {
     const nectar = await service();
     const port = await closedPort();

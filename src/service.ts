@@ -27,6 +27,7 @@ import { StateStore } from "./state.js";
 import { logTail, prepareLog } from "./logs.js";
 import {
   remoteNectar,
+  resolveTailscale,
   servePackStore,
   serveProxyEntries,
   serveStatus,
@@ -36,6 +37,7 @@ import {
   statusHasProxyTarget,
   statusPorts,
   stopServe,
+  TAILSCALE_FALLBACKS,
   tailnetIdentity,
   type ServeProxyEntry,
 } from "./tailscale.js";
@@ -1496,6 +1498,19 @@ export class NectarService {
     await this.touchOnView(record);
     return {
       env: record,
+      name: record.name,
+      mode: record.mode,
+      status: record.status,
+      ref: record.ref,
+      urls: record.urls,
+      serve: record.serve ?? null,
+      pid: record.serve?.pid ?? null,
+      pgid: record.serve?.pgid ?? null,
+      ports: { upstream: record.serve?.upstream_port ?? null, tailnet: record.serve?.tailnet_port ?? null },
+      liveness: record.liveness ?? null,
+      expires_at: record.expires_at,
+      expires_in: formatRemaining(record.expires_at),
+      failure: record.failure ?? null,
       ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
     };
   }
@@ -2219,7 +2234,14 @@ export class NectarService {
     let config = await this.store.readConfig();
     const identity = await tailnetIdentity();
     const status = await serveStatus();
-    const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; message: string; fixed?: boolean }> = [];
+    const checks: Array<{
+      name: string;
+      status: "pass" | "warn" | "fail";
+      message: string;
+      fixed?: boolean;
+      binary?: string | null;
+      binary_source?: string;
+    }> = [];
     const portlessBin = process.env.NECTAR_PORTLESS_BIN ?? "portless";
     let portlessPresent = false;
     let portlessProxy = false;
@@ -2250,10 +2272,18 @@ export class NectarService {
           ? "Portless and its proxy are up (name adoption remains deferred in v0)"
           : "Portless is installed but its proxy status could not be confirmed; local URLs degrade to loopback",
     });
+    const tailscale = resolveTailscale();
     checks.push({
       name: "tailscale",
       status: identity === undefined ? "fail" : "pass",
-      message: identity === undefined ? "Tailscale is down or logged out; publishes will be local-only" : `Tailscale is up as ${identity.dnsName}`,
+      message:
+        tailscale.source === "none"
+          ? `No tailscale CLI found in NECTAR_TAILSCALE_BIN, PATH, ${TAILSCALE_FALLBACKS.join(", ")}; publishes will be local-only`
+          : identity === undefined
+            ? `Tailscale CLI ${tailscale.path} (${tailscale.source}) reports Tailscale down or logged out; publishes will be local-only`
+            : `Tailscale is up as ${identity.dnsName} via ${tailscale.path} (${tailscale.source})`,
+      binary: tailscale.source === "none" ? null : tailscale.path,
+      binary_source: tailscale.source,
     });
     checks.push({
       name: "serve-443",
@@ -2308,21 +2338,32 @@ export class NectarService {
         packServerLive = await this.packServerAlive(config);
       }
     }
+    const packs = await packCandidates(this.paths.packs, new Set());
+    const packBytes = packs.reduce((sum, file) => sum + file.size, 0);
+    const packDownStatus = packs.length === 0 ? "warn" : "fail";
+    const packScope = "it serves desktop/ios testpacks only; web previews do not use it";
+    const packRemedy = fixMessage
+      ? `: ${fixMessage}`
+      : options.fix && identity === undefined
+        ? "; --fix skipped because Tailscale is not up"
+        : packs.length === 0
+          ? `; no packs stored yet, so nothing needs it (${packScope}). Run nectar doctor --fix to start it`
+          : `; ${packs.length} stored pack(s) are unreachable (${packScope}). Run nectar doctor --fix`;
     checks.push({
       name: "pack-loopback",
-      status: packServerLive ? "pass" : "fail",
+      status: packServerLive ? "pass" : packDownStatus,
       message: packServerLive
         ? `Read-only pack server PID ${config.pack_server_pid} is live on 127.0.0.1:${config.pack_server_port}`
-        : `Read-only pack server PID+port chain is down${fixMessage ? `: ${fixMessage}` : "; run nectar doctor --fix"}`,
+        : `Read-only pack server is not running${packRemedy}`,
       ...(packServerFixed ? { fixed: true } : {}),
     });
     checks.push({
       name: "pack-store-8440",
-      status: packServerLive && proxyPresent ? "pass" : "fail",
+      status: packServerLive && proxyPresent ? "pass" : packDownStatus,
       message:
         packServerLive && proxyPresent
           ? `Tailnet HTTPS :8440 proxies to the read-only loopback server on ${config.pack_server_port}`
-          : `Pack-store proxy chain is incomplete${fixMessage ? `: ${fixMessage}` : "; run nectar doctor --fix"}`,
+          : `${packServerLive ? "Tailnet HTTPS :8440 does not proxy to the pack server" : "Tailnet HTTPS :8440 has no live pack server behind it"}${packRemedy}`,
       ...(proxyFixed ? { fixed: true } : {}),
     });
     const upstreamFree = await this.hasFreePort(config.upstream_port_start, config.upstream_port_end);
@@ -2337,8 +2378,6 @@ export class NectarService {
             ? "Upstream and tailnet port ranges have capacity"
             : "A configured port range is exhausted",
     });
-    const packs = await packCandidates(this.paths.packs, new Set());
-    const packBytes = packs.reduce((sum, file) => sum + file.size, 0);
     checks.push({
       name: "pack-quota",
       status: packBytes <= config.pack_quota_bytes ? "pass" : "warn",

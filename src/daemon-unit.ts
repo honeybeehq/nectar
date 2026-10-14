@@ -1,16 +1,15 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { constants } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { runCommand } from "./commands.js";
+import { pidAlive, runCommand } from "./commands.js";
 import { daemonLogFile, runningDaemonPid } from "./daemon.js";
 import { NectarError } from "./errors.js";
 import type { NectarPaths } from "./paths.js";
+import { resolveTailscale, type TailscaleLookup } from "./tailscale.js";
 
 export const LAUNCHD_LABEL = "com.honeybeehq.nectard";
 export const SYSTEMD_UNIT = "nectard.service";
-const MAC_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 
 type UnitPlatform = "darwin" | "linux";
 
@@ -31,36 +30,15 @@ export function unitPath(platform: NodeJS.Platform = process.platform): string {
   return path.join(config, "systemd", "user", SYSTEMD_UNIT);
 }
 
-async function onPath(name: string): Promise<boolean> {
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
-    try {
-      await access(path.join(directory, name), constants.X_OK);
-      return true;
-    } catch {
-      continue;
-    }
-  }
-  return false;
-}
-
-async function tailscaleBinary(platform: UnitPlatform): Promise<string | undefined> {
-  if (process.env.NECTAR_TAILSCALE_BIN !== undefined) return process.env.NECTAR_TAILSCALE_BIN;
-  if (await onPath("tailscale")) return undefined;
-  if (platform !== "darwin") return undefined;
-  return access(MAC_TAILSCALE, constants.X_OK).then(
-    () => MAC_TAILSCALE,
-    () => undefined,
-  );
-}
-
-export async function unitSpec(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<UnitSpec> {
+export function unitSpec(paths: NectarPaths, platform: NodeJS.Platform = process.platform, lookup: TailscaleLookup = {}): UnitSpec {
+  unitPlatform(platform);
   const env: Record<string, string> = { NECTAR_HOME: paths.root };
   for (const key of ["PATH", "HOME", "SHELL", "LANG", "NECTAR_TRASH_BIN"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  const tailscale = await tailscaleBinary(unitPlatform(platform));
-  if (tailscale !== undefined) env.NECTAR_TAILSCALE_BIN = tailscale;
+  const tailscale = resolveTailscale(lookup);
+  if (tailscale.source !== "path" && tailscale.source !== "none") env.NECTAR_TAILSCALE_BIN = tailscale.path;
   return {
     program: [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "daemon", "run"],
     env,
@@ -163,10 +141,14 @@ async function exists(file: string): Promise<boolean> {
   );
 }
 
-export async function installUnit(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<Record<string, unknown>> {
+export async function installUnit(
+  paths: NectarPaths,
+  platform: NodeJS.Platform = process.platform,
+  options: { waitMs?: number } = {},
+): Promise<Record<string, unknown>> {
   const kind = unitPlatform(platform);
   const file = unitPath(kind);
-  const spec = await unitSpec(paths, kind);
+  const spec = unitSpec(paths, kind);
   const warnings: string[] = [];
   await mkdir(paths.logs, { recursive: true });
   await mkdir(path.dirname(file), { recursive: true });
@@ -194,7 +176,19 @@ export async function installUnit(paths: NectarPaths, platform: NodeJS.Platform 
       warnings.push(`Linger is off: nectard starts only while you are logged in. Run: loginctl enable-linger ${os.userInfo().username}`);
     }
   }
-  return { installed: true, platform: kind, unit: file, nectar_home: paths.root, program: spec.program, log: daemonLogFile(paths), warnings };
+  const state = await daemonState(kind, paths, { ms: options.waitMs ?? 5_000, anyState: true });
+  return {
+    installed: true,
+    platform: kind,
+    unit: file,
+    active: state.active,
+    pid: state.pid,
+    pid_source: state.pid_source,
+    nectar_home: paths.root,
+    program: spec.program,
+    log: daemonLogFile(paths),
+    warnings,
+  };
 }
 
 export async function uninstallUnit(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<Record<string, unknown>> {
@@ -213,24 +207,68 @@ export async function uninstallUnit(paths: NectarPaths, platform: NodeJS.Platfor
   return { removed: present, platform: kind, unit: file, envs_kept: true, nectar_home: paths.root };
 }
 
-export async function unitStatus(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<Record<string, unknown>> {
+interface ManagerState {
+  active: string;
+  pid: number | undefined;
+}
+
+const RUNNING_STATES = new Set(["running", "active", "activating", "reloading", "spawn scheduled"]);
+
+function livePid(value: string | undefined): number | undefined {
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid > 1 && pidAlive(pid) ? pid : undefined;
+}
+
+async function managerState(kind: UnitPlatform): Promise<ManagerState> {
+  if (kind === "darwin") {
+    const printed = await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
+    if (printed.exitCode !== 0) return { active: "not-loaded", pid: undefined };
+    return {
+      active: /^\s*state = (.+)$/m.exec(printed.stdout)?.[1]?.trim() ?? "loaded",
+      pid: livePid(/^\s*pid = (\d+)/m.exec(printed.stdout)?.[1]),
+    };
+  }
+  const shown = await safely(systemctl(), ["--user", "show", "--property=ActiveState", "--property=MainPID", SYSTEMD_UNIT]);
+  if (shown.exitCode !== 0) return { active: "unknown", pid: undefined };
+  return {
+    active: /^ActiveState=(.*)$/m.exec(shown.stdout)?.[1]?.trim() || "unknown",
+    pid: livePid(/^MainPID=(\d+)$/m.exec(shown.stdout)?.[1]),
+  };
+}
+
+async function daemonState(
+  kind: UnitPlatform,
+  paths: NectarPaths,
+  wait: { ms: number; anyState: boolean },
+): Promise<{ active: string; pid: number | null; pid_source: string | null }> {
+  const deadline = Date.now() + wait.ms;
+  for (;;) {
+    const state = await managerState(kind);
+    if (state.pid !== undefined) return { active: state.active, pid: state.pid, pid_source: kind === "darwin" ? "launchctl" : "systemctl" };
+    const fromFile = await runningDaemonPid(paths);
+    if (fromFile !== undefined) return { active: state.active, pid: fromFile, pid_source: "pidfile" };
+    if ((!wait.anyState && !RUNNING_STATES.has(state.active)) || Date.now() >= deadline) return { active: state.active, pid: null, pid_source: null };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+export async function unitStatus(
+  paths: NectarPaths,
+  platform: NodeJS.Platform = process.platform,
+  options: { waitMs?: number } = {},
+): Promise<Record<string, unknown>> {
   const kind = unitPlatform(platform);
   const file = unitPath(kind);
   const installed = await exists(file);
-  let active: string;
-  if (kind === "darwin") {
-    const printed = await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
-    active = printed.exitCode !== 0 ? "not-loaded" : (/state = (\S+)/.exec(printed.stdout)?.[1] ?? "loaded");
-  } else {
-    active = (await safely(systemctl(), ["--user", "is-active", SYSTEMD_UNIT])).stdout.trim() || "unknown";
-  }
+  const state = await daemonState(kind, paths, { ms: options.waitMs ?? 3_000, anyState: false });
   const config = JSON.parse(await readFile(paths.config, "utf8").catch(() => "{}")) as { last_gc_at?: string };
   return {
     installed,
     platform: kind,
     unit: file,
-    active,
-    pid: (await runningDaemonPid(paths)) ?? null,
+    active: state.active,
+    pid: state.pid,
+    pid_source: state.pid_source,
     nectar_home: paths.root,
     last_gc_at: config.last_gc_at ?? null,
     log: daemonLogFile(paths),

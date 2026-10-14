@@ -1,4 +1,6 @@
+import { accessSync, constants } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { runCommand } from "./commands.js";
 
 export interface TailnetIdentity {
@@ -13,13 +15,62 @@ export interface ServeProxyEntry {
   upstreamPort: number;
 }
 
-function binary(): string {
-  return process.env.NECTAR_TAILSCALE_BIN ?? "tailscale";
+export const MAC_APP_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const FALLBACK_TAILSCALE: Array<{ path: string; source: TailscaleSource }> = [
+  { path: MAC_APP_TAILSCALE, source: "app-bundle" },
+  { path: "/opt/homebrew/bin/tailscale", source: "homebrew" },
+  { path: "/usr/local/bin/tailscale", source: "standalone" },
+];
+
+export type TailscaleSource = "env" | "path" | "app-bundle" | "homebrew" | "standalone" | "none";
+
+export const TAILSCALE_FALLBACKS = FALLBACK_TAILSCALE.map((fallback) => fallback.path);
+
+export interface TailscaleBinary {
+  path: string;
+  source: TailscaleSource;
+  searched: string[];
+}
+
+export interface TailscaleLookup {
+  env?: NodeJS.ProcessEnv;
+  executable?: (file: string) => boolean;
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveTailscale(lookup: TailscaleLookup = {}): TailscaleBinary {
+  const env = lookup.env ?? process.env;
+  const executable = lookup.executable ?? isExecutable;
+  const pinned = env.NECTAR_TAILSCALE_BIN;
+  if (pinned !== undefined && pinned !== "") return { path: pinned, source: "env", searched: [] };
+  const searched: string[] = [];
+  for (const directory of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(directory, "tailscale");
+    searched.push(candidate);
+    if (executable(candidate)) return { path: candidate, source: "path", searched };
+  }
+  for (const fallback of FALLBACK_TAILSCALE) {
+    searched.push(fallback.path);
+    if (executable(fallback.path)) return { path: fallback.path, source: fallback.source, searched };
+  }
+  return { path: "tailscale", source: "none", searched };
+}
+
+export function tailscaleBinary(): string {
+  return resolveTailscale().path;
 }
 
 export async function tailnetIdentity(): Promise<TailnetIdentity | undefined> {
   try {
-    const result = await runCommand(binary(), ["status", "--json"], { timeoutMs: 5_000 });
+    const result = await runCommand(tailscaleBinary(), ["status", "--json"], { timeoutMs: 5_000 });
     if (result.exitCode !== 0) return undefined;
     const status = JSON.parse(result.stdout) as { BackendState?: string; Self?: { DNSName?: string } };
     const dnsName = status.Self?.DNSName?.replace(/\.$/, "");
@@ -32,7 +83,7 @@ export async function tailnetIdentity(): Promise<TailnetIdentity | undefined> {
 
 export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<boolean> {
   const result = await runCommand(
-    binary(),
+    tailscaleBinary(),
     ["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl],
     { timeoutMs: 10_000 },
   );
@@ -40,13 +91,13 @@ export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promis
 }
 
 export async function servePackStore(target: string): Promise<{ ok: boolean; message: string }> {
-  const result = await runCommand(binary(), ["serve", "--bg", "--yes", "--https=8440", target], { timeoutMs: 10_000 });
+  const result = await runCommand(tailscaleBinary(), ["serve", "--bg", "--yes", "--https=8440", target], { timeoutMs: 10_000 });
   return { ok: result.exitCode === 0, message: result.stderr.trim() || result.stdout.trim() };
 }
 
 export async function stopServe(tailnetPort: number): Promise<boolean> {
   try {
-    const result = await runCommand(binary(), ["serve", `--https=${tailnetPort}`, "off"], { timeoutMs: 10_000 });
+    const result = await runCommand(tailscaleBinary(), ["serve", `--https=${tailnetPort}`, "off"], { timeoutMs: 10_000 });
     return result.exitCode === 0;
   } catch {
     return false;
@@ -55,7 +106,7 @@ export async function stopServe(tailnetPort: number): Promise<boolean> {
 
 export async function serveStatus(): Promise<unknown> {
   try {
-    const result = await runCommand(binary(), ["serve", "status", "--json"], { timeoutMs: 5_000 });
+    const result = await runCommand(tailscaleBinary(), ["serve", "status", "--json"], { timeoutMs: 5_000 });
     if (result.exitCode !== 0) return undefined;
     return JSON.parse(result.stdout) as unknown;
   } catch {
@@ -159,5 +210,5 @@ export function statusHasFunnel(status: unknown): boolean {
 }
 
 export async function remoteNectar(host: string, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return runCommand(binary(), ["ssh", host, "nectar", ...args], { timeoutMs: 15_000 });
+  return runCommand(tailscaleBinary(), ["ssh", host, "nectar", ...args], { timeoutMs: 15_000 });
 }

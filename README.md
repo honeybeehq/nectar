@@ -71,6 +71,17 @@ A directory of plain HTML (or one `.html` file) needs no recipe. Nectar copies i
 nectar publish ./proto --json
 ```
 
+Python (Django, FastAPI/Starlette, Flask) and Rails apps also need no recipe. Nectar
+installs their dependencies into a venv or bundle inside the env's work dir and serves them
+on the allocated port. To see what it would run:
+
+```bash
+nectar publish --dry-run     # recipe source, stack, reason, build and serve commands
+```
+
+Order: `nectar.toml` > `package.json` dev script > Python > Rails > static HTML
+(SPEC §5, §6.1.2).
+
 ## The CLI
 
 `publish` · `ls` · `show` · `open` · `resolve` · `touch` · `stop` · `rm` · `gc` ·

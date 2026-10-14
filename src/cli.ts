@@ -58,10 +58,11 @@ program
   .option("--packet <hint>", "optional packet lineage hint")
   .option("--verify", "launch a dev env through readiness, then return it to warm")
   .option("--name <app>", "app name for a static site (default: directory or file name)")
+  .option("--dry-run", "print the detected recipe source, build and serve commands without publishing")
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
@@ -74,6 +75,7 @@ program
           ...(options.packet === undefined ? {} : { packet: options.packet }),
           ...(options.verify === undefined ? {} : { verify: options.verify }),
           ...(options.name === undefined ? {} : { name: options.name }),
+          ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
         });
       }),
   );

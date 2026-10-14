@@ -61,7 +61,7 @@ export async function prepareWorktree(options: {
     await git(["worktree", "add", "--detach", options.destination, options.commit], options.repo);
   } else {
     await git(["reset", "--hard", options.commit], options.destination);
-    const preserve = options.preserve ?? ["node_modules/"];
+    const preserve = [...(options.preserve ?? ["node_modules/"]), ".nectar/"];
     const cleanArgs = ["clean", "-fdx"];
     for (const entry of preserve) {
       const normalized = entry.replaceAll("\\", "/").replace(/^\.\/+/, "");

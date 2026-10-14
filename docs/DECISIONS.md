@@ -381,3 +381,26 @@ design for tiny piped artifacts (stdin HTML, reports) where a path-prefixed, pac
 is enough. (b) leaks a new mode into the desk contract for what is still a web preview.
 (c) adds a network fetch or an interpreter dependency at serve time. The bundled server is
 about 150 lines of `node:http` with no new dependencies.
+
+## D23 — Python and Rails apps publish through file-based fallbacks with a build step
+
+**Chose:** without `nectar.toml` or a `dev` script, `nectar publish` recognises Django,
+FastAPI/Starlette, Flask and Rails apps from their files, in a fixed order after
+`package.json` and before static HTML. Each fallback produces an ordinary `[web]` recipe
+plus an internal `build` step: dependencies go into `<worktree>/.nectar/venv` (uv when on
+PATH, else `python3 -m venv` + pip) or `<worktree>/.nectar/bundle`. `--dry-run` prints the
+match, the reason, and both commands. A missing runtime is `E_PLATFORM` before any env
+exists. (SPEC §5, §6.1.2.)
+**Alternatives:** (a) require a `nectar.toml` for every non-Node stack; (b) add `build`/
+`install` keys to `nectar.toml`; (c) fold install into the serve command; (d) a new
+`E_RUNTIME` error code; (e) buildpacks/nixpacks-style detection.
+**Why:** prototypes come in every stack and agents should not have to write a recipe for
+the common shapes. Detection that reads a fixed list of files is predictable and the dry
+run makes it explainable; anything unusual still has `nectar.toml`, which always wins.
+(b) would grow the recipe schema while D8 keeps `nectar.toml` naming the repo's own
+commands; the build step stays internal to fallbacks. (c) would rerun installs on every
+supervisor restart and hide install failures behind `E_SERVE_TIMEOUT`. (d) adds a contract
+code for what `E_PLATFORM` already means: this host cannot run it, route elsewhere.
+(e) pulls in a large dependency or a container runtime for a handful of patterns. Serve
+commands `exec` the server and carry relative paths so the recorded `serve.cmd` restarts
+the same process from the worktree, as nectard expects.

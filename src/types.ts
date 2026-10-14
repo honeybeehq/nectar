@@ -20,6 +20,8 @@ export interface Liveness {
 
 export interface WebRecipe {
   serve: string;
+  build?: string;
+  requires?: string[];
   readyPath: string;
   readyTimeoutMs: number;
   env: Record<string, string>;
@@ -49,7 +51,8 @@ export interface IosRecipe {
 
 export interface Recipe {
   name: string;
-  source: "nectar.toml" | "package.json" | "static";
+  source: "nectar.toml" | "package.json" | "requirements.txt" | "pyproject.toml" | "Gemfile" | "static";
+  detected?: { stack: string; reason: string };
   web?: WebRecipe;
   desktop?: DesktopRecipe;
   ios?: IosRecipe;

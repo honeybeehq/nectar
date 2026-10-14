@@ -20,6 +20,7 @@ import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import { appSlug, envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, selectMode } from "./recipe.js";
+import { assertRuntimes, missingCommands } from "./fallbacks.js";
 import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
 import { logTail, prepareLog } from "./logs.js";
@@ -90,6 +91,7 @@ interface PublishOptions {
   packet?: string;
   verify?: boolean;
   name?: string;
+  dryRun?: boolean;
 }
 
 interface MachineIdentity {
@@ -150,12 +152,14 @@ export class NectarService {
     // error, not a checkout problem.
     const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
     const site = await this.staticCandidate(options);
-    if (site !== undefined) return this.publishStatic(site, options, ttlMs);
+    if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
     if (options.name !== undefined) throw new NectarError("E_USAGE", "--name applies only to static sites; set name in nectar.toml");
     const repo = await resolveRepo(options.repo ?? process.cwd());
     const branch = options.branch ?? (await currentBranch(repo));
     const recipe = await loadRecipe(repo);
     const mode = selectMode(recipe, options.mode);
+    if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, branch);
+    if (mode === "web") assertRuntimes(recipe);
     if (options.verify === true && mode !== "dev") {
       throw new NectarError("E_USAGE", "--verify is supported only with --mode dev");
     }
@@ -206,18 +210,60 @@ export class NectarService {
     }
   }
 
+  private recipePlan(recipe: Recipe, mode: Mode, repo: string, branch: string): Record<string, unknown> {
+    const web = mode === "web" ? recipe.web : undefined;
+    return {
+      dry_run: true,
+      repo,
+      name: envName(recipe.name, branch, mode),
+      mode,
+      source: recipe.source,
+      stack: recipe.detected?.stack ?? recipe.source,
+      reason: recipe.detected?.reason ?? "explicit nectar.toml recipe",
+      ...(web === undefined
+        ? { recipe: recipe[mode] ?? null }
+        : {
+            build: web.build ?? null,
+            serve: web.serve,
+            ready_path: web.readyPath,
+            requires: web.requires ?? [],
+            missing: missingCommands(recipe),
+          }),
+    };
+  }
+
+  private async staticPlan(site: StaticSite, options: PublishOptions): Promise<Record<string, unknown>> {
+    const name = appSlug(options.name ?? site.name);
+    return {
+      dry_run: true,
+      repo: site.source,
+      name: envName(name, await this.staticBranch(site, options), "web"),
+      mode: "web",
+      source: "static",
+      stack: "static",
+      reason: site.file === undefined ? `index.html in ${site.root}` : `single file ${site.file}`,
+      build: null,
+      serve: "Nectar's bundled static server (copy of the files under work/<name>)",
+      ready_path: "/",
+      requires: [],
+      missing: [],
+    };
+  }
+
+  private async staticBranch(site: StaticSite, options: PublishOptions): Promise<string> {
+    if (options.branch !== undefined) return options.branch;
+    try {
+      return await currentBranch(await resolveRepo(path.dirname(site.file ?? path.join(site.source, "index.html"))));
+    } catch {
+      return "static";
+    }
+  }
+
   private async publishStatic(site: StaticSite, options: PublishOptions, ttlMs: number): Promise<Record<string, unknown>> {
     if (options.worktree !== undefined || options.verify === true) {
       throw new NectarError("E_USAGE", "--worktree and --verify do not apply to static sites");
     }
-    let branch = options.branch;
-    if (branch === undefined) {
-      try {
-        branch = await currentBranch(await resolveRepo(path.dirname(site.file ?? path.join(site.source, "index.html"))));
-      } catch {
-        branch = "static";
-      }
-    }
+    const branch = await this.staticBranch(site, options);
     const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
     const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
     const recipe: Recipe = {
@@ -485,6 +531,7 @@ export class NectarService {
       try {
         const web = site === undefined ? (await loadRecipe(record.worktree)).web : options.recipe.web;
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
+        if (web.build !== undefined) await this.runBuild(record, web.build);
         const published = await this.startWeb(record, web, initial.identity, initial.old);
         return { ...published, warnings: [...published.warnings, ...stageWarnings] };
       } catch (error) {
@@ -492,6 +539,20 @@ export class NectarService {
         throw error;
       }
     });
+  }
+
+  private async runBuild(record: EnvRecord, build: string): Promise<void> {
+    const result = await runShell(
+      build,
+      record.worktree,
+      scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree }),
+      15 * 60_000,
+    );
+    if (result.exitCode !== 0) {
+      throw new NectarError("E_INSTALL", `Build step failed: ${build}`, {
+        log_tail: [...result.stdout.split("\n"), ...result.stderr.split("\n")].filter(Boolean).slice(-40),
+      });
+    }
   }
 
   // Env locks are per-env, so two bees publishing different envs race the port

@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 import { parseDuration } from "./duration.js";
 import { NectarError } from "./errors.js";
+import { detectPython, detectRails, type FallbackHost } from "./fallbacks.js";
 import { appSlug } from "./refs.js";
 import type { DesktopRecipe, DevRecipe, IosRecipe, Mode, Recipe, WebRecipe } from "./types.js";
 
@@ -136,7 +137,7 @@ function parseIos(value: unknown): IosRecipe | undefined {
   };
 }
 
-export async function loadRecipe(repo: string): Promise<Recipe> {
+export async function loadRecipe(repo: string, host?: FallbackHost): Promise<Recipe> {
   const toml = await maybeRead(path.join(repo, "nectar.toml"));
   const fallbackName = appSlug(path.basename(repo));
   if (toml !== undefined) {
@@ -184,11 +185,19 @@ export async function loadRecipe(repo: string): Promise<Recipe> {
       return {
         name: appSlug(packageName),
         source: "package.json",
+        detected: { stack: "node", reason: `package.json has a dev script; ${pm} chosen from packageManager/lockfile` },
         web: { serve: pm === "npm" ? "npm run dev" : `${pm} dev`, readyPath: "/", readyTimeoutMs: 90_000, env: {} },
       };
     }
   }
-  throw new NectarError("E_NO_RECIPE", "No nectar.toml and no package.json dev-script fallback found");
+  const python = await detectPython(repo, fallbackName, host);
+  if (python !== undefined) return python;
+  const rails = await detectRails(repo, fallbackName);
+  if (rails !== undefined) return rails;
+  throw new NectarError(
+    "E_NO_RECIPE",
+    "No nectar.toml, no package.json dev script, no Python app (Django manage.py, FastAPI/Starlette or Flask entrypoint) and no Rails Gemfile found",
+  );
 }
 
 function detectPackageManager(repo: string, packageManager: unknown): "pnpm" | "yarn" | "npm" {

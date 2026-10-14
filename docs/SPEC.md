@@ -260,12 +260,19 @@ stream = true                   # false = simpack-only publish (no serve-sim str
 STRIPE_KEY = "project/acme/stripe-test"
 ```
 
-Sections are independent; a repo declares only the modes it supports. **Fallback without a
-recipe**: a `dev` script in `package.json` ⇒ `[web] serve = "<pm> dev"`; everything else
-requires the recipe (publishing desktop/cli/backend without one is an error `E_NO_RECIPE`).
-**Static fallback** (§6.1.1): when neither applies and the target has an `index.html` at its
-root or in `dist/`, `build/`, `out/`, `public/` or `_site/`, or is itself an `.html` file,
-it publishes as a static site.
+Sections are independent; a repo declares only the modes it supports. **Fallbacks without a
+recipe** (web only; desktop/cli/backend/ios without a recipe are `E_NO_RECIPE`). The first
+match wins, and `nectar publish --dry-run` prints which one matched, why, and its build and
+serve commands without changing state:
+
+1. `nectar.toml` — always wins; nothing below is consulted.
+2. `package.json` with a `dev` script ⇒ `serve = "<pm> dev"`.
+3. Python (§6.1.2): `requirements.txt` or `pyproject.toml` plus a known entrypoint —
+   Django `manage.py`, then a FastAPI/Starlette app, then a Flask app.
+4. Rails (§6.1.2): a `Gemfile` that declares `gem "rails"`.
+5. **Static** (§6.1.1): the target has an `index.html` at its root or in `dist/`, `build/`,
+   `out/`, `public/` or `_site/`, or is itself an `.html` file. A Python repo with no
+   recognised entrypoint lands here, so there is no `python -m http.server` fallback.
 `nectar publish` picks the mode: `--mode` flag > single declared section > `web` if
 inferable > error.
 
@@ -344,7 +351,7 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
 
 - **Detection.** `--mode static` forces it. Without `--mode`, a path to an `.html` file is
   static; a directory is static only when the recipe path does not apply (not a git repo,
-  or a repo with no `nectar.toml` and no `dev` script). Existing recipe behaviour is
+  or a repo with no `nectar.toml`, no `dev` script and no Python/Rails match, §6.1.2). Existing recipe behaviour is
   unchanged. The site root is the first of `.`, `dist`, `build`, `out`, `public`, `_site`
   holding an `index.html`.
 - **Copy, not checkout.** Nectar copies the site root's regular files into
@@ -371,6 +378,43 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   quota (static envs count toward `serving_web_limit`), gc, `stop`/`rm`, `expose`. The
   envelope adds `source` (the path that was copied). `--worktree` and `--verify` are
   `E_USAGE`; `--name` on a non-static publish is `E_USAGE`.
+
+#### 6.1.2 Python and Rails apps (amendment · 2026-10-14, DECISIONS D23)
+
+A repo with no `nectar.toml` and no `dev` script still publishes as a web env when it is a
+recognisable Python or Rails app. Detection reads files only and is deterministic for a
+given repo and host (the host decides only uv vs pip):
+
+| Stack | Matches | Build (cwd = env worktree) | Serve |
+|---|---|---|---|
+| Django | `manage.py` at the root | install deps (below) | `exec .nectar/venv/bin/python manage.py runserver --noreload 127.0.0.1:"$PORT"` |
+| FastAPI / Starlette | first of `app.py`, `main.py`, `server.py`, `api.py`, `asgi.py`, `wsgi.py`, `app/main.py`, `app/app.py`, `app/__init__.py` that assigns `<var> = FastAPI(` / `Starlette(` | install deps, plus `uvicorn` when the deps don't name it | `exec .nectar/venv/bin/python -m uvicorn <module>:<var> --host 127.0.0.1 --port "$PORT"` |
+| Flask | first of those files that calls `Flask(` | install deps | `exec .nectar/venv/bin/python -m flask --app <module>[:<var>] run --host 127.0.0.1 --port "$PORT"` |
+| Rails | `Gemfile` declares `gem "rails"` | `mkdir -p .nectar && BUNDLE_PATH=.nectar/bundle bundle install` | `rm -f .nectar/server.pid && BUNDLE_PATH=.nectar/bundle exec bin/rails server -b 127.0.0.1 -p "$PORT" --pid .nectar/server.pid` (`bundle exec rails` without `bin/rails`) |
+
+- **Python deps** go into a venv at `<worktree>/.nectar/venv`, never a global or user
+  site. With `uv` on PATH: `uv sync --frozen --no-dev` into that venv when `pyproject.toml`
+  and `uv.lock` exist, else `uv venv` + `uv pip install -r requirements.txt` (or
+  `-r pyproject.toml`). Without `uv`: `python3 -m venv` + `pip install -r requirements.txt`,
+  or the `[project].dependencies` list of `pyproject.toml`. `requirements.txt` wins over
+  `pyproject.toml` unless uv and `uv.lock` are both present.
+- **Build** is a new internal `WebRecipe.build` step, run after checkout and before the
+  serve spawn on every publish; failure is `E_INSTALL` with a log tail. `nectar.toml` has
+  no build key; it stays the recipe's job to name its own commands. `.nectar/` is kept
+  across republishes (excluded from `git clean`), so reinstalls are incremental.
+- **Serve** commands `exec` the server so `serve.pid` is the server itself, bind
+  `127.0.0.1`, and carry everything they need in the command string (relative venv and
+  `BUNDLE_PATH`), so a supervisor restarting `cd <worktree> && PORT=<p> $SHELL -c
+  "<serve.cmd>"` gets the same process. Liveness, quota, gc, `stop`/`rm` and `expose` are
+  unchanged.
+- **Missing runtime.** Each fallback names the binaries it needs (`uv` or `python3`;
+  `ruby` and `bundle`). If one is missing, publish fails fast with `E_PLATFORM` before any
+  env is created; the message and `details.hint` say to install it, publish from a node
+  that has it, or declare `[web] serve` in `nectar.toml`. `--dry-run` lists `missing`.
+- Not handled: Django migrations (run them in the app or via `nectar.toml`), Poetry/PDM
+  lockfiles (deps come from `[project].dependencies`), Rails `db:prepare`, and Rails/Django
+  host checks for mesh hostnames (Django fixtures set `ALLOWED_HOSTS`; Rails development
+  may need `config.hosts` for the tailnet name).
 
 ### 6.2 desktop — the testpack
 
@@ -631,7 +675,8 @@ plus (added post-v0 review, 2026-07-19):
   is in flight.)
 - `E_VERIFY` — testpack/simpack verification failed (sha mismatch, invalid or
   escaping manifest entry, metadata mismatch). Never launched; `E_PLATFORM` now
-  means platform mismatch only.
+  means platform mismatch only, including a host that lacks the runtime a fallback
+  recipe needs (§6.1.2).
 - `E_INTERNAL` — an unexpected internal failure (bug, fs error); `details.unexpected`
   is set when it was not a typed nectar error. Report it, don't remediate.
 
@@ -639,12 +684,14 @@ plus (added post-v0 review, 2026-07-19):
 
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
-               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
+               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--dry-run] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
     # [path] overrides --repo. Static sites (a directory of HTML or one .html file) are
-    # detected or forced with --mode static and publish as web envs (§6.1.1).
+    # detected or forced with --mode static and publish as web envs (§6.1.1). Python and
+    # Rails apps without a recipe publish through the §5 fallbacks (§6.1.2). --dry-run
+    # prints the matched recipe source, stack, reason, build and serve; it changes nothing.
 
 nectar ls [--json] [--mode <m>] [--status <s>]
     # This machine's envs: name, mode, status, urls.mesh, expires_at (ISO), expires_in,

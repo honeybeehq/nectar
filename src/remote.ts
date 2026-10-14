@@ -879,10 +879,10 @@ async function loggedEvents(paths: NectarPaths): Promise<Record<string, unknown>
 
 const LIFECYCLE = new Set(["remote_listen", "remote_listen_failed", "remote_listen_closed", "remote_listen_off", "remote_unavailable", "remote_whois_ready", "remote_whois_failed"]);
 
-function lifecycleReason(event: Record<string, unknown> | undefined): string {
+function lifecycleReason(event: Record<string, unknown> | undefined, said: string): string {
   if (event === undefined || event.event === "remote_listen" || event.event === "remote_whois_ready") return "";
   const text = typeof event.message === "string" ? event.message : typeof event.reason === "string" ? event.reason : "";
-  return text === "" ? "" : `; nectard logged: ${text}`;
+  return text === "" || said.includes(text) ? "" : `; nectard logged: ${text}`;
 }
 
 export interface RefusalSummary {
@@ -965,15 +965,16 @@ export async function listenerCheck(
   const found = tailnetAddress(read);
   if (!found.ok) {
     const why = found.reason === "localapi_unreachable" ? `the Tailscale LocalAPI does not answer here, so nectard cannot listen or identify callers: ${read.ok ? "" : read.reason}` : found.message;
-    return failed(`remote.listen is on, but ${why}${lifecycleReason(lifecycle)}`, "Fix the tailscale check first");
+    return failed(`remote.listen is on, but ${why}${lifecycleReason(lifecycle, why)}`, "Fix the tailscale check first");
   }
   const where = `${found.address}:${port}`;
   const probe = await probeHello(found.address, port);
   if ("reason" in probe) {
     const daemon = await (options.hello ?? daemonHello)();
     const problem = daemonListenerProblem(daemon);
+    const said = `remote.listen is on, but nothing answers on ${where} (${probe.reason})${problem === undefined ? "" : `; ${problem}`}`;
     return failed(
-      `remote.listen is on, but nothing answers on ${where} (${probe.reason})${problem === undefined ? "" : `; ${problem}`}${lifecycleReason(lifecycle)}`,
+      `${said}${lifecycleReason(lifecycle, said)}`,
       `Check that nectard runs (nectar daemon status), then restart it with \`${REMOTE_INSTALL_HINT}\``,
     );
   }

@@ -123,6 +123,7 @@ without it; the daemon only calls the same code the CLI calls.
   envs/<name>.json          # <name> includes --web/--desktop; source of truth
   work/<name>/              # nectar-owned git worktree/clone of the branch, or a static site's copy
   work/<name>.deps/         # [deps] state (§5.1): compose.json + secrets.json (0600), sqlite copies
+  pg/<major>/               # local-provider Postgres cluster (§5.1): data/, superuser.password (0600), cluster.json, server.log
   packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
     acme-desktop--agent-coupons-stack.testpack.zip
   evidence/<name>/          # shell recordings, smoke output, screenshots
@@ -532,8 +533,9 @@ STRIPE_KEY = "project/acme/stripe-test"
 [deps.db]                       # web envs only; one Postgres per env (§5.1)
 kind = "postgres:16"            # "postgres:<tag>" pins the official image; bare "postgres" = 17
 env = "DATABASE_URL"            # default; PG* vars are added when there is one postgres dep
-database = "app"                # default "app"
-user = "nectar"                 # default "nectar"; the password is generated per env
+database = "app"                # default "app" (Docker provider only)
+user = "nectar"                 # default "nectar" (Docker provider only); the password is generated per env
+provider = "local"              # optional: "docker" | "local"; default picks Docker, else local binaries
 
 [deps.files]
 kind = "sqlite"
@@ -567,8 +569,8 @@ second command definition (DECISIONS D8).
 
 ### 5.1 `[deps]` — per-env databases (amendment · 2026-10-14, DECISIONS D16, D30)
 
-Built so far: `kind = "postgres:<tag>"` on hosts with Docker and Compose v2, and
-`kind = "sqlite"`. `[deps].compose`, `provision`/`teardown` commands and other kinds are
+Built so far: `kind = "postgres:<tag>"` through Docker and Compose v2 or through local
+Postgres binaries (the local provider below), and `kind = "sqlite"`. `[deps].compose`, `provision`/`teardown` commands and other kinds are
 `E_NO_RECIPE` until built. Deps apply to web envs; other modes ignore them. The recipe is read
 from the published branch, as for `[web]`.
 
@@ -615,8 +617,78 @@ from the published branch, as for `[web]`.
   with `DOCKER_HOST`. `NECTAR_DOCKER_BIN` picks the binary (default `docker`). Without
   access, publishing an app with postgres deps fails `E_PLATFORM` before any checkout, with
   that hint. `doctor` reports a `docker` check (fail when an existing env needs it, warn
-  otherwise) and never changes Docker access. macOS without Docker Desktop gets the same
-  error. A shared-Postgres fallback is not built yet.
+  otherwise) and never changes Docker access. A host without Docker falls back to the local
+  provider below when it has Postgres binaries.
+- **Provider.** `[deps.<name>] provider = "docker" | "local"` picks one explicitly. Without
+  it, a new dep uses Docker when the Docker probe succeeds, else the local provider when
+  local binaries are found, else publish fails `E_PLATFORM` before any checkout, with a hint
+  naming both options. An existing dep keeps the provider it was created with (recorded as
+  `provider` in its deps record; records from before this field are `docker`). An explicit
+  provider that differs from the recorded one fails `E_DEPS` and asks for `--fresh`, which
+  drops the data. `doctor`'s `postgres-provider` check says which provider a dep without the
+  key would use here (`provider`: `docker`, `local` or `null`), lists the local majors and
+  their bin dirs, and fails when an env on the local provider needs a major whose binaries
+  are gone.
+- **Local provider (DECISIONS D33).** One Nectar-managed Postgres cluster per major, with one
+  role and one database per env and dep.
+  - *Binaries.* Nectar never installs Postgres. A bin dir counts when it holds `initdb`,
+    `pg_ctl`, `postgres` and `psql` and `postgres --version` says 13 or newer. It searches
+    the directory of `initdb` on `PATH` (symlinks resolved), then
+    `/opt/homebrew/opt/postgresql@*/bin`, `/opt/homebrew/opt/postgresql/bin`, the same under
+    `/usr/local/opt`, `/Applications/Postgres.app/Contents/Versions/*/bin`,
+    `/usr/lib/postgresql/*/bin` and `/usr/pgsql-*/bin`. `NECTAR_PG_BIN` (a `PATH`-style list
+    of bin dirs) replaces that search; the nectard unit passes it through.
+  - *Version.* The major from `postgres:<tag>` is used when local binaries of that major
+    exist. Otherwise the newest local major is used and the publish carries a warning naming
+    the pin and the major it got. There is no strict mode: `provider = "docker"` is how a
+    repo insists on the exact image. A dep keeps its major across republishes; if those
+    binaries disappear, publish and revive fail `E_PLATFORM` until they come back or
+    `--fresh` recreates the dep on another major.
+  - *Cluster.* `initdb` runs once into `<NECTAR_HOME>/pg/<major>/data` with superuser
+    `nectar`, a generated password in `pg/<major>/superuser.password` (0600),
+    `scram-sha-256` auth, UTF8 and no locale. `pg_hba.conf` is replaced by the single line
+    `host all all 127.0.0.1/32 scram-sha-256`. `postgresql.conf` includes `nectar.conf`,
+    which sets `listen_addresses = '127.0.0.1'`, the port, `unix_socket_directories = ''`
+    (no socket file) and `log_min_error_statement = panic` (failed statements, which can
+    hold a password, are not logged). The port comes from the upstream range under the
+    machine ports lock, is kept in `pg/<major>/cluster.json`, and is reserved by every env
+    record that points at the cluster. `pg_ctl start -w` starts it with the server log at
+    `pg/<major>/server.log`. Every start revokes `CONNECT` and `TEMPORARY` on `postgres` and
+    `template1` from `PUBLIC`.
+  - *Per env.* The role and the database are both named
+    `nectar_<env>_<dep>_<hash>`: the env and dep names with every run of characters outside
+    `[a-z0-9]` turned into `_`, cut so the whole name fits Postgres's 63 bytes, plus the
+    first 8 hex digits of `sha256(env + NUL + dep)`, so two envs never share a name. The
+    recipe's `database` and `user` keys apply to the Docker provider only. The role gets a
+    generated password (kept in the env's `secrets.json`, 0600, exactly as for Docker) and
+    `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`; the database is owned by it
+    and `PUBLIC` loses all rights on it, so one env's role cannot connect to another env's
+    database. All SQL is sent to `psql` on stdin as the superuser (password in the child's
+    environment, never on the command line); names are checked against
+    `^nectar_[a-z0-9_]{1,56}$` and double-quoted, the password is checked to be one Nectar
+    generated and single-quoted, and create statements are conditional (`\gexec`), so a
+    republish or revive re-runs them safely and resets the role's password to the stored
+    one. psql errors in `E_DEPS` details have both passwords replaced by `***`.
+  - *Injection and redaction* are the Docker path's: the same `DATABASE_URL` and `PG*`
+    vars, pointing at the cluster port, and `***` in `show` and the publish result.
+  - *Lifecycle.* Publish starts the cluster if needed before creating the role and
+    database; a republish keeps them. `--fresh` drops the database (`WITH (FORCE)`, which
+    ends the old serve's connections) and the role, creates them again with a new password,
+    and re-runs the seed. A recipe that drops a local dep, or moves it to Docker with
+    `--fresh`, drops its database and role. `stop` and gc expire leave the database and the
+    cluster alone. gc cold, reap and `rm` drop the env's databases and roles. nectard's
+    revive, including the revive of every env after boot, starts the cluster and re-checks
+    the role and database before it spawns the app. A publish whose new local database
+    cannot be created drops what it created and restores the previous deps record (`E_DEPS`).
+  - *Cluster stop.* After `rm`, gc cold or reap removes an env's local databases, Nectar
+    stops (`pg_ctl stop -m fast`) every cluster that no env record points at any more.
+    While any env, including an expired one, has a database in it, the cluster keeps
+    running: an idle Postgres costs a few tens of MB and no CPU, and a running cluster
+    keeps its reserved port in use. The start, the create and the stop decision hold a
+    per-major lock (`locks/machine--pg-<major>.lock`), so a stop cannot race a publish.
+  - *Scope.* Nectar only touches the cluster under its own `NECTAR_HOME`, through its own
+    port and superuser, and only the `nectar_…` names its env records hold. It never
+    connects to another Postgres on the host.
 
 ## 6. The five modalities
 
@@ -1066,8 +1138,9 @@ plus (added post-v0 review, 2026-07-19):
 - `E_FORBIDDEN` (D29 amendment) — the target's nectard refused this node: WhoIs failed,
   `remote.allow` does not list it, its `nectar.json` is unreadable, or the env belongs to
   another node. `error.node_id` is this node's stable ID, for the target's allowlist.
-- `E_DEPS` — a `[deps]` database did not come up healthy, or Docker refused a teardown
-  step (§5.1); `log_tail` has Compose's output. `E_SEED` — the scenario seed exited non-zero.
+- `E_DEPS` — a `[deps]` database did not come up healthy, Docker refused a teardown step,
+  or the local Postgres cluster failed to init, start or run Nectar's SQL (§5.1); `log_tail`
+  has Compose's, `initdb`'s, `pg_ctl`'s or `psql`'s output, with passwords as `***`. `E_SEED` — the scenario seed exited non-zero.
 
 ### Commands
 
@@ -1397,7 +1470,7 @@ warns if `gc` hasn't run in 24 h.
 | F13 | simctl failure (no runtime, boot timeout, install/launch error) | publish fails `E_SIM` with simctl stderr; env kept as `crashed`; nectar-created device cleaned up |
 | F14 | `open` on a Mac without a matching iOS runtime | `E_PLATFORM` with the `preview_url`-needs-nothing hint; non-Mac `open` goes straight to the stream URL |
 | F15 | publishing host requests its own tailnet Serve URL | Tailscale supplies no caller identity and Serve returns 403; `resolve.is_self: true` tells consumers to prefer `urls.local`; packet `preview_url` remains the canonical mesh URL |
-| F16 | `[deps]` postgres on a host where this user cannot reach Docker | publish fails `E_PLATFORM` before any checkout, with the docker-group / rootless hint; Nectar never changes Docker access; `doctor`'s `docker` check says the same |
+| F16 | `[deps]` postgres on a host where this user cannot reach Docker | without a `provider` key, the dep uses the local provider when the host has Postgres 13+ binaries (a pinned major it lacks gives a warning); with neither, or with `provider = "docker"`, publish fails `E_PLATFORM` before any checkout, with a hint naming Docker access and local Postgres binaries; Nectar never changes Docker access and never installs Postgres; `doctor`'s `docker` and `postgres-provider` checks say the same |
 
 ### 10.5 `doctor --fix`
 

@@ -723,6 +723,9 @@ beside Nectar. Two Nectar labels plus the `nectar-` volume prefix are the only p
 ownership. (c) records are shown and copied into envelopes, and D17 keeps them
 secret-free. (d) is the planned macOS fallback, not the default: it shares one failure
 domain and makes `--fresh` a drop/create dance (D16).
+**Amended by D33 (2026-10-14):** (d) is now built as the fallback for hosts without a usable
+Docker, chosen per dep by `provider` or auto-detection; the Docker path above is unchanged
+and stays the default where Docker answers.
 
 ## D31 — doctor follow-ups from the Studio cleanup: one-pass repair, 443 as a warning, no dead mesh URLs
 
@@ -763,3 +766,40 @@ that decides it is the GUI. (b) breaks hosts where only the CLI works. (c) would
 deliberate refusal (403 for a non-operator, `BackendState` Stopped) into a second, slower
 refusal with a less precise message. Reading the token from `lsof` rather than from the group
 container avoids macOS's prompt for other apps' data, which a LaunchAgent cannot answer.
+
+## D33 — `[deps]` postgres without Docker: one Nectar-owned local cluster per major, a role and database per env
+
+**Chose:** a `provider` per postgres dep, `"docker"` or `"local"`, auto-detected when absent:
+Docker when its probe succeeds, else local Postgres 13+ binaries found on the host (PATH,
+Homebrew, Postgres.app, Debian/RHEL layouts, or `NECTAR_PG_BIN`), else `E_PLATFORM` naming
+both. A dep keeps the provider and major it was created with until `--fresh`. The local
+provider runs one cluster per major under `<NECTAR_HOME>/pg/<major>`, `initdb`'ed by Nectar
+with its own superuser and generated password (0600), loopback-only TCP on a Nectar port, no
+Unix socket and `scram-sha-256` for `127.0.0.1` as the only `pg_hba` rule. Each env and dep
+gets a role and a database named `nectar_<env>_<dep>_<hash8>`, owned by that role, closed to
+`PUBLIC`. A pinned major that has no local binaries uses the newest local major with a
+warning. The cluster keeps running while any env record has a database in it and is stopped
+once the last one is removed (`rm`, gc cold, reap). (SPEC §5.1.)
+**Alternatives:** (a) install Postgres for the user (Homebrew, apt); (b) adopt a Postgres the
+user already runs (Postgres.app's default server, a distro service) and create databases in
+it; (c) one cluster per env from local binaries; (d) refuse a major mismatch, or a `strict`
+key; (e) stop the cluster when no env is running, or never stop it; (f) the exact
+`nectar_<env>` name the brief sketched.
+**Why:** (a) the standing order is that Nectar installs nothing, and a package manager is the
+user's choice. (b) Nectar would need that server's superuser and would be creating and
+dropping things in a database it does not own; on metal-1 and the netcups other users'
+clusters run beside it. Its own cluster under its own home is provably Nectar's, so teardown
+cannot reach anything else. (c) is a process, a port and ~40 MB per env, which is what Docker
+gives and what Mac minis without Docker should not pay; one cluster per major is enough
+because envs are separated by role, ownership and revoked `PUBLIC` rights, and `--fresh` is
+`DROP DATABASE … WITH (FORCE)`. (d) a review preview wants a database that works; Postgres
+majors are compatible for what apps do, the warning names the mismatch, and a repo that must
+have the exact version says `provider = "docker"`, which already pins the image, so a second
+switch would only duplicate it. (e) "no env running" would stop the cluster on every gc
+expire and race the next publish for no real saving: an idle Postgres costs tens of MB and
+no CPU, and expired envs keep their data (gc expire leaves it, as with Docker). Stopping only
+when no record has a database in it means it never runs for nothing, and the decision takes
+the same per-major lock as start and create. (f) env names may contain `-`, dep names `-`
+and `_`, and one env may have several postgres deps; `nectar_<env>` alone collides for two
+deps, and plain character mapping collides (`x--a` + `web_db` vs `x--a-web` + `db`). The
+hash keeps names unique and inside 63 bytes while the readable prefix still says whose it is.

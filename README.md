@@ -145,9 +145,14 @@ seed = "pnpm db:seed"  # runs when the database is created, and again on publish
 ```
 
 Republishing keeps the data, `nectar publish --fresh` starts from an empty database, and
-`nectar rm` removes the container and its volume. This needs Docker with Compose that the
-user can reach (docker group or rootless Docker); without it the publish fails `E_PLATFORM`.
-Nectar only ever touches containers, volumes and networks labelled `dev.nectar.env`.
+`nectar rm` removes it. With Docker and Compose that the user can reach (docker group or
+rootless Docker), each env gets its own container and volume, and Nectar only ever touches
+containers, volumes and networks labelled `dev.nectar.env`. Without Docker, for example on
+a Mac with Postgres.app or Homebrew's `postgresql@<major>`, Nectar runs one Postgres cluster
+of its own per major under `~/.nectar/pg/` on a loopback port, with a role and database per
+env, from binaries it finds on the host; it never installs Postgres. `provider = "docker"`
+or `"local"` under `[deps.db]` picks one explicitly, and `nectar doctor` says which one this
+machine would use. With neither, the publish fails `E_PLATFORM`.
 `kind = "sqlite"` with `path = "data/app.db"` gives each env its own copy of the file
 instead.
 

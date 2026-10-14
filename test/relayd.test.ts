@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
@@ -332,5 +333,72 @@ describe("relayd admin socket", () => {
     await mkdir(shared, { mode: 0o755 });
     await chmod(shared, 0o755);
     await expect(testRelayd({ admin_socket: path.join(shared, "admin.sock") })).rejects.toThrow(/mode 0700/);
+  });
+});
+
+describe("relayd checker follow-ups", () => {
+  it("treats an expired route as gone before prune runs: PATCH and rotate 404, mine lists it expired, verify refuses", async () => {
+    const relayd = await relay();
+    const made = await create(relayd, { expires_at: epoch(relayd, 60_000) });
+    const sub = String(made.body.sub);
+    relayd.clock.now += 30 * 60_000;
+    relayd.as(A);
+    expect((await relayd.call("PATCH", `/routes/${sub}`, { expires_at: epoch(relayd, 10 * 86_400_000) })).status).toBe(404);
+    expect((await relayd.call("POST", `/routes/${sub}/rotate`)).status).toBe(404);
+    expect((await relayd.call("GET", "/routes?mine=1")).body.routes).toEqual([expect.objectContaining({ sub, revoked: true, reason: "expired" })]);
+    expect(relayd.relayd.state().routes[sub]?.expires_at).toBe(Date.parse("2026-10-14T12:01:00Z"));
+  });
+
+  it("answers object-prototype names as unknown, not as an internal error", async () => {
+    const relayd = await relay();
+    relayd.as(A);
+    for (const name of ["constructor", "tostring", "hasownproperty"]) {
+      expect((await relayd.call("PATCH", `/routes/${name}`, { expires_at: epoch(relayd, 60_000) })).status).toBe(404);
+      expect((await relayd.call("POST", `/routes/${name}/rotate`)).status).toBe(404);
+    }
+    expect((await relayd.admin("POST", "/admin/kill", { node: "toString" })).status).toBe(404);
+    expect((await relayd.admin("POST", "/admin/kill", { node: "constructor" })).status).toBe(404);
+  });
+
+  it("learns its own node ID once tailscaled answers, even if it did not at start", async () => {
+    let calls = 0;
+    const relayd = await relay({ allow: [{ node_id: RELAY_SELF.nodeId }] }, {
+      status: () => {
+        calls += 1;
+        return Promise.resolve(
+          calls === 1
+            ? { ok: false, reachable: false, reason: "not yet" }
+            : { ok: true, endpoint: { kind: "socket", socket: "/fake", source: "env" }, status: { BackendState: "Running", Self: { ID: RELAY_SELF.nodeId, TailscaleIPs: [RELAY_SELF.ip] } } },
+        );
+      },
+    });
+    relayd.as({ nodeId: RELAY_SELF.nodeId, dnsName: "trmd-vps01.tail1234.ts.net" });
+    expect(await relayd.call("GET", "/routes?mine=1")).toMatchObject({ status: 403, body: { error: { rule: "self" } } });
+  });
+
+  it("caps open connections per peer so one node cannot hold every slot", async () => {
+    const relayd = await relay();
+    const port = relayd.relayd.control?.port ?? 0;
+    const sockets = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        new Promise<net.Socket>((resolve) => {
+          const socket = net.connect(port, "127.0.0.1", () => {
+            socket.write("GET /routes?mine=1 HTTP/1.1\r\nHost: x\r\n");
+            resolve(socket);
+          });
+        }),
+      ),
+    );
+    const refused = await new Promise<boolean>((resolve) => {
+      const socket = net.connect(port, "127.0.0.1");
+      socket.once("close", () => resolve(true));
+      socket.once("data", () => resolve(false));
+      setTimeout(() => resolve(false), 2_000);
+    });
+    expect(refused).toBe(true);
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    relayd.as(A);
+    expect((await relayd.call("GET", "/routes?mine=1")).status).toBe(200);
   });
 });

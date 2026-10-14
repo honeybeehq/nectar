@@ -121,7 +121,7 @@ async function relaydAddress(target: ExposureTarget): Promise<string> {
   const nodes = [read.status.Self, ...Object.values(read.status.Peer ?? {})];
   const match = nodes.find((node) => {
     const dns = node?.DNSName?.replace(/\.$/, "").toLowerCase();
-    return dns === wanted || dns?.split(".")[0] === wanted || node?.HostName?.toLowerCase() === wanted;
+    return dns === wanted || dns?.split(".")[0] === wanted;
   });
   const address = match?.TailscaleIPs?.find((ip) => net.isIPv4(ip));
   if (address === undefined) throw new NectarError("E_EXPOSE", `No tailnet node named '${host}' for the relay`);
@@ -192,11 +192,13 @@ export interface RelaydRoute {
 
 function route(target: ExposureTarget, body: Record<string, unknown>): RelaydRoute {
   const url = typeof body.url === "string" ? body.url : "";
-  if (typeof body.sub !== "string" || !PUBLIC_URL.test(url) || typeof body.expires_at !== "string" || typeof body.cap_at !== "string") {
+  const sub = typeof body.sub === "string" ? body.sub : "";
+  const expected = target.domain === undefined ? PUBLIC_URL.test(url) && url.startsWith(`https://${sub}.`) : url === `https://${sub}.${target.domain.toLowerCase()}`;
+  if (sub === "" || !expected || !PUBLIC_URL.test(url) || typeof body.expires_at !== "string" || typeof body.cap_at !== "string") {
     throw new NectarError("E_EXPOSE", `relayd on ${target.host ?? "the relay"} answered without a usable route`);
   }
   return {
-    sub: body.sub,
+    sub,
     url,
     gate: body.gate === "none" ? "none" : "password",
     expires_at: body.expires_at,

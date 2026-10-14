@@ -29,7 +29,9 @@ const LEGACY_UPSTREAM = /^https:\/\/[a-zA-Z0-9._-]+(:[0-9]+)?$/;
 const MAX_BODY_BYTES = 16 * 1024;
 const WHOIS_DEADLINE_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_CONNECTIONS = 32;
+const HEADERS_TIMEOUT_MS = 5_000;
+const MAX_CONNECTIONS = 64;
+const MAX_CONNECTIONS_PER_PEER = 8;
 const SUFFIX_BYTES = 4;
 const BASE_BUDGET = 63 - 1 - SUFFIX_BYTES * 2;
 const MIN_PASSWORD = 12;
@@ -197,8 +199,12 @@ export async function loadConfig(file: string): Promise<RelaydConfig> {
   return parseConfig(await readFile(file, "utf8"));
 }
 
+function table<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 export function emptyState(): RelaydState {
-  return { version: 1, routes: {}, revoked: {}, kill: { all: null, nodes: {} } };
+  return { version: 1, routes: table(), revoked: table(), kill: { all: null, nodes: table() } };
 }
 
 function checkOwner(value: unknown): Owner {
@@ -230,14 +236,14 @@ function checkRoute(sub: string, value: unknown): Route {
 export function parseState(text: string): RelaydState {
   const raw: unknown = JSON.parse(text);
   if (!isObject(raw) || raw.version !== 1 || !isObject(raw.routes) || !isObject(raw.revoked) || !isObject(raw.kill)) throw new Error("state file is malformed");
-  const routes: Record<string, Route> = {};
+  const routes = table<Route>();
   for (const [sub, value] of Object.entries(raw.routes)) routes[sub] = checkRoute(sub, value);
-  const revoked: Record<string, Tombstone> = {};
+  const revoked = table<Tombstone>();
   for (const [sub, value] of Object.entries(raw.revoked)) {
     if (!isObject(value) || typeof value.revoked_at !== "number" || !["admin", "kill", "expired"].includes(String(value.reason))) throw new Error(`tombstone ${sub} is malformed`);
     revoked[sub] = { sub, owner: checkOwner(value.owner), revoked_at: value.revoked_at, reason: value.reason as Tombstone["reason"] };
   }
-  const nodes: KillFlags["nodes"] = {};
+  const nodes: KillFlags["nodes"] = table();
   const rawNodes = isObject(raw.kill.nodes) ? raw.kill.nodes : {};
   for (const [id, value] of Object.entries(rawNodes)) {
     if (!isObject(value) || typeof value.at !== "number") throw new Error(`kill flag ${id} is malformed`);
@@ -579,9 +585,11 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
     }
   };
 
+  const live = (route: Route | undefined): Route | undefined => (route !== undefined && route.expires_at > deps.now() && route.cap_at > deps.now() ? route : undefined);
+
   const owned = (sub: string, peer: Peer): Route => {
     if (!SUB.test(sub)) throw new RelaydError(400, "E_USAGE", "not a route name");
-    const route = state.routes[sub];
+    const route = live(state.routes[sub]);
     if (route === undefined) {
       const tombstone = state.revoked[sub];
       throw new RelaydError(404, "E_NOT_FOUND", `no live route ${sub}`, tombstone !== undefined && tombstone.owner.node_id === peer.node_id ? { revoked: true, reason: tombstone.reason } : {});
@@ -745,7 +753,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
     routes: [
       ...Object.values(state.routes)
         .filter((route) => route.owner.node_id === peer.node_id)
-        .map((route) => publicRoute(route, config.domain)),
+        .map((route) => (live(route) === undefined ? { ...tombstoneView({ sub: route.sub, owner: route.owner, revoked_at: route.expires_at, reason: "expired" }, config.domain) } : publicRoute(route, config.domain))),
       ...Object.values(state.revoked)
         .filter((tombstone) => tombstone.owner.node_id === peer.node_id)
         .map((tombstone) => tombstoneView(tombstone, config.domain)),
@@ -756,7 +764,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
   const status = await deps.status();
   const self = status.ok ? status.status.Self : undefined;
   const selfIps = new Set(self?.TailscaleIPs ?? []);
-  const selfId = self?.ID;
+  let selfId = self?.ID;
 
   const identify = async (request: http.IncomingMessage): Promise<Peer> => {
     const raw = (request.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
@@ -815,16 +823,30 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
       });
   });
   controlServer.requestTimeout = REQUEST_TIMEOUT_MS;
-  controlServer.headersTimeout = REQUEST_TIMEOUT_MS;
+  controlServer.headersTimeout = HEADERS_TIMEOUT_MS;
   controlServer.maxConnections = MAX_CONNECTIONS;
+  const perPeer = new Map<string, number>();
+  controlServer.on("connection", (socket: net.Socket) => {
+    const peer = socket.remoteAddress ?? "";
+    const open = (perPeer.get(peer) ?? 0) + 1;
+    if (open > MAX_CONNECTIONS_PER_PEER) {
+      socket.destroy();
+      return;
+    }
+    perPeer.set(peer, open);
+    socket.once("close", () => {
+      const left = (perPeer.get(peer) ?? 1) - 1;
+      if (left <= 0) perPeer.delete(peer);
+      else perPeer.set(peer, left);
+    });
+  });
 
   const verifyServer = http.createServer((request, response) => {
     const host = String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
     const suffix = `.${config.domain}`;
     const sub = host.endsWith(suffix) ? host.slice(0, -suffix.length) : "";
-    const route = SUB.test(sub) ? state.routes[sub] : undefined;
-    const live = route !== undefined && route.expires_at > deps.now();
-    response.writeHead(live ? 204 : 404, { "cache-control": "no-store", connection: "close" });
+    const route = SUB.test(sub) ? live(state.routes[sub]) : undefined;
+    response.writeHead(route !== undefined ? 204 : 404, { "cache-control": "no-store", connection: "close" });
     response.end();
   });
 
@@ -1045,6 +1067,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
     const bound = controlServer.address();
     controlBound = { address, port: typeof bound === "object" && bound !== null ? bound.port : config.control.port };
     for (const ip of read.ok ? (read.status.Self?.TailscaleIPs ?? []) : []) selfIps.add(ip);
+    if (read.ok && read.status.Self?.ID !== undefined) selfId = read.status.Self.ID;
     deps.log({ event: "control_listen", address, port: controlBound.port, verify: `127.0.0.1:${verifyPort}`, admin: config.admin_socket, routes: Object.keys(state.routes).length });
   };
   await bindControl();

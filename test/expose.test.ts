@@ -2,7 +2,7 @@ import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NectarService } from "../src/service.js";
-import { exposureSub } from "../src/relay.js";
+import { exposureSub, relaydCreate } from "../src/relay.js";
 import { fakeExecutable, initGitRepo, record, tempDir, testRelayd, type TestRelayd } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
@@ -272,5 +272,21 @@ describe("expose through relayd", () => {
     await relay.rewrite({ allow: [{ node_id: FIXTURE.nodeId }, { node_id: "nOTHER1CNTRL" }] });
     await expect(service.unexpose(env)).rejects.toMatchObject({ code: "E_FORBIDDEN", details: { rule: "not_owner" } });
     expect(relay.relayd.state().routes[sub]).toBeDefined();
+  });
+});
+
+describe("relayd client", () => {
+  it("refuses a route whose url is not <sub>.<the target's domain>", async () => {
+    const http = await import("node:http");
+    const server = http.createServer((_request, response) => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true, sub: "app-main-01020304", url: "https://app-main-01020304.evil.example", expires_at: "2026-10-21T00:00:00.000Z", cap_at: "2026-11-13T00:00:00.000Z", password: "pw-from-a-rogue-peer" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const target = { kind: "relay" as const, host: "127.0.0.1", port, domain: "nctr.site", control: "relayd" as const };
+    await expect(relaydCreate(target, { name: "app-main", upstream: "https://a.b.ts.net:8443", expiresEpoch: 2_000_000_000, gate: "password" })).rejects.toMatchObject({ code: "E_EXPOSE" });
+    await new Promise((resolve) => server.close(resolve));
   });
 });

@@ -25,6 +25,7 @@ done
   || { echo "usage: ./install-relayd.sh <domain> [--dist <dir>] [--root <scratch dir>]" >&2; exit 2; }
 if [[ -n "$ROOT" ]]; then
   [[ "$ROOT" = /* ]] || { echo "--root must be an absolute path" >&2; exit 2; }
+  ROOT="$(realpath -m -- "$ROOT")"
   [[ "$ROOT" != "/" ]] || { echo "--root / is a real install; drop --root" >&2; exit 2; }
 else
   [[ $EUID -eq 0 ]] || { echo "run as root on the relay host, or pass --root <scratch dir>" >&2; exit 1; }

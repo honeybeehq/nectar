@@ -47,5 +47,6 @@ describe("install-relayd.sh", () => {
     expect((await runCommand("bash", [SCRIPT, "nctr site; rm -rf /", "--root", root, "--dist", dist], { env })).exitCode).toBe(2);
     expect((await runCommand("bash", [SCRIPT, "nctr.site", "--root", root, "--dist", path.join(root, "nope")], { env })).exitCode).toBe(1);
     expect((await runCommand("bash", [SCRIPT, "nctr.site", "--root", "relative", "--dist", dist], { env })).exitCode).toBe(2);
+    for (const disguised of ["//", "/./", "/tmp/.."]) expect((await runCommand("bash", [SCRIPT, "nctr.site", "--root", disguised, "--dist", dist], { env })).exitCode).toBe(2);
   });
 });

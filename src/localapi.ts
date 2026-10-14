@@ -252,7 +252,7 @@ export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<
   const platform = options.platform ?? ((env.NECTAR_TEST_DISCOVERY_PLATFORM || undefined) as NodeJS.Platform | undefined) ?? process.platform;
   const stepMs = options.stepTimeoutMs ?? DISCOVERY_STEP_TIMEOUT_MS;
   const fs: DiscoveryFs = {
-    readdir: (directory) => listInChild(env.NECTAR_TEST_LS_BIN || (existsSync("/bin/ls") ? "/bin/ls" : "ls"), directory, stepMs),
+    readdir: (directory) => listInChild(env.NECTAR_TEST_LS_BIN || (existsSync("/bin/ls") ? "/bin/ls" : "ls"), directory, stepMs + KILL_MARGIN_MS),
     readlink: (file) => readlink(file),
     readFile: (file) => readFile(file, "utf8"),
     ...options.fs,

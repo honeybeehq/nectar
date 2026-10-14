@@ -329,7 +329,7 @@ describe("LocalAPI discovery bounds", () => {
     expect(Date.now() - started).toBeLessThan(1_500);
     expect(found.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "timeout" });
     const pid = Number((await readFile(path.join(bin, "pid"), "utf8")).trim());
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     expect(() => process.kill(pid, 0)).toThrow();
     const again = await discoverLocalApi(options);
     expect(again.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "timeout" });

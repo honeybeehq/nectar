@@ -533,13 +533,13 @@ Every process discovers in this order on macOS: lsof, then macsys, then, only wh
 found anything, the group-container listing, then the socket. nectard (`daemon run`, a
 LaunchAgent on macOS) discovers as a service: macsys first, then lsof, and it never lists
 the group container (D32 amendment). The listing runs `/bin/ls` in a child process that is
-SIGKILLed and let go at the step's bound, so a listing blocked by macOS privacy protection
+SIGKILLed and let go just after the step's bound, so a listing blocked by macOS privacy protection
 never keeps a Nectar process from exiting. Every discovery step (`env`,
 `lsof`, `group-container`, `macsys`, `socket`) gets 3 s and the whole discovery 10 s; a
 step that runs out is recorded as `timeout` and skipped, and a step whose earlier call
 has still not returned is not started again (`stuck`), so a blocked file-system call
 costs one worker thread once, not one per retry. A step left with no budget is
-`skipped`. lsof is killed 250 ms after its 3 s, so the step is always recorded as `timeout`. The discovery is cached in the process: an endpoint
+`skipped`. lsof and the listing's `ls` are killed 250 ms after their 3 s, so the step is always recorded as `timeout`. The discovery is cached in the process: an endpoint
 that answers is reused until it fails, and when none answers, the same endpoints are
 retried without a new discovery for 30 s, doubling to at most 5 min, back to 30 s once
 one answers. A port that answers 401 to a reused discovery's token means the proof

@@ -10,12 +10,17 @@ export function serveLog(paths: NectarPaths, name: string): string {
 export async function prepareLog(paths: NectarPaths, name: string, maxBytes: number): Promise<string> {
   const file = serveLog(paths, name);
   await mkdir(path.dirname(file), { recursive: true });
+  await rotateLog(file, maxBytes, paths.root);
+  return file;
+}
+
+export async function rotateLog(file: string, maxBytes: number, trashRoot: string): Promise<void> {
   try {
     const info = await stat(file);
     if (info.size >= maxBytes) {
       const first = `${file}.1`;
       const second = `${file}.2`;
-      await trashPaths([second], paths.root);
+      await trashPaths([second], trashRoot);
       try {
         await rename(first, second);
       } catch (error) {
@@ -26,7 +31,6 @@ export async function prepareLog(paths: NectarPaths, name: string, maxBytes: num
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return file;
 }
 
 export async function logTail(paths: NectarPaths, name: string, lines = 40): Promise<string[]> {

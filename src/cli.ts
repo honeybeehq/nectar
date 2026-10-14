@@ -3,10 +3,13 @@ import { Command, CommanderError, Option } from "commander";
 import { asNectarError, NectarError } from "./errors.js";
 import { errorEnvelope, successEnvelope } from "./envelope.js";
 import { NectarService } from "./service.js";
+import { claimPidFile, daemonLogger, DEFAULT_GC_INTERVAL_MS, DEFAULT_INTERVAL_MS, Supervisor } from "./daemon.js";
+import { installUnit, uninstallUnit, unitStatus } from "./daemon-unit.js";
+import { parseDuration } from "./duration.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
-const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor", "expose", "unexpose"];
+const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor", "expose", "unexpose", "daemon"];
 const requestedCommand = argv.find((arg) => knownCommands.includes(arg)) ?? "nectar";
 
 function output(value: unknown, json: boolean): void {
@@ -178,6 +181,53 @@ program
   .action(async (options: { fix?: boolean }) =>
     execute("doctor", async () => new NectarService().doctor({ fix: options.fix ?? false })),
   );
+
+const daemon = program.command("daemon").description("nectard: revive crashed envs, restore them after reboot, run gc hourly");
+
+daemon
+  .command("run")
+  .description("run the supervisor in the foreground (what the service unit starts)")
+  .option("--interval <duration>", "liveness probe interval", `${DEFAULT_INTERVAL_MS / 1_000}s`)
+  .option("--gc-interval <duration>", "gc interval", `${DEFAULT_GC_INTERVAL_MS / 3_600_000}h`)
+  .action(async (options: { interval: string; gcInterval: string }) => {
+    try {
+      const intervalMs = parseDuration(options.interval, "interval");
+      const gcIntervalMs = parseDuration(options.gcInterval, "gc-interval");
+      const service = new NectarService();
+      await service.store.init();
+      const config = await service.store.readConfig();
+      const release = await claimPidFile(service.paths);
+      const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
+      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log });
+      const shutdown = async (): Promise<void> => {
+        await supervisor.stop();
+        await release();
+        process.exit(0);
+      };
+      process.once("SIGTERM", () => void shutdown());
+      process.once("SIGINT", () => void shutdown());
+      await supervisor.start();
+    } catch (error) {
+      const nectarError = asNectarError(error);
+      process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);
+      process.exitCode = 1;
+    }
+  });
+
+daemon
+  .command("install")
+  .description("install and start nectard as a launchd user agent (macOS) or systemd --user unit (Linux)")
+  .action(async () => execute("daemon", async () => installUnit(new NectarService().paths)));
+
+daemon
+  .command("uninstall")
+  .description("stop nectard and remove its unit; envs keep running")
+  .action(async () => execute("daemon", async () => uninstallUnit(new NectarService().paths)));
+
+daemon
+  .command("status")
+  .description("show whether nectard is installed and running")
+  .action(async () => execute("daemon", async () => unitStatus(new NectarService().paths)));
 
 try {
   await program.parseAsync(process.argv);

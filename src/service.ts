@@ -106,8 +106,21 @@ interface PublishedWeb {
   warnings: string[];
 }
 
+export interface ReviveResult {
+  revived: boolean;
+  reason: string;
+  pid?: number;
+  mesh?: boolean;
+}
+
 interface ServeOrphan extends ServeProxyEntry {
   env?: string;
+}
+
+function staticWebRecipe(): WebRecipe {
+  const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
+  const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+  return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
 }
 
 function hostAliases(value: string | undefined): Set<string> {
@@ -264,12 +277,10 @@ export class NectarService {
       throw new NectarError("E_USAGE", "--worktree and --verify do not apply to static sites");
     }
     const branch = await this.staticBranch(site, options);
-    const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
-    const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
     const recipe: Recipe = {
       name: appSlug(options.name ?? site.name),
       source: "static",
-      web: { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} },
+      web: staticWebRecipe(),
     };
     const web = await this.publishWeb({
       repo: site.source,
@@ -1189,6 +1200,98 @@ export class NectarService {
       { bestEffort: true },
     );
     return record;
+  }
+
+  async revive(name: string, options: { expectPid: number; kill: boolean }): Promise<ReviveResult> {
+    return this.store.withLock(validateEnvName(name), async () => {
+      const record = await this.store.readEnv(name);
+      if (record.mode !== "web" || !hasProbeableServe(record) || record.serve.pid !== options.expectPid) {
+        return { revived: false, reason: "record_changed" };
+      }
+      const serve = record.serve;
+      if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
+      const identity = await this.identity();
+      if (options.kill) await stopProcessGroup(serve.pgid);
+      const isStatic = serve.cmd.includes("static-server.js");
+      const recipe = isStatic
+        ? staticWebRecipe()
+        : await loadRecipe(record.worktree)
+            .then((loaded) => loaded.web)
+            .catch(() => undefined);
+      const cmd = isStatic && recipe !== undefined ? recipe.serve : serve.cmd;
+      const readyPath = recipe?.readyPath ?? "/";
+      const readyTimeoutMs = recipe?.readyTimeoutMs ?? 60_000;
+      const fail = async (code: string, message: string): Promise<ReviveResult> => {
+        record.status = "crashed";
+        record.failure = { code, message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
+        await this.store.writeEnv(record);
+        return { revived: false, reason: code };
+      };
+      if (!(await portAvailable(serve.upstream_port))) {
+        return fail("E_PORTS", `Upstream port ${serve.upstream_port} is held by a process Nectar did not start`);
+      }
+      const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
+      const childEnv = scrubbedEnvironment({
+        ...recipe?.env,
+        PORT: String(serve.upstream_port),
+        NECTAR_ENV: record.name,
+        NECTAR_ENV_DIR: record.worktree,
+      });
+      let spawned: { pid: number; pgid: number };
+      try {
+        spawned = spawnDetached(cmd, record.worktree, childEnv, log);
+      } catch (error) {
+        return fail("E_CHECKOUT", asNectarError(error).message);
+      }
+      record.serve = { ...serve, cmd, pid: spawned.pid, pgid: spawned.pgid, started_at: new Date().toISOString() };
+      await this.store.writeEnv(record);
+      const readyUrl = await this.waitReady(serve.upstream_port, readyPath, readyTimeoutMs);
+      if (readyUrl === undefined) {
+        await stopProcessGroup(spawned.pgid);
+        return fail("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${readyPath} within ${readyTimeoutMs}ms`);
+      }
+      record.urls.local = readyUrl.origin;
+      const mesh = await this.assertMesh(record, identity);
+      record.status = "serving";
+      delete record.failure;
+      delete record.liveness;
+      await this.store.writeEnv(record);
+      return { revived: true, reason: "spawned", pid: spawned.pid, mesh };
+    });
+  }
+
+  async reassertMesh(name: string): Promise<boolean> {
+    const identity = await this.identity();
+    let asserted = false;
+    await this.store.updateEnv(
+      name,
+      async (record) => {
+        if (record.mode === "web" && holdsRuntime(record.status)) asserted = await this.assertMesh(record, identity);
+      },
+      { bestEffort: true },
+    );
+    return asserted;
+  }
+
+  private async assertMesh(record: EnvRecord, identity: MachineIdentity): Promise<boolean> {
+    const tailnetPort = record.serve?.tailnet_port;
+    if (tailnetPort === undefined || record.urls.local === null || !identity.online || identity.dnsName === undefined) {
+      return false;
+    }
+    if (!(await serveWeb(tailnetPort, record.urls.local))) return false;
+    record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
+    return true;
+  }
+
+  async markCrashLoop(name: string, expectPid: number, message: string): Promise<boolean> {
+    const updated = await this.store.updateEnv(name, async (record) => {
+      if (record.serve?.pid !== expectPid) return;
+      if (record.serve.tailnet_port !== undefined) await stopServe(record.serve.tailnet_port);
+      record.status = "crashed";
+      record.urls.mesh = null;
+      record.failure = { code: "E_CRASH_LOOP", message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
+    });
+    return updated?.failure?.code === "E_CRASH_LOOP";
   }
 
   async list(options: { mode?: string; status?: string } = {}): Promise<Record<string, unknown>> {

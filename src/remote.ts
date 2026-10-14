@@ -18,7 +18,7 @@ import { NectarService } from "./service.js";
 import { StateStore } from "./state.js";
 import { daemonHello, type Hello } from "./control.js";
 import { hostReport } from "./pool.js";
-import { describeEndpoint, readStatus, whoIs as askWhoIs, type LocalApiEndpoint, type StatusJson, type StatusNodeJson, type StatusRead, type TailnetPeer } from "./localapi.js";
+import { describeDiscovery, describeEndpoint, discoveryReport, readStatus, type DiscoveryReport, whoIs as askWhoIs, type LocalApiEndpoint, type StatusJson, type StatusNodeJson, type StatusRead, type TailnetPeer } from "./localapi.js";
 import type { DepRecord, EnvRecord, MachineConfig, Publisher, RemoteConfig } from "./types.js";
 
 export const REMOTE_API = 1;
@@ -465,8 +465,10 @@ export interface ListenerState {
   address: string | null;
   port: number;
   last_error: string | null;
+  last_reason?: string | null;
   whois: string | null;
   since: string | null;
+  discovery?: DiscoveryReport | null;
 }
 
 export type TailnetAddress =
@@ -653,8 +655,25 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
 export function startRemoteListener(paths: NectarPaths, log: (event: Record<string, unknown>) => void, options: ListenerOptions = {}): RemoteListener {
   const retryMs = options.retryMs ?? RETRY_MS;
   const deadlineMs = options.deadlineMs ?? STATUS_DEADLINE_MS;
-  const state: ListenerState = { listen: options.listen ?? true, listening: false, address: null, port: options.port ?? remotePort(), last_error: null, whois: null, since: null };
-  const snapshot = (): ListenerState => ({ ...state });
+  const state: ListenerState = {
+    listen: options.listen ?? true,
+    listening: false,
+    address: null,
+    port: options.port ?? remotePort(),
+    last_error: null,
+    last_reason: null,
+    whois: null,
+    since: null,
+  };
+  const startedAt = Date.now();
+  const snapshot = (): ListenerState => {
+    const discovery = discoveryReport();
+    const waiting =
+      state.listen && !state.listening && state.last_error === null
+        ? `nectard has not finished its first tailnet status read (${Math.round((Date.now() - startedAt) / 1000)}s so far; ${describeDiscovery(discovery)})`
+        : state.last_error;
+    return { ...state, last_error: waiting, discovery };
+  };
   if (!state.listen) {
     log({ event: "remote_listen_off", config: paths.config, message: "remote.listen was not true in nectar.json when nectard started, so it does not listen on the tailnet" });
     return { state: snapshot, close: () => Promise.resolve() };
@@ -690,7 +709,7 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
     timer = setTimeout(() => void guard(state.listening ? watch : attempt), ms);
   };
   const fail = (reason: string, message: string, details: Record<string, unknown>): void => {
-    Object.assign(state, { listening: false, last_error: message, whois: null, since: now() });
+    Object.assign(state, { listening: false, last_error: message, last_reason: reason, whois: null, since: now() });
     const key = `${reason}\0${message}`;
     repeats = key === lastFailure ? repeats + 1 : 0;
     lastFailure = key;
@@ -708,7 +727,7 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
   const shut = async (reason: string, message: string, details: Record<string, unknown>, delay: number): Promise<void> => {
     const old = server;
     server = undefined;
-    Object.assign(state, { listening: false, last_error: message, since: now() });
+    Object.assign(state, { listening: false, last_error: message, last_reason: reason, since: now() });
     await old?.close().catch(() => undefined);
     log({ event: "remote_listen_closed", reason, message, address: state.address, port: state.port, ...details, restart_in_ms: delay });
     schedule(delay);
@@ -718,13 +737,18 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
     const read = await status();
     if (closed) return;
     if (read === TIMED_OUT) {
-      fail("status_timeout", `the Tailscale LocalAPI status read did not finish within ${deadlineMs / 1000}s, so nectard does not know its tailnet address yet`, {});
+      const discovery = discoveryReport();
+      fail(
+        "status_timeout",
+        `the Tailscale LocalAPI status read did not finish within ${deadlineMs / 1000}s, so nectard does not know its tailnet address yet (${describeDiscovery(discovery)})`,
+        { discovery },
+      );
       return;
     }
     noteStatus(read);
     const found = tailnetAddress(read, options.address);
     if (!found.ok) {
-      fail(found.reason, found.message, found.details);
+      fail(found.reason, found.message, found.reason === "localapi_unreachable" ? { ...found.details, discovery: discoveryReport() } : found.details);
       return;
     }
     let started: RemoteServer;
@@ -757,9 +781,10 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
       port: started.port,
       whois,
       last_error: whois === null ? null : `WhoIs does not work inside nectard, so it refuses every caller: ${whois}`,
+      last_reason: whois === null ? null : "whois",
       since: now(),
     });
-    log({ event: "remote_listen", address: started.address, port: started.port, api: "localapi", endpoint: describeEndpoint(found.endpoint), attempt: attempts, whois: whois ?? "ready" });
+    log({ event: "remote_listen", address: started.address, port: started.port, api: "localapi", endpoint: describeEndpoint(found.endpoint), attempt: attempts, whois: whois ?? "ready", discovery: describeDiscovery(discoveryReport()) });
     schedule(retryMs);
   };
   const watch = async (): Promise<void> => {
@@ -777,7 +802,7 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
       const whois = await readiness(state.address);
       if (whois !== state.whois) {
         log(whois === null ? { event: "remote_whois_ready", address: state.address } : { event: "remote_whois_failed", address: state.address, reason: whois });
-        Object.assign(state, { whois, last_error: whois === null ? null : `WhoIs does not work inside nectard, so it refuses every caller: ${whois}` });
+        Object.assign(state, { whois, last_error: whois === null ? null : `WhoIs does not work inside nectard, so it refuses every caller: ${whois}`, last_reason: whois === null ? null : "whois" });
       }
     }
     schedule(retryMs);
@@ -973,6 +998,8 @@ export function remoteStatus(config: MachineConfig | undefined, daemon: DaemonVi
     listening: remote?.listening === true,
     address: remote?.address ?? null,
     last_error: listen || remote?.listen === true ? (daemonListenerProblem(daemon) ?? null) : null,
+    last_reason: remote?.last_reason ?? null,
+    discovery: remote?.discovery ?? null,
   };
 }
 
@@ -997,7 +1024,7 @@ export async function listenerCheck(
   }
   const port = remotePort();
   const read = await readStatus();
-  const api = { api: "localapi" as const, localapi: read.endpoint === undefined ? null : describeEndpoint(read.endpoint) };
+  const api = { api: "localapi" as const, localapi: read.endpoint === undefined ? null : describeEndpoint(read.endpoint), discovery: discoveryReport() };
   const failed = (message: string, hint: string): DoctorCheck => ({ name: "remote", status: "fail", listener: "failed", message, hint, ...api, ...logged });
   const found = tailnetAddress(read);
   if (!found.ok) {
@@ -1010,10 +1037,11 @@ export async function listenerCheck(
     const daemon = await (options.hello ?? daemonHello)();
     const problem = daemonListenerProblem(daemon);
     const said = `remote.listen is on, but nothing answers on ${where} (${probe.reason})${problem === undefined ? "" : `; ${problem}`}`;
-    return failed(
-      `${said}${lifecycleReason(lifecycle, said)}`,
-      `Check that nectard runs (nectar daemon status), then restart it with \`${REMOTE_INSTALL_HINT}\``,
-    );
+    return {
+      ...failed(`${said}${lifecycleReason(lifecycle, said)}`, `Check that nectard runs (nectar daemon status), then restart it with \`${REMOTE_INSTALL_HINT}\``),
+      last_reason: daemon?.remote?.last_reason ?? null,
+      nectard_discovery: daemon?.remote?.discovery ?? null,
+    };
   }
   const error = isObject(probe.envelope) && probe.envelope.ok === false && isObject(probe.envelope.error) ? probe.envelope.error : undefined;
   if (error?.code === "E_FORBIDDEN" && error.refused === "self") {
@@ -1022,7 +1050,18 @@ export async function listenerCheck(
       last === null
         ? ""
         : `; it refused ${refused.count} caller${refused.count === 1 ? "" : "s"} in the last ${refused.window_hours} h, last ${last.node_name ?? last.node_id ?? "an unknown node"} (${last.rule})`;
-    return { name: "remote", status: "pass", listener: "listening", address: where, message: `nectard listens on ${where} and identifies callers through the LocalAPI${note}`, ...api, ...logged };
+    const nectardDiscovery = (await (options.hello ?? daemonHello)())?.remote?.discovery ?? null;
+    const found = nectardDiscovery === null ? "" : ` (nectard's ${describeDiscovery(nectardDiscovery)})`;
+    return {
+      name: "remote",
+      status: "pass",
+      listener: "listening",
+      address: where,
+      message: `nectard listens on ${where} and identifies callers through the LocalAPI${found}${note}`,
+      ...api,
+      nectard_discovery: nectardDiscovery,
+      ...logged,
+    };
   }
   if (error?.code === "E_FORBIDDEN" && error.refused === "whois") {
     const last = events.filter((event) => typeof event.whois === "string" && event.event !== "remote_listen").at(-1);

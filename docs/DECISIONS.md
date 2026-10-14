@@ -767,6 +767,24 @@ deliberate refusal (403 for a non-operator, `BackendState` Stopped) into a secon
 refusal with a less precise message. Reading the token from `lsof` rather than from the group
 container avoids macOS's prompt for other apps' data, which a LaunchAgent cannot answer.
 
+**Amendment · 2026-10-14 (mini02):** every discovery step has its own 3 s bound and the
+whole discovery 10 s; a step that runs out is skipped and recorded, never awaited again
+while its call is still pending. nectard (a service) tries the standalone app's
+`/Library/Tailscale/ipnport` first, then lsof, and never lists the App Store group
+container; an interactive process keeps lsof → group container → macsys → socket. The
+result is cached per process with a 30 s → 5 min re-discovery backoff. **Why:** on mini02
+nectard logged `status_timeout` 20 s after every start and never listened, while doctor from
+ssh found the LocalAPI. lsof found no proof there, and the group-container `readdir` that
+followed had no timeout: from a LaunchAgent, macOS can hold that read on a privacy prompt
+nobody can answer, so the status read never settled and macsys, which works on mini03–07,
+was never reached (a never-returning `readdir` reproduces exactly that). The listing is
+Nectar's own addition: Tailscale's CLI never reads the container, so under launchd it can
+only prompt or fail. macsys goes first there because it is two reads of fixed paths
+without a child process and answers on every standalone-app Mac; on an App Store Mac it is
+one quick ENOENT before lsof. Doing the listing in a child process was rejected: a child
+blocked on the same prompt is no easier to abandon than a pending `readdir`, and skipping
+it is what Tailscale itself does.
+
 ## D33 — `[deps]` postgres without Docker: one Nectar-owned local cluster per major, a role and database per env
 
 **Chose:** a `provider` per postgres dep, `"docker"` or `"local"`, auto-detected when absent:

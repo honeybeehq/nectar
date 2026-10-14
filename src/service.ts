@@ -119,6 +119,7 @@ import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, staticFiles, type StaticSite } from "./static-site.js";
 import { linksLeaving, MAX_TREE_BYTES, packFiles } from "./archive.js";
+import { describeDiscovery, discoveryReport } from "./localapi.js";
 import { callRemote, helloRemote, listenerCheck, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
 import { choosePoolHost, hostReport, poolSettings, POOL_CATEGORIES, POOL_POLICIES, readPlacements, updatePlacements, type PoolProbe } from "./pool.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
@@ -3285,17 +3286,19 @@ export class NectarService {
           }),
     });
     const tailscale = resolveTailscale();
+    const discovery = discoveryReport();
     checks.push({
       name: "tailscale",
       status: identity === undefined ? "fail" : "pass",
       message:
         identity !== undefined
-          ? `Tailscale is up as ${identity.dnsName} via ${tailnet.api === "localapi" ? `the LocalAPI at ${tailnet.endpoint}` : `${tailscale.path} (${tailscale.source})`}`
+          ? `Tailscale is up as ${identity.dnsName} via ${tailnet.api === "localapi" ? `the LocalAPI at ${tailnet.endpoint} (${describeDiscovery(discovery)})` : `${tailscale.path} (${tailscale.source})`}`
           : tailscale.source === "none" && tailnet.api === "cli"
             ? `No Tailscale LocalAPI and no tailscale CLI found in NECTAR_TAILSCALE_BIN, PATH, ${TAILSCALE_FALLBACKS.join(", ")} (${tailnet.reason}); publishes will be local-only`
             : `Tailscale is not usable: ${tailnet.reason}; publishes will be local-only`,
       api: tailnet.api,
       localapi: tailnet.endpoint ?? null,
+      discovery,
       binary: tailscale.source === "none" ? null : tailscale.path,
       binary_source: tailscale.source,
     });

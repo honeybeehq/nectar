@@ -12,6 +12,7 @@ import { getPaths } from "./paths.js";
 import { DEFAULT_CONFIG } from "./state.js";
 import { debugEnabled, traceTailscale } from "./tailscale.js";
 import { isRef } from "./refs.js";
+import { setDiscoveryMode } from "./localapi.js";
 import { remoteStatus, startRemoteListener } from "./remote.js";
 
 const argv = process.argv.slice(2);
@@ -317,6 +318,7 @@ daemon
       const release = await claimPidFile(service.paths);
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
       traceTailscale(log, { all: debugEnabled() });
+      setDiscoveryMode("service");
       const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
       const remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
       const control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {

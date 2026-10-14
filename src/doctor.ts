@@ -1,4 +1,5 @@
 import { holdsRuntime } from "./liveness.js";
+import type { DiscoveryReport } from "./localapi.js";
 import { loopbackProxy, rootMount, type ServeEntry } from "./tailscale.js";
 import type { EnvRecord, MachineConfig, PostgresProvider } from "./types.js";
 
@@ -34,6 +35,9 @@ export interface DoctorCheck {
   binary_source?: string;
   api?: "localapi" | "cli";
   localapi?: string | null;
+  discovery?: DiscoveryReport | null;
+  nectard_discovery?: DiscoveryReport | null;
+  last_reason?: string | null;
   listener?: "off" | "listening" | "failed";
   address?: string;
   provider?: PostgresProvider | null;

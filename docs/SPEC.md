@@ -378,7 +378,7 @@ tailnet port range whose loopback target is dead, §10.2.)
     `message`, `endpoint`, `backend_state` and `ips` it saw. It retries every 30 s for as
     long as it runs; the same failure is logged again only every 20th attempt (`repeats`).
   - Once bound it asks WhoIs about its own IPv4 and logs `remote_listen` with `address`,
-    `port`, `endpoint`, `attempt` and `whois` (`"ready"` or the reason WhoIs fails, in which
+    `port`, `endpoint`, `attempt`, `discovery` (the steps, as in doctor's message) and `whois` (`"ready"` or the reason WhoIs fails, in which
     case it refuses every caller). Every 30 s it re-reads status: a new Tailscale IPv4 closes
     the listener (`remote_listen_closed`, `reason: "address_changed"`) and binds the new one
     at once, and a WhoIs that was failing logs `remote_whois_ready` when it works again (or
@@ -386,7 +386,14 @@ tailnet port range whose loopback target is dead, §10.2.)
     `remote_listen_closed` with `reason: "server_error"` and retries in 30 s; shutdown logs
     `reason: "shutdown"`.
   - nectard's control-socket hello carries `program` (the CLI file it runs) and `remote`:
-    `{listen, listening, address, port, last_error, whois, since}`.
+    `{listen, listening, address, port, last_error, last_reason, whois, since, discovery}`.
+    `last_reason` is the `reason` of the last `remote_listen_failed`/`remote_listen_closed`
+    and `last_error` its message. Before the first status read finishes, `last_error`
+    says so ("has not finished its first tailnet status read", with the seconds so far and
+    the discovery step running), so `listening: false` never comes with a null
+    `last_error`. `discovery` is nectard's LocalAPI discovery report (see "Talking to
+    tailscaled"); `remote_listen_failed` with `status_timeout` or `localapi_unreachable`
+    carries it too.
   - Every request, `GET /v1/hello` included, is authenticated before its body is read:
     nectard asks tailscaled `WhoIs(<peer ip>:<peer port>)` of the raw TCP peer through the
     LocalAPI (`/localapi/v0/whois`, at the endpoint found as in "Talking to tailscaled"
@@ -521,7 +528,23 @@ token, read from the name of the `sameuserproof-<port>-<token>` file that `lsof 
 shows the extension holding open; failing that, a listing of
 `~/Library/Group Containers/*.io.tailscale.ipn.macos/`; the standalone app's
 `/Library/Tailscale/ipnport` link and `sameuserproof-<port>`; then `/var/run/tailscaled.socket`.
-On Linux: `/var/run/tailscale/tailscaled.sock`, then `/run/tailscale/tailscaled.sock`. The token
+On Linux: `/var/run/tailscale/tailscaled.sock`, then `/run/tailscale/tailscaled.sock`.
+nectard (`daemon run`, a LaunchAgent on macOS) discovers as a service: macsys first, then
+lsof, and it never lists the group container (D32 amendment). Every discovery step (`env`,
+`lsof`, `group-container`, `macsys`, `socket`) gets 3 s and the whole discovery 10 s; a
+step that runs out is recorded as `timeout` and skipped, and a step whose earlier call
+has still not returned is not started again (`stuck`), so a blocked file-system call
+costs one worker thread once, not one per retry. A step left with no budget is
+`skipped`. lsof is killed at its 3 s. The discovery is cached in the process: an endpoint
+that answers is reused until it fails, and when none answers, the same endpoints are
+retried without a new discovery for 30 s, doubling to at most 5 min, back to 30 s once
+one answers. doctor's `tailscale` and `remote` checks carry `discovery`: `{mode, at,
+steps: [{step, outcome, ms, found, note?}], running, won: {step, endpoint} | null,
+next_discovery_in_ms}`, and the tailscale message names the steps, e.g. `(service
+discovery: macsys found 1 (answered), lsof none, group-container skipped, socket
+none)`. For tests and Linux rehearsal only: `NECTAR_TEST_DISCOVERY_PLATFORM=darwin`,
+`NECTAR_TEST_LSOF_BIN`, `NECTAR_TEST_MACSYS_DIR` and `NECTAR_TEST_DISCOVERY_HANG=<step,…>`
+(those steps never return). The token
 goes in an HTTP basic-auth header and is never logged, shown or stored. A port that answers 401
 counts as stale and the next endpoint is tried. Serve changes read `serve-config` with its
 ETag, change only the one entry and POST the whole config back with `If-Match`. On 412 they
@@ -1356,7 +1379,7 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # run is the foreground supervisor the unit starts. status adds socket (the control
     # socket path) and control (nectard's hello: api, pid, nectar_home, ops; null when
     # nothing answers there; also program and remote, see §4.5) and remote ({listen, port,
-    # listening, address, last_error}: listen is nectar.json, the rest is what nectard
+    # listening, address, last_error, last_reason, discovery}: listen is nectar.json, the rest is what nectard
     # reports; last_error also says when nectard does not answer, runs an older build
     # that reports no listener, or read remote.listen off when it started). install --remote turns on the
     # tailnet listener (remote.listen in nectar.json); --no-remote turns it off.
@@ -1372,7 +1395,8 @@ nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # the listener for /v1/hello from this node: refused as "self" means it listens and
     # WhoIs works, refused as "whois" means it refuses every caller (reason from
     # nectard.log), no answer is failed with what nectard's hello says about its listener
-    # and its last remote_listen_failed/closed/off message. The check carries last_event
+    # and its last remote_listen_failed/closed/off message, plus last_reason and
+    # nectard_discovery from the hello; discovery is doctor's own. The check carries last_event
     # (the newest listener lifecycle event in nectard.log) and refusals ({count,
     # window_hours: 24, last: {at, rule, node_name, node_id, login, tags}}; self-checks
     # are not counted) ·

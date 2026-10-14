@@ -15,16 +15,35 @@ export const MACSYS_SHARED_DIR = "/Library/Tailscale";
 const APP_STORE_CONTAINER = ".io.tailscale.ipn.macos";
 const PROOF_FILE = /^sameuserproof-(\d{1,5})-([0-9a-f]+)$/;
 const REQUEST_TIMEOUT_MS = 5_000;
-const LSOF_TIMEOUT_MS = 5_000;
 const BODY_EXCERPT = 300;
 
 export function describeEndpoint(endpoint: LocalApiEndpoint): string {
   return endpoint.kind === "socket" ? `unix:${endpoint.socket}` : `127.0.0.1:${endpoint.port} (${endpoint.source} sameuserproof)`;
 }
 
+export type DiscoveryStepName = "env" | "lsof" | "group-container" | "macsys" | "socket";
+export type DiscoveryOutcome = "found" | "none" | "failed" | "timeout" | "stuck" | "skipped";
+export type DiscoveryMode = "interactive" | "service";
+
+export interface DiscoveryStep {
+  step: DiscoveryStepName;
+  outcome: DiscoveryOutcome;
+  ms: number;
+  found: number;
+  note?: string;
+}
+
 export interface Discovery {
   endpoints: LocalApiEndpoint[];
   notes: string[];
+  steps: DiscoveryStep[];
+  mode: DiscoveryMode;
+}
+
+export interface DiscoveryFs {
+  readdir: (directory: string) => Promise<string[]>;
+  readlink: (file: string) => Promise<string>;
+  readFile: (file: string) => Promise<string>;
 }
 
 export interface DiscoveryOptions {
@@ -34,6 +53,28 @@ export interface DiscoveryOptions {
   macsysDir?: string;
   sockets?: string[];
   lsof?: () => Promise<string>;
+  fs?: Partial<DiscoveryFs>;
+  mode?: DiscoveryMode;
+  stepTimeoutMs?: number;
+  budgetMs?: number;
+  progress?: (steps: DiscoveryStep[], running: DiscoveryStepName | null) => void;
+}
+
+export const DISCOVERY_STEP_TIMEOUT_MS = 3_000;
+export const DISCOVERY_BUDGET_MS = 10_000;
+export const REDISCOVER_MIN_MS = 30_000;
+export const REDISCOVER_MAX_MS = 300_000;
+
+const realFs: DiscoveryFs = {
+  readdir: (directory) => readdir(directory),
+  readlink: (file) => readlink(file),
+  readFile: (file) => readFile(file, "utf8"),
+};
+
+let defaultMode: DiscoveryMode = "interactive";
+
+export function setDiscoveryMode(mode: DiscoveryMode): void {
+  defaultMode = mode;
 }
 
 function errorCode(error: unknown): string {
@@ -58,18 +99,31 @@ export function parseLsofProofs(output: string): LocalApiEndpoint[] {
   return found;
 }
 
-async function lsofIpnExtension(): Promise<string> {
-  const binary = existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof";
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const result = await runCommand(binary, ["-n", "-a", `-u${uid}`, "-c", "IPNExtension", "-F", "n"], { timeoutMs: LSOF_TIMEOUT_MS });
-  return result.stdout;
+function lsofRunner(binary: string, timeoutMs: number): () => Promise<string> {
+  return async () => {
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const result = await runCommand(binary, ["-n", "-a", `-u${uid}`, "-c", "IPNExtension", "-F", "n"], { timeoutMs });
+    return result.stdout;
+  };
 }
 
-async function groupContainerProofs(home: string, notes: string[]): Promise<LocalApiEndpoint[]> {
+async function lsofProofs(lsof: () => Promise<string>, notes: string[]): Promise<LocalApiEndpoint[]> {
+  let found: LocalApiEndpoint[];
+  try {
+    found = parseLsofProofs(await lsof());
+  } catch (error) {
+    notes.push(`lsof could not list IPNExtension's files: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+  if (found.length === 0) notes.push("lsof found no IPNExtension sameuserproof file");
+  return found;
+}
+
+async function groupContainerProofs(fs: DiscoveryFs, home: string, notes: string[]): Promise<LocalApiEndpoint[]> {
   const root = path.join(home, "Library", "Group Containers");
   let containers: string[];
   try {
-    containers = (await readdir(root)).filter((name) => name.endsWith(APP_STORE_CONTAINER));
+    containers = (await fs.readdir(root)).filter((name) => name.endsWith(APP_STORE_CONTAINER));
   } catch (error) {
     if (errorCode(error) !== "ENOENT") notes.push(`cannot list ${root}: ${errorCode(error)}`);
     return [];
@@ -82,7 +136,7 @@ async function groupContainerProofs(home: string, notes: string[]): Promise<Loca
   for (const container of containers) {
     const directory = path.join(root, container);
     try {
-      for (const name of await readdir(directory)) {
+      for (const name of await fs.readdir(directory)) {
         const match = PROOF_FILE.exec(name);
         const endpoint = match === null ? undefined : tcpEndpoint(Number(match[1]), match[2] ?? "", "app-store");
         if (endpoint !== undefined) found.push(endpoint);
@@ -101,17 +155,17 @@ async function groupContainerProofs(home: string, notes: string[]): Promise<Loca
   return found;
 }
 
-async function macsysProof(directory: string, notes: string[]): Promise<LocalApiEndpoint[]> {
+async function macsysProof(fs: DiscoveryFs, directory: string, notes: string[]): Promise<LocalApiEndpoint[]> {
   let portText: string;
   try {
-    portText = await readlink(path.join(directory, "ipnport"));
+    portText = await fs.readlink(path.join(directory, "ipnport"));
   } catch (error) {
-    if (errorCode(error) !== "ENOENT") notes.push(`cannot read ${path.join(directory, "ipnport")}: ${errorCode(error)}`);
+    notes.push(errorCode(error) === "ENOENT" ? `no ${path.join(directory, "ipnport")} (the standalone Tailscale app is not installed)` : `cannot read ${path.join(directory, "ipnport")}: ${errorCode(error)}`);
     return [];
   }
   const file = path.join(directory, `sameuserproof-${portText}`);
   try {
-    const endpoint = tcpEndpoint(Number(portText), (await readFile(file, "utf8")).trim(), "macsys");
+    const endpoint = tcpEndpoint(Number(portText), (await fs.readFile(file)).trim(), "macsys");
     if (endpoint !== undefined) return [endpoint];
     notes.push(`${file} holds no usable port and token`);
   } catch (error) {
@@ -120,30 +174,145 @@ async function macsysProof(directory: string, notes: string[]): Promise<LocalApi
   return [];
 }
 
-export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<Discovery> {
-  const env = options.env ?? process.env;
-  const pinned = env.NECTAR_TAILSCALE_SOCKET;
-  if (pinned !== undefined && pinned !== "") return { endpoints: [{ kind: "socket", socket: pinned, source: "env" }], notes: [] };
-  const platform = options.platform ?? process.platform;
-  const endpoints: LocalApiEndpoint[] = [];
-  const notes: string[] = [];
-  if (platform === "darwin") {
-    try {
-      endpoints.push(...parseLsofProofs(await (options.lsof ?? lsofIpnExtension)()));
-    } catch (error) {
-      notes.push(`lsof could not list IPNExtension's files: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (endpoints.length === 0) {
-      notes.push("lsof found no IPNExtension sameuserproof file");
-      endpoints.push(...(await groupContainerProofs(options.home ?? os.homedir(), notes)));
-    }
-    endpoints.push(...(await macsysProof(options.macsysDir ?? MACSYS_SHARED_DIR, notes)));
-  }
-  const sockets = options.sockets ?? (platform === "darwin" ? [DARWIN_TAILSCALED_SOCKET] : TAILSCALE_SOCKETS);
+function socketEndpoints(sockets: string[], notes: string[]): Promise<LocalApiEndpoint[]> {
   const present = sockets.filter((socket) => existsSync(socket));
   if (present.length === 0) notes.push(`no tailscaled socket at ${sockets.join(" or ")}`);
-  endpoints.push(...present.map((socket): LocalApiEndpoint => ({ kind: "socket", socket, source: "default" })));
-  return { endpoints, notes };
+  return Promise.resolve(present.map((socket): LocalApiEndpoint => ({ kind: "socket", socket, source: "default" })));
+}
+
+const unsettled = new Map<string, { since: number; call: Promise<unknown> }>();
+
+function seconds(ms: number): string {
+  return `${Math.round(ms / 100) / 10}s`;
+}
+
+const TIMED_OUT = Symbol("timed out");
+
+async function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const SERVICE_SKIPS_CONTAINER =
+  "nectard runs as a service (a LaunchAgent), and macOS can only ask a GUI app for another app's group container, so the listing would wait on a prompt nobody can answer";
+
+export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<Discovery> {
+  const env = options.env ?? process.env;
+  const mode = options.mode ?? defaultMode;
+  const pinned = env.NECTAR_TAILSCALE_SOCKET;
+  if (pinned !== undefined && pinned !== "") {
+    const steps: DiscoveryStep[] = [{ step: "env", outcome: "found", ms: 0, found: 1 }];
+    options.progress?.(steps, null);
+    return { endpoints: [{ kind: "socket", socket: pinned, source: "env" }], notes: [], steps, mode };
+  }
+  const platform = options.platform ?? ((env.NECTAR_TEST_DISCOVERY_PLATFORM || undefined) as NodeJS.Platform | undefined) ?? process.platform;
+  const fs: DiscoveryFs = { ...realFs, ...options.fs };
+  const stepMs = options.stepTimeoutMs ?? DISCOVERY_STEP_TIMEOUT_MS;
+  const deadline = Date.now() + (options.budgetMs ?? DISCOVERY_BUDGET_MS);
+  const hang = new Set((env.NECTAR_TEST_DISCOVERY_HANG ?? "").split(",").filter((step) => step !== ""));
+  const endpoints: LocalApiEndpoint[] = [];
+  const notes: string[] = [];
+  const steps: DiscoveryStep[] = [];
+  const record = (step: DiscoveryStep): void => {
+    steps.push(step);
+    if (step.note !== undefined) notes.push(step.note);
+    options.progress?.([...steps], null);
+  };
+  const run = async (step: DiscoveryStepName, key: string | undefined, work: (stepNotes: string[]) => Promise<LocalApiEndpoint[]>): Promise<void> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      record({ step, outcome: "skipped", ms: 0, found: 0, note: `${step}: skipped, discovery spent its ${seconds(options.budgetMs ?? DISCOVERY_BUDGET_MS)} budget` });
+      return;
+    }
+    const earlier = key === undefined ? undefined : unsettled.get(key);
+    if (earlier !== undefined) {
+      record({ step, outcome: "stuck", ms: 0, found: 0, note: `${step}: skipped, its call from ${seconds(Date.now() - earlier.since)} ago has not returned yet` });
+      return;
+    }
+    options.progress?.([...steps], step);
+    const stepNotes: string[] = [];
+    const started = Date.now();
+    const call = hang.has(step) ? new Promise<LocalApiEndpoint[]>(() => undefined) : work(stepNotes);
+    if (key !== undefined) {
+      const entry = { since: started, call };
+      unsettled.set(key, entry);
+      const settled = (): void => {
+        if (unsettled.get(key) === entry) unsettled.delete(key);
+      };
+      call.then(settled, settled);
+    }
+    const limit = Math.min(stepMs, remaining);
+    let result: LocalApiEndpoint[] | typeof TIMED_OUT;
+    try {
+      result = await settleWithin(call, limit);
+    } catch (error) {
+      record({ step, outcome: "failed", ms: Date.now() - started, found: 0, note: `${step}: ${errorCode(error)}` });
+      return;
+    }
+    const ms = Date.now() - started;
+    if (result === TIMED_OUT) {
+      record({ step, outcome: "timeout", ms, found: 0, note: `${step}: did not finish within ${seconds(limit)}, so it was skipped` });
+      return;
+    }
+    endpoints.push(...result);
+    record({ step, outcome: result.length > 0 ? "found" : "none", ms, found: result.length, ...(stepNotes.length === 0 ? {} : { note: stepNotes.join("; ") }) });
+  };
+  if (platform === "darwin") {
+    const lsofBinary = env.NECTAR_TEST_LSOF_BIN || (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof");
+    const lsof = options.lsof ?? lsofRunner(lsofBinary, stepMs);
+    const macsysDir = options.macsysDir ?? (env.NECTAR_TEST_MACSYS_DIR || MACSYS_SHARED_DIR);
+    const home = options.home ?? os.homedir();
+    const lsofStep = (): Promise<void> => run("lsof", options.lsof === undefined ? `lsof:${lsofBinary}` : undefined, (stepNotes) => lsofProofs(lsof, stepNotes));
+    const macsysStep = (): Promise<void> => run("macsys", `macsys:${macsysDir}`, (stepNotes) => macsysProof(fs, macsysDir, stepNotes));
+    if (mode === "service") {
+      await macsysStep();
+      await lsofStep();
+      record({ step: "group-container", outcome: "skipped", ms: 0, found: 0, note: `group-container: skipped; ${SERVICE_SKIPS_CONTAINER}` });
+    } else {
+      await lsofStep();
+      if (endpoints.length === 0) await run("group-container", `group-container:${home}`, (stepNotes) => groupContainerProofs(fs, home, stepNotes));
+      else record({ step: "group-container", outcome: "skipped", ms: 0, found: 0 });
+      await macsysStep();
+    }
+  }
+  const sockets = options.sockets ?? (platform === "darwin" ? [DARWIN_TAILSCALED_SOCKET] : TAILSCALE_SOCKETS);
+  await run("socket", `socket:${sockets.join(",")}`, (stepNotes) => socketEndpoints(sockets, stepNotes));
+  return { endpoints, notes, steps, mode };
+}
+
+export function discoveryStepOf(discovery: Discovery, index: number): DiscoveryStepName | undefined {
+  let seen = 0;
+  for (const step of discovery.steps) {
+    seen += step.found;
+    if (index < seen) return step.step;
+  }
+  return undefined;
+}
+
+export interface DiscoveryReport {
+  mode: DiscoveryMode;
+  at: string;
+  steps: DiscoveryStep[];
+  running: DiscoveryStepName | null;
+  won: { step: DiscoveryStepName | null; endpoint: string } | null;
+  next_discovery_in_ms: number | null;
+}
+
+export function describeDiscovery(report: DiscoveryReport | null | undefined): string {
+  if (report === null || report === undefined) return "no LocalAPI discovery has run in this process";
+  const tried = report.steps.map((step) => {
+    const how = step.outcome === "timeout" ? `timed out after ${seconds(step.ms)}` : step.outcome === "found" ? `found ${step.found}` : step.outcome;
+    return `${step.step} ${how}${report.won?.step === step.step ? " (answered)" : ""}`;
+  });
+  if (report.running !== null) tried.push(`${report.running} still running`);
+  return `${report.mode} discovery: ${tried.join(", ") || "nothing tried yet"}`;
 }
 
 export interface LocalApiResponse {
@@ -194,10 +363,23 @@ export type LocalApiCall = { ok: true; endpoint: LocalApiEndpoint; response: Loc
 
 let pinnedEndpoint: LocalApiEndpoint | undefined;
 let cachedEndpoint: LocalApiEndpoint | undefined;
+let lastDiscovery: { discovery: Discovery; at: number; validMs: number; backedOff: boolean } | undefined;
+let discovering: Promise<Discovery> | undefined;
+let rediscoverMs = REDISCOVER_MIN_MS;
+let report: DiscoveryReport | undefined;
 
 export function pinLocalApi(endpoint: LocalApiEndpoint | undefined): void {
   pinnedEndpoint = endpoint;
   cachedEndpoint = undefined;
+  lastDiscovery = undefined;
+  rediscoverMs = REDISCOVER_MIN_MS;
+  report = undefined;
+}
+
+export function discoveryReport(): DiscoveryReport | null {
+  if (report === undefined) return null;
+  const next = lastDiscovery === undefined || cachedEndpoint !== undefined ? null : Math.max(0, lastDiscovery.at + lastDiscovery.validMs - Date.now());
+  return { ...report, steps: [...report.steps], next_discovery_in_ms: next };
 }
 
 async function attempt(endpoint: LocalApiEndpoint, method: string, apiPath: string, options: LocalApiRequestOptions): Promise<LocalApiResponse | string> {
@@ -215,6 +397,27 @@ function sameEndpoint(a: LocalApiEndpoint, b: LocalApiEndpoint): boolean {
   return b.kind === "tcp" && a.port === b.port && a.token === b.token;
 }
 
+async function currentDiscovery(envPinned: boolean): Promise<{ discovery: Discovery; cachedFor: number | undefined }> {
+  if (!envPinned && lastDiscovery !== undefined && Date.now() - lastDiscovery.at < lastDiscovery.validMs) {
+    return { discovery: lastDiscovery.discovery, cachedFor: Date.now() - lastDiscovery.at };
+  }
+  if (discovering === undefined) {
+    const at = new Date().toISOString();
+    report = { mode: defaultMode, at, steps: [], running: null, won: null, next_discovery_in_ms: null };
+    const live = report;
+    discovering = discoverLocalApi({
+      progress: (steps, running) => {
+        Object.assign(live, { steps, running });
+      },
+    }).finally(() => {
+      discovering = undefined;
+    });
+  }
+  const discovery = await discovering;
+  if (!envPinned && lastDiscovery?.discovery !== discovery) lastDiscovery = { discovery, at: Date.now(), validMs: rediscoverMs, backedOff: false };
+  return { discovery, cachedFor: undefined };
+}
+
 export async function callLocalApi(method: string, apiPath: string, options: LocalApiRequestOptions = {}): Promise<LocalApiCall> {
   const failures: string[] = [];
   const envPinned = process.env.NECTAR_TAILSCALE_SOCKET !== undefined && process.env.NECTAR_TAILSCALE_SOCKET !== "";
@@ -226,17 +429,25 @@ export async function callLocalApi(method: string, apiPath: string, options: Loc
     cachedEndpoint = undefined;
     failures.push(response);
   }
-  const discovery = await discoverLocalApi();
-  for (const endpoint of discovery.endpoints) {
+  const { discovery, cachedFor } = await currentDiscovery(envPinned);
+  for (const [index, endpoint] of discovery.endpoints.entries()) {
     if (first !== undefined && sameEndpoint(endpoint, first)) continue;
     const response = await attempt(endpoint, method, apiPath, options);
     if (typeof response !== "string") {
       cachedEndpoint = endpoint;
+      rediscoverMs = REDISCOVER_MIN_MS;
+      if (report !== undefined) report.won = { step: discoveryStepOf(discovery, index) ?? null, endpoint: describeEndpoint(endpoint) };
       return { ok: true, endpoint, response };
     }
     failures.push(response);
   }
-  return { ok: false, reason: `Tailscale LocalAPI unreachable: ${[...discovery.notes, ...failures].join("; ") || "nothing to try"}` };
+  if (lastDiscovery?.discovery === discovery && !lastDiscovery.backedOff) {
+    lastDiscovery.backedOff = true;
+    rediscoverMs = Math.min(rediscoverMs * 2, REDISCOVER_MAX_MS);
+  }
+  if (report !== undefined) report.won = null;
+  const reused = cachedFor === undefined || lastDiscovery === undefined ? [] : [`endpoints from the discovery ${seconds(cachedFor)} ago; the next discovery runs in ${seconds(Math.max(0, lastDiscovery.validMs - cachedFor))}`];
+  return { ok: false, reason: `Tailscale LocalAPI unreachable: ${[...discovery.notes, ...failures, ...reused].join("; ") || "nothing to try"}` };
 }
 
 export function bodyExcerpt(body: string): string {

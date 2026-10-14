@@ -295,8 +295,22 @@ describe.each<Transport>(["socket", "token port"])("tailnet listener over the Lo
     servers.splice(servers.indexOf(off.server), 1);
 
     const { b, tailnet } = await homes({ remote: { listen: true } }, "127.0.0.1");
-    const listening = await listenerCheck(getPaths(b), on);
-    expect(listening).toMatchObject({ name: "remote", status: "pass", listener: "listening", api: "localapi", address: `127.0.0.1:${process.env.NECTAR_REMOTE_PORT}` });
+    const discovery = {
+      mode: "service" as const,
+      at: "t",
+      steps: [
+        { step: "macsys" as const, outcome: "timeout" as const, ms: 3_000, found: 0 },
+        { step: "lsof" as const, outcome: "found" as const, ms: 9, found: 1 },
+      ],
+      running: null,
+      won: { step: "lsof" as const, endpoint: "127.0.0.1:1 (app-store sameuserproof)" },
+      next_discovery_in_ms: null,
+    };
+    const nectard = { api: 1, ops: [], nectar_home: b, pid: 1, remote: { listen: true, listening: true, address: "127.0.0.1", port: 1, last_error: null, whois: null, since: null, discovery } };
+    const listening = await listenerCheck(getPaths(b), on, { hello: () => Promise.resolve(nectard) });
+    expect(listening).toMatchObject({ name: "remote", status: "pass", listener: "listening", api: "localapi", address: `127.0.0.1:${process.env.NECTAR_REMOTE_PORT}`, nectard_discovery: discovery });
+    expect(listening.message).toContain("(nectard's service discovery: macsys timed out after 3s, lsof found 1 (answered))");
+    expect(listening).toHaveProperty("discovery");
     expect(listening.localapi).toEqual(transport === "socket" ? expect.stringMatching(/^unix:/) : expect.stringContaining("(app-store sameuserproof)"));
     expect(JSON.stringify(listening)).not.toContain(TOKEN);
     tailnet.identity = 500;
@@ -624,6 +638,7 @@ describe("tailnet listener startup", () => {
     state = "Running";
     const listening = await until(events, (event) => event.event === "remote_listen");
     expect(listening).toMatchObject({ address: "127.0.0.1", api: "localapi", whois: "ready" });
+    expect(listening.discovery).toBe("interactive discovery: env found 1 (answered)");
     expect(events.find((event) => event.event === "remote_status" && event.backend_state === "Running")).toMatchObject({ ipv4: "127.0.0.1" });
     expect(started.state()).toMatchObject({ listening: true, address: "127.0.0.1", last_error: null, whois: null });
     await started.close();
@@ -652,10 +667,16 @@ describe("tailnet listener startup", () => {
     await new Promise<void>((resolve) => hanging.listen(socket, resolve));
     servers.push({ close: () => new Promise<void>((resolve) => { hanging.closeAllConnections(); hanging.close(() => resolve()); }) });
     vi.stubEnv("NECTAR_TAILSCALE_SOCKET", socket);
-    const { events } = await listener({ deadlineMs: 100 });
+    const { events, listener: started } = await listener({ deadlineMs: 300 });
+    const waiting = started.state();
+    expect(waiting).toMatchObject({ listening: false, last_reason: null });
+    expect(waiting.last_error).toMatch(/^nectard has not finished its first tailnet status read \(\d+s so far; interactive discovery: /);
     const failed = await until(events, (event) => event.event === "remote_listen_failed");
-    expect(failed).toMatchObject({ reason: "status_timeout" });
-    expect(failed.message).toContain("did not finish within 0.1s");
+    expect(failed).toMatchObject({ reason: "status_timeout", discovery: { steps: [{ step: "env", outcome: "found" }] } });
+    expect(failed.message).toContain("did not finish within 0.3s");
+    expect(failed.message).toContain("interactive discovery: env found 1");
+    const shown = remoteStatus({ remote: { listen: true } } as never, { pid: 1, nectar_home: "/h", remote: started.state() });
+    expect(shown).toMatchObject({ listening: false, last_reason: "status_timeout", last_error: failed.message, discovery: { mode: "interactive" } });
   });
 
   it("logs a bind failure with its errno and listens once the port is free", async () => {
@@ -705,7 +726,7 @@ describe("tailnet listener startup", () => {
   it("puts listening, address and last_error in daemon status", () => {
     const on = { remote: { listen: true } } as never;
     const state = { listen: true, listening: true, address: "100.64.0.1", port: 8441, last_error: null, whois: null, since: null };
-    expect(remoteStatus(on, { pid: 1, nectar_home: "/h", remote: state })).toEqual({ listen: true, port: 8441, listening: true, address: "100.64.0.1", last_error: null });
+    expect(remoteStatus(on, { pid: 1, nectar_home: "/h", remote: state })).toEqual({ listen: true, port: 8441, listening: true, address: "100.64.0.1", last_error: null, last_reason: null, discovery: null });
     expect(remoteStatus(on, null)).toMatchObject({ listening: false, address: null, last_error: "nectard does not answer on its control socket" });
     expect(remoteStatus(on, { pid: 9, nectar_home: "/h", program: null, remote: null }).last_error).toContain("runs an older nectar build");
     expect(remoteStatus({ remote: { listen: false } } as never, null)).toMatchObject({ listen: false, listening: false, last_error: null });

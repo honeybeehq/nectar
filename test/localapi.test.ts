@@ -1,7 +1,7 @@
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { discoverLocalApi, parseLsofProofs, pinLocalApi, SERVE_CONFIG_ATTEMPTS, whoIs } from "../src/localapi.js";
+import { describeDiscovery, discoverLocalApi, discoveryReport, parseLsofProofs, pinLocalApi, readStatus, SERVE_CONFIG_ATTEMPTS, whoIs } from "../src/localapi.js";
 import { serveStatus, serveWeb, stopServe, tailnetStatus, traceTailscale } from "../src/tailscale.js";
 import { fakeExecutable, fakeLocalApi, tempDir, type FakeLocalApi } from "./helpers.js";
 
@@ -212,6 +212,8 @@ describe("LocalAPI discovery", () => {
     expect(await discoverLocalApi({ env: { NECTAR_TAILSCALE_SOCKET: "/x.sock" }, platform: "darwin", lsof: () => Promise.reject(new Error("unused")) })).toEqual({
       endpoints: [{ kind: "socket", socket: "/x.sock", source: "env" }],
       notes: [],
+      steps: [{ step: "env", outcome: "found", ms: 0, found: 1 }],
+      mode: "interactive",
     });
   });
 
@@ -252,6 +254,178 @@ describe("LocalAPI discovery", () => {
       expect(found.notes.join("\n")).toMatch(/cannot read .*io\.tailscale\.ipn\.macos: EACCES; macOS privacy protection/);
     } finally {
       await chmod(group, 0o755);
+    }
+  });
+});
+
+describe("LocalAPI discovery bounds", () => {
+  const container = "W5364U7YZB.io.tailscale.ipn.macos";
+  const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+  async function macsysDir(port = 50002): Promise<string> {
+    const macsys = await tempDir("macsys");
+    await symlink(String(port), path.join(macsys, "ipnport"));
+    await writeFile(path.join(macsys, `sameuserproof-${port}`), "abcdef\n");
+    return macsys;
+  }
+
+  async function homeWithContainer(): Promise<string> {
+    const home = await tempDir("home");
+    await mkdir(path.join(home, "Library", "Group Containers", container), { recursive: true });
+    return home;
+  }
+
+  function hangingReaddir(home: string, calls: string[]): (directory: string) => Promise<string[]> {
+    return (directory) => {
+      calls.push(directory);
+      return directory.startsWith(path.join(home, "Library")) ? never() : readdir(directory);
+    };
+  }
+
+  it("skips a group-container listing that never returns and still finds macsys within the bound", async () => {
+    const home = await homeWithContainer();
+    const macsys = await macsysDir();
+    const calls: string[] = [];
+    const options = { env: {}, platform: "darwin" as const, home, macsysDir: macsys, sockets: [], lsof: () => Promise.resolve(""), fs: { readdir: hangingReaddir(home, calls) }, stepTimeoutMs: 200 };
+    const started = Date.now();
+    const found = await discoverLocalApi(options);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(found.endpoints).toEqual([{ kind: "tcp", port: 50002, token: "abcdef", source: "macsys" }]);
+    expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
+      ["lsof", "none"],
+      ["group-container", "timeout"],
+      ["macsys", "found"],
+      ["socket", "none"],
+    ]);
+    expect(found.notes.join("\n")).toContain("group-container: did not finish within 0.2s, so it was skipped");
+
+    const again = await discoverLocalApi(options);
+    expect(again.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "stuck", ms: 0 });
+    expect(again.endpoints).toEqual(found.endpoints);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("kills an lsof that never exits and moves on to the next step", async () => {
+    const bin = await tempDir("lsof-bin");
+    const lsof = await fakeExecutable(bin, "lsof", `echo "$$" > "$(dirname "$0")/pid"\nexec sleep 30`);
+    const macsys = await macsysDir(50003);
+    const started = Date.now();
+    const found = await discoverLocalApi({ env: { NECTAR_TEST_LSOF_BIN: lsof }, platform: "darwin", home: await tempDir("home"), macsysDir: macsys, sockets: [], stepTimeoutMs: 300 });
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(found.steps[0]).toMatchObject({ step: "lsof", outcome: "timeout" });
+    expect(found.endpoints).toEqual([{ kind: "tcp", port: 50003, token: "abcdef", source: "macsys" }]);
+    const pid = Number((await readFile(path.join(bin, "pid"), "utf8")).trim());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("as a service tries macsys first and never lists the group container", async () => {
+    const home = await homeWithContainer();
+    const calls: string[] = [];
+    let lsofCalled = false;
+    const found = await discoverLocalApi({
+      env: {},
+      platform: "darwin",
+      mode: "service",
+      home,
+      macsysDir: await macsysDir(),
+      sockets: [],
+      lsof: () => {
+        lsofCalled = true;
+        return Promise.resolve("");
+      },
+      fs: { readdir: hangingReaddir(home, calls) },
+      stepTimeoutMs: 200,
+    });
+    expect(found.mode).toBe("service");
+    expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
+      ["macsys", "found"],
+      ["lsof", "none"],
+      ["group-container", "skipped"],
+      ["socket", "none"],
+    ]);
+    expect(found.endpoints[0]).toMatchObject({ source: "macsys" });
+    expect(lsofCalled).toBe(true);
+    expect(calls).toEqual([]);
+    expect(found.notes.join("\n")).toContain("a prompt nobody can answer");
+  });
+
+  it("keeps the whole discovery inside its budget when every step hangs", async () => {
+    const home = await homeWithContainer();
+    const started = Date.now();
+    const found = await discoverLocalApi({
+      env: {},
+      platform: "darwin",
+      home,
+      macsysDir: "/nonexistent",
+      sockets: [],
+      lsof: () => never(),
+      fs: { readdir: () => never(), readlink: () => never() },
+      stepTimeoutMs: 300,
+      budgetMs: 500,
+    });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
+      ["lsof", "timeout"],
+      ["group-container", "timeout"],
+      ["macsys", "skipped"],
+      ["socket", "skipped"],
+    ]);
+  });
+
+  it("caches the discovery in the process, backs off before discovering again, and reports which step answered", async () => {
+    const api = await fakeLocalApi({ tcp: true }, { token: "abcdef" });
+    servers.push(api);
+    const bin = await tempDir("lsof-bin");
+    const lsof = await fakeExecutable(bin, "lsof", `echo run >> "$(dirname "$0")/runs"`);
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", "");
+    vi.stubEnv("NECTAR_TEST_DISCOVERY_PLATFORM", "darwin");
+    vi.stubEnv("NECTAR_TEST_LSOF_BIN", lsof);
+    vi.stubEnv("NECTAR_TEST_MACSYS_DIR", await macsysDir(api.port));
+    vi.stubEnv("HOME", await tempDir("home"));
+    const runs = async (): Promise<number> => (await readFile(path.join(bin, "runs"), "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+
+    const [first, second] = await Promise.all([readStatus(), readStatus()]);
+    expect(first).toMatchObject({ ok: true, endpoint: { source: "macsys" } });
+    expect(second).toMatchObject({ ok: true, endpoint: { source: "macsys" } });
+    const report = discoveryReport();
+    expect(report).toMatchObject({ mode: "interactive", won: { step: "macsys", endpoint: `127.0.0.1:${api.port} (macsys sameuserproof)` }, running: null });
+    expect(describeDiscovery(report)).toContain("macsys found 1 (answered)");
+    expect(JSON.stringify(report)).not.toContain("abcdef");
+    expect(await runs()).toBe(1);
+
+    await api.close();
+    servers.splice(servers.indexOf(api), 1);
+    const down = await readStatus();
+    expect(down).toMatchObject({ ok: false, reachable: false });
+    expect(await runs()).toBe(1);
+    const again = await readStatus();
+    expect(again.ok ? "" : again.reason).toMatch(/endpoints from the discovery .* ago; the next discovery runs in/);
+    expect(await runs()).toBe(1);
+    expect(discoveryReport()).toMatchObject({ won: null });
+    expect(discoveryReport()?.next_discovery_in_ms).toBeGreaterThan(0);
+    expect(discoveryReport()?.next_discovery_in_ms).toBeLessThanOrEqual(30_000);
+  });
+
+  it("backs off once per failed discovery, however many callers shared it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.stubEnv("NECTAR_TAILSCALE_SOCKET", "");
+      vi.stubEnv("NECTAR_TEST_DISCOVERY_PLATFORM", "darwin");
+      vi.stubEnv("NECTAR_TEST_LSOF_BIN", await fakeExecutable(await tempDir("lsof-bin"), "lsof", "exit 0"));
+      vi.stubEnv("NECTAR_TEST_MACSYS_DIR", await tempDir("no-macsys"));
+      vi.stubEnv("HOME", await tempDir("home"));
+      const discover = (): Promise<unknown> => Promise.all([readStatus(), readStatus(), readStatus()]);
+      await discover();
+      expect(discoveryReport()?.next_discovery_in_ms).toBe(30_000);
+      vi.setSystemTime(Date.now() + 30_000);
+      await discover();
+      expect(discoveryReport()?.next_discovery_in_ms).toBe(60_000);
+      vi.setSystemTime(Date.now() + 60_000);
+      await discover();
+      expect(discoveryReport()?.next_discovery_in_ms).toBe(120_000);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -77,7 +77,8 @@ there. Entries pointing elsewhere, and Portless, are reported and left alone (SP
 `systemd --user` unit: run `loginctl enable-linger $USER` once so it starts at boot without
 a login. On macOS it is a launchd agent in `~/Library/LaunchAgents`. Idle, it is one Node
 process of ~60–90 MB RSS (systemd's cgroup accounting shows ~27 MB). Its log is
-`~/.nectar/logs/nectard.log`. While it runs, nectard also sits between `tailscale serve`
+`~/.nectar/logs/nectard.log`; it records every failed tailscale call as a `tailscale` line,
+and every call when `NECTAR_DEBUG=1`. While it runs, nectard also sits between `tailscale serve`
 and each web preview (a small proxy on one extra loopback port per env), so a person
 opening the mesh URL in a browser extends the preview's lifetime the same way `nectar open`
 does. Uninstalling it points the mesh URLs straight back at the apps.

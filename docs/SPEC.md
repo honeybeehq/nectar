@@ -349,14 +349,19 @@ tailnet port range whose loopback target is dead, §10.2.)
     (else `HIVE_BEE_ID` when `HIVE_BEE` names the bee) and `cell` from `NECTAR_CELL`, or,
     when `HIVE_CELL` is set, the parent of the working directory's `HIVE_CELL_SPACE`
     ancestor (the Cell root, e.g. `~/.hive/v2/cells/<cell>`).
+  - A publish through nectard returns the CLI's result plus `via: "nectard"`.
   - Logs: one `control` event per `publish`/`rm`/`stop`/`touch` and per failed request.
   - On SIGTERM nectard stops accepting connections and waits up to 15 s for requests in
     flight before closing them, inside launchd's default 20 s exit timeout and systemd's 90 s. A publish cut off after that is left as an interrupted
     local publish would be (`rm --force` cleans it up).
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
-  touch, gc, error), one JSON line each, go to
+  touch, gc, tailscale, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
-  Quiet cycles write nothing.
+  Quiet cycles write nothing. A `tailscale` event is written for every failed tailscale
+  call nectard makes (status, serve, serve status): `{ok, binary, source, argv, exit_code,
+  signal, stderr, duration_ms, cause}`, with `stderr` cut to 500 characters. With
+  `NECTAR_DEBUG=1` (in the unit's environment or the CLI's) every call is logged, including
+  the CLI's own direct calls, which add `by: "cli"` and `pid`.
 
 Service units (`nectar daemon install`; `uninstall` is the one removal command; `status`):
 
@@ -394,6 +399,9 @@ re-pointing, gc, doctor, expose, the pack store, remote refs) uses one resolver,
 order: `NECTAR_TAILSCALE_BIN`; `tailscale` on `PATH`; the Mac app's CLI
 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`; `/opt/homebrew/bin/tailscale`;
 `/usr/local/bin/tailscale`. `nectar doctor` names the binary it used and where it came from.
+Nectar runs the CLI with its own environment minus launchd's job identity (`XPC_SERVICE_NAME`,
+`XPC_FLAGS`), so a CLI started from nectard's launchd agent sees what it sees in a login
+shell. `tailscale status --json` and `serve status --json` get 15 s, `serve` changes 20 s.
 
 ## 5. Recipes — `nectar.toml`
 
@@ -1025,6 +1033,8 @@ nectar daemon install | uninstall | status [--json]
 nectar daemon run [--interval 30s] [--gc-interval 1h]
     # nectard (§4.5). install writes and starts the launchd agent / systemd --user unit;
     # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
+    # on macOS it waits up to 25 s until launchctl print no longer finds the agent and
+    # reports unloaded and waited_ms (a warning if it is still loaded);
     # run is the foreground supervisor the unit starts. status adds socket (the control
     # socket path) and control (nectard's hello: api, pid, nectar_home, ops; null when
     # nothing answers there).
@@ -1078,7 +1088,10 @@ nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
 output when it refused the mesh entry, else null. The warning quotes it. When tailscaled
 denied the change ("Access denied: serve config denied"), the warning says this user is not a
 Tailscale operator and to run `sudo tailscale set --operator=$USER` once. Nectar never runs
-sudo. "tailscale unavailable or logged out" is reserved for a tailnet that is down.
+sudo. When Nectar could not get a tailnet name at all, the warning is "tailscale unavailable:
+<cause>" and `mesh_error` is that cause: the binary and its source, and why the call failed
+(exit code and stderr, a signal, a timeout, output that is not status JSON, or a
+`BackendState` other than `Running`).
 
 `result.packet_fields` is the ergonomic core: **the exact strings to copy onto the Forum
 packet**, keyed with Forum's snake_case names. Desktop publish fills `testpack_ref`

@@ -172,7 +172,7 @@ describe("nectard control socket", () => {
   });
 
   it("serves only Nectar's own operations with checked arguments and the same NECTAR_HOME", async () => {
-    const { home, socket } = await setup();
+    const { home, socket, cell, site } = await setup();
     expect(await handleRequest("doctor", { nectar_home: home, args: {} }, getPaths(home), socket)).toMatchObject({ ok: false, error: { code: "E_USAGE" } });
     expect(await handleRequest("ls", { nectar_home: home, args: { cmd: "id" } }, getPaths(home), socket)).toMatchObject({ ok: false, error: { code: "E_USAGE" } });
     expect(await handleRequest("ls", { nectar_home: home, args: JSON.parse('{"__proto__":{}}') as unknown }, getPaths(home), socket)).toMatchObject({
@@ -184,6 +184,14 @@ describe("nectard control socket", () => {
       error: { code: "E_USAGE" },
     });
     expect(await handleRequest("ls", { nectar_home: home, caller: { evil: "x" }, args: {} }, getPaths(home), socket)).toMatchObject({ ok: false });
+    expect(await handleRequest("publish", { nectar_home: home, caller: { cell }, args: { path: site, fresh: "yes" } }, getPaths(home), socket)).toMatchObject({
+      ok: false,
+      error: { code: "E_USAGE" },
+    });
+    expect(await handleRequest("publish", { nectar_home: home, caller: { cell }, args: { path: site, fresh: true, dry_run: true } }, getPaths(home), socket)).toMatchObject({
+      ok: true,
+      result: { dry_run: true },
+    });
     expect(await handleRequest("ls", { nectar_home: "/elsewhere", args: {} }, getPaths(home), socket)).toMatchObject({
       ok: false,
       command: "ls",

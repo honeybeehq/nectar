@@ -1146,6 +1146,7 @@ export class NectarService {
         if (Object.keys(postgresServices(record.deps, secrets)).length > 0) {
           await this.composeUpDeps(record.name, record.deps, secrets).catch(() => undefined);
         }
+        if (newLocal.length > 0) await this.stopIdleClusters();
         throw error;
       }
     }

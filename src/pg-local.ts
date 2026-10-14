@@ -251,7 +251,12 @@ export interface EnsureOptions {
 
 export async function ensureCluster(root: string, install: PgInstall, options: EnsureOptions): Promise<number> {
   const files = clusterFiles(root, install.major);
-  if (!existsSync(path.join(files.data, "PG_VERSION")) || !existsSync(files.password)) await initCluster(files, install);
+  if (!existsSync(path.join(files.data, "PG_VERSION"))) await initCluster(files, install);
+  else if (!existsSync(files.password)) {
+    throw new NectarError("E_DEPS", `The local Postgres ${install.major} cluster at ${files.data} has data but no ${files.password}; Nectar will not touch it`, {
+      hint: `Restore the file, or set a new password for the superuser "${PG_SUPERUSER}" yourself (for example with postgres --single) and write it there with mode 0600. Removing ${files.dir} yourself drops every env database in it`,
+    });
+  }
   const state = await readState(files);
   if (state.port !== undefined && (await clusterRunning(root, install))) return state.port;
   const port = await options.lockPorts(async (allocate) => {

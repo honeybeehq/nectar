@@ -643,8 +643,12 @@ from the published branch, as for `[web]`.
     the pin and the major it got. There is no strict mode: `provider = "docker"` is how a
     repo insists on the exact image. A dep keeps its major across republishes; if those
     binaries disappear, publish and revive fail `E_PLATFORM` until they come back or
-    `--fresh` recreates the dep on another major.
-  - *Cluster.* `initdb` runs once into `<NECTAR_HOME>/pg/<major>/data` with superuser
+    `--fresh` recreates the dep on another major (with a warning that the old database
+    stays in the old cluster). `rm`, gc cold and reap also fail `E_PLATFORM` for that env
+    until the binaries are back, as they do without Docker, rather than forget a database
+    they could not drop.
+  - *Cluster.* `initdb` runs once, only while `data/PG_VERSION` does not exist, into
+    `<NECTAR_HOME>/pg/<major>/data` with superuser
     `nectar`, a generated password in `pg/<major>/superuser.password` (0600),
     `scram-sha-256` auth, UTF8 and no locale. `pg_hba.conf` is replaced by the single line
     `host all all 127.0.0.1/32 scram-sha-256`. `postgresql.conf` includes `nectar.conf`,
@@ -654,7 +658,8 @@ from the published branch, as for `[web]`.
     machine ports lock, is kept in `pg/<major>/cluster.json`, and is reserved by every env
     record that points at the cluster. `pg_ctl start -w` starts it with the server log at
     `pg/<major>/server.log`. Every start revokes `CONNECT` and `TEMPORARY` on `postgres` and
-    `template1` from `PUBLIC`.
+    `template1` from `PUBLIC`. A data dir whose `superuser.password` is missing fails
+    `E_DEPS` and is never re-initialised or removed by Nectar.
   - *Per env.* The role and the database are both named
     `nectar_<env>_<dep>_<hash>`: the env and dep names with every run of characters outside
     `[a-z0-9]` turned into `_`, cut so the whole name fits Postgres's 63 bytes, plus the
@@ -681,7 +686,8 @@ from the published branch, as for `[web]`.
     the role and database before it spawns the app. A publish whose new local database
     cannot be created drops what it created and restores the previous deps record (`E_DEPS`).
   - *Cluster stop.* After `rm`, gc cold or reap removes an env's local databases, Nectar
-    stops (`pg_ctl stop -m fast`) every cluster that no env record points at any more.
+    stops (`pg_ctl stop -m fast`) every cluster that no env record points at any more; a
+    failed first publish that started a cluster does the same.
     While any env, including an expired one, has a database in it, the cluster keeps
     running: an idle Postgres costs a few tens of MB and no CPU, and a running cluster
     keeps its reserved port in use. The start, the create and the stop decision hold a

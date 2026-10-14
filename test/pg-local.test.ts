@@ -329,6 +329,29 @@ describe("[deps] lifecycle with fake local postgres tools", () => {
     await service.remove(env, true);
   });
 
+  it("refuses, and never wipes, a cluster whose superuser password file is gone", async () => {
+    const { service, state, log } = await harness();
+    const repo = await localRepo(path.join(await tempDir("pg-seeds"), "seeds.log"));
+    const first = await service.publish({ repo, ttl: "1h" });
+    services[0]?.envs.push(first.env as string);
+    const cluster = path.join(state, "pg", "18");
+    await writeFile(path.join(cluster, "data", "user-data"), "precious");
+    await rm(path.join(cluster, "superuser.password"));
+    await rm(path.join(cluster, "data", "fake-running"));
+    await expect(service.publish({ repo, ttl: "1h", name: "shop-two" })).rejects.toMatchObject({ code: "E_DEPS", message: expect.stringContaining("has data but no") as string });
+    expect(await readFile(path.join(cluster, "data", "user-data"), "utf8")).toBe("precious");
+    expect(await count(log, /^initdb/)).toBe(1);
+  });
+
+  it("stops a cluster it started for a first publish that failed", async () => {
+    const { service, log } = await harness();
+    await writeFile(`${log}.fail`, "1");
+    const repo = await localRepo(path.join(await tempDir("pg-seeds"), "seeds.log"));
+    await expect(service.publish({ repo, ttl: "1h" })).rejects.toMatchObject({ code: "E_DEPS" });
+    expect(await count(log, /^pg_ctl start 18$/)).toBe(1);
+    expect(await count(log, /^pg_ctl stop 18$/)).toBe(1);
+  });
+
   it("redacts a local dep's password in show output", () => {
     const deps = redactedDeps({
       db: { kind: "postgres", env: "DATABASE_URL", provider: "local", major: 18, port: 4900, database: "nectar_a_b_0123abcd", user: "nectar_a_b_0123abcd", created_at: "" },

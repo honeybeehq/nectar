@@ -334,6 +334,24 @@ describe("supervisor against the real service", () => {
     expect(pointed).toHaveLength(1);
   });
 
+  it("revives without re-pointing its tailnet port once something else took that port over", async () => {
+    const { service, tailscaleLog, repo } = await liveHarness();
+    const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };
+    cleanups.push(async () => void (await service.stop(published.env)));
+    const before = await service.store.readEnv(published.env);
+    vi.stubEnv(
+      "FAKE_TS_SERVE_STATUS",
+      JSON.stringify({ Web: { [`fixture.tailtest.ts.net:${before.serve?.tailnet_port}`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:3000" } } } } }),
+    );
+    await stopProcessGroup(before.serve?.pgid ?? 0);
+    await new Supervisor(service).sweep(false);
+    const after = await service.store.readEnv(published.env);
+    expect(after.status).toBe("serving");
+    expect(after.urls.mesh).toBeNull();
+    const pointed = (await readFile(tailscaleLog, "utf8")).split("\n").filter((line) => line.includes(`--https=${before.serve?.tailnet_port}`));
+    expect(pointed).toHaveLength(1);
+  });
+
   it("restarting an unhealthy env never signals a recorded pid that is not the env's own process", async () => {
     const { service, repo } = await liveHarness();
     const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };

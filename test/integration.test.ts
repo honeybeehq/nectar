@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
 import { extractTestpack } from "../src/testpack.js";
-import { fakeExecutable, fakeTailscale, initGitRepo, record, tempDir } from "./helpers.js";
+import { fakeExecutable, fakeServiceManager, fakeTailscale, initGitRepo, record, statefulTailscale, tempDir } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -29,6 +29,7 @@ async function harness(): Promise<{
   const state = await tempDir("integration-state");
   const fakeDir = await tempDir("integration-bin");
   const tailscale = await fakeTailscale(fakeDir);
+  await fakeServiceManager(fakeDir);
   const launchLog = path.join(fakeDir, "launch.log");
   const launcher = await fakeExecutable(fakeDir, "launch", `printf '%s\\n' "$*" >> "$FAKE_LAUNCH_LOG"`);
   const trash = await fakeExecutable(fakeDir, "trash", `for target in "$@"; do mv "$target" "$target.trash.$$"; done`);
@@ -838,22 +839,20 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
   });
 
   it("doctor fixes only 8440 and flags a planted 443 conflict", async () => {
-    const { service, tailscaleLog } = await harness();
+    const { service, fakeDir } = await harness();
+    const tailscale = await statefulTailscale(fakeDir);
     const fixed = await service.doctor({ fix: true });
     expect(fixed.healthy).toBe(true);
     expect(fixed.checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: "pack-store-8440", status: "pass", fixed: true })]));
     // Doctor persists the port it actually started the pack server on (the configured
     // one when free, otherwise allocated) — assert against that, not a constant.
     const config = await service.store.readConfig();
-    const log = await readFile(tailscaleLog, "utf8");
+    const log = await readFile(tailscale.log, "utf8");
     expect(log).toContain(`serve --bg --yes --https=8440 http://127.0.0.1:${config.pack_server_port}`);
     expect(log).not.toContain("--https=443");
     expect(log).not.toContain("funnel");
 
-    vi.stubEnv(
-      "FAKE_TS_SERVE_STATUS",
-      JSON.stringify({ AllowFunnel: { "8440": true }, Web: { "fixture:443": {}, "fixture:8440": {} } }),
-    );
+    await writeFile(tailscale.state, JSON.stringify({ AllowFunnel: { "8440": true }, Web: { "fixture:443": {}, "fixture:8440": {} } }));
     const conflicted = await service.doctor();
     expect(conflicted.healthy).toBe(false);
     const checks = conflicted.checks as Array<{ name: string; status: string; message: string }>;
@@ -904,16 +903,16 @@ exit 1
   });
 
   it("reports dead loopback Serve entries and cleans them through doctor --fix and gc", async () => {
-    const { service, tailscaleLog } = await harness();
-    vi.stubEnv(
-      "FAKE_TS_SERVE_STATUS",
-      JSON.stringify({
+    const { service, fakeDir } = await harness();
+    const tailscale = await statefulTailscale(
+      fakeDir,
+      {
         Web: {
           "fixture.tailtest.ts.net:8601": {
             Handlers: { "/": { Proxy: "http://127.0.0.1:4598" } },
           },
         },
-      }),
+      },
     );
     const diagnosed = await service.doctor();
     expect(diagnosed.healthy).toBe(false);
@@ -926,7 +925,7 @@ exit 1
     expect(fixed.checks).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "serve-orphans", status: "pass", fixed: true })]),
     );
-    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8601 off");
+    expect(await readFile(tailscale.log, "utf8")).toContain("serve --https=8601 off");
 
     const orphanEnv = record({
       name: "fixture-orphan--main--web",
@@ -940,8 +939,8 @@ exit 1
       urls: { local: "http://127.0.0.1:4597", mesh: "https://fixture.tailtest.ts.net:8602" },
     });
     await service.store.writeEnv(orphanEnv);
-    vi.stubEnv(
-      "FAKE_TS_SERVE_STATUS",
+    await writeFile(
+      tailscale.state,
       JSON.stringify({
         Web: {
           "fixture.tailtest.ts.net:8602": {
@@ -968,7 +967,7 @@ exit 1
     });
     expect(cleaned.failure?.message).toContain(":8602");
     expect(cleaned.serve).toBeUndefined();
-    expect(await readFile(tailscaleLog, "utf8")).toContain("serve --https=8602 off");
+    expect(await readFile(tailscale.log, "utf8")).toContain("serve --https=8602 off");
   });
 
   it("resolves a mode-qualified remote ref through tailscale ssh and reports F9", async () => {

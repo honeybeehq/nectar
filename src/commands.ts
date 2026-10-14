@@ -144,6 +144,25 @@ export function groupAlive(pgid: number): boolean {
   }
 }
 
+export async function groupBelongsToEnv(pgid: number, env: string): Promise<boolean> {
+  if (!groupAlive(pgid)) return false;
+  if (await processBelongsToEnv(pgid, env)) return true;
+  const listed = await runCommand("ps", ["-A", "-o", "pid=,pgid="], { timeoutMs: 5_000 }).catch(() => undefined);
+  const members = (listed?.stdout ?? "")
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/).map(Number))
+    .filter(([pid, group]) => group === pgid && pid !== pgid && pid !== undefined && Number.isInteger(pid))
+    .map(([pid]) => pid as number);
+  for (const pid of members) if (await processBelongsToEnv(pid, env)) return true;
+  return false;
+}
+
+export async function stopEnvGroup(pgid: number, env: string): Promise<boolean> {
+  if (!(await groupBelongsToEnv(pgid, env))) return false;
+  await stopProcessGroup(pgid);
+  return true;
+}
+
 export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<void> {
   const groupAlive = (): boolean => {
     try {

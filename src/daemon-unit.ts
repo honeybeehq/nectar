@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { constants } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { pidAlive, runCommand } from "./commands.js";
 import { daemonLogFile, runningDaemonPid } from "./daemon.js";
@@ -28,6 +29,18 @@ export function unitPath(platform: NodeJS.Platform = process.platform): string {
   if (unitPlatform(platform) === "darwin") return path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
   const config = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
   return path.join(config, "systemd", "user", SYSTEMD_UNIT);
+}
+
+export async function onPath(name: string, searchPath = process.env.PATH ?? ""): Promise<boolean> {
+  for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
+    try {
+      await access(path.join(directory, name), constants.X_OK);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 export function unitSpec(paths: NectarPaths, platform: NodeJS.Platform = process.platform, lookup: TailscaleLookup = {}): UnitSpec {
@@ -108,6 +121,61 @@ StandardOutput=null
 [Install]
 WantedBy=default.target
 `;
+}
+
+export interface InstalledUnit {
+  file: string;
+  program: string[];
+  env: Record<string, string>;
+}
+
+function unescapeQuoted(value: string, exec: boolean): string {
+  const unpercent = value.replace(/%%/g, "%");
+  return (exec ? unpercent.replace(/\$\$/g, "$") : unpercent).replace(/\\(.)/g, "$1");
+}
+
+function quotedWords(line: string): string[] {
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1] ?? "");
+}
+
+export function parseSystemdUnit(text: string): Omit<InstalledUnit, "file"> {
+  const env: Record<string, string> = {};
+  let program: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("ExecStart=")) program = quotedWords(line).map((word) => unescapeQuoted(word, true));
+    if (line.startsWith("Environment=")) {
+      for (const word of quotedWords(line)) {
+        const pair = unescapeQuoted(word, false);
+        const split = pair.indexOf("=");
+        if (split > 0) env[pair.slice(0, split)] = pair.slice(split + 1);
+      }
+    }
+  }
+  return { program, env };
+}
+
+function unxml(value: string): string {
+  return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+}
+
+export function parseLaunchdPlist(text: string): Omit<InstalledUnit, "file"> {
+  const strings = (block: string | undefined): string[] =>
+    [...(block ?? "").matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1] ?? ""));
+  const program = strings(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1]);
+  const env: Record<string, string> = {};
+  const block = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(text)?.[1] ?? "";
+  for (const match of block.matchAll(/<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/g)) {
+    env[unxml(match[1] ?? "")] = unxml(match[2] ?? "");
+  }
+  return { program, env };
+}
+
+export async function readInstalledUnit(platform: NodeJS.Platform = process.platform): Promise<InstalledUnit | undefined> {
+  const kind = unitPlatform(platform);
+  const file = unitPath(kind);
+  const text = await readFile(file, "utf8").catch(() => undefined);
+  if (text === undefined) return undefined;
+  return { file, ...(kind === "darwin" ? parseLaunchdPlist(text) : parseSystemdUnit(text)) };
 }
 
 function launchctl(): string {
@@ -252,11 +320,23 @@ async function daemonState(
   }
 }
 
+export interface UnitStatus {
+  installed: boolean;
+  platform: UnitPlatform;
+  unit: string;
+  active: string;
+  pid: number | null;
+  pid_source: string | null;
+  nectar_home: string;
+  last_gc_at: string | null;
+  log: string;
+}
+
 export async function unitStatus(
   paths: NectarPaths,
   platform: NodeJS.Platform = process.platform,
   options: { waitMs?: number } = {},
-): Promise<Record<string, unknown>> {
+): Promise<UnitStatus> {
   const kind = unitPlatform(platform);
   const file = unitPath(kind);
   const installed = await exists(file);

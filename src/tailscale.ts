@@ -8,9 +8,14 @@ export interface TailnetIdentity {
   dnsName: string;
 }
 
-export interface ServeProxyEntry {
+export interface ServeEntry {
   tailnetPort: number;
   target: string;
+  mount?: string;
+  service?: string;
+}
+
+export interface LoopbackUpstream {
   upstreamHost: string;
   upstreamPort: number;
 }
@@ -130,7 +135,7 @@ function portFromServeKey(key: string): number | undefined {
   return port > 0 && port <= 65_535 ? port : undefined;
 }
 
-function loopbackProxy(value: string): Omit<ServeProxyEntry, "tailnetPort" | "target"> | undefined {
+export function loopbackProxy(value: string): LoopbackUpstream | undefined {
   let url: URL;
   try {
     url = new URL(value);
@@ -145,29 +150,40 @@ function loopbackProxy(value: string): Omit<ServeProxyEntry, "tailnetPort" | "ta
   return { upstreamHost: host, upstreamPort: port };
 }
 
-export function serveProxyEntries(status: unknown): ServeProxyEntry[] {
-  const found = new Map<string, ServeProxyEntry>();
-  const walk = (value: unknown, inheritedPort?: number): void => {
+export function serveEntries(status: unknown): ServeEntry[] {
+  const found = new Map<string, ServeEntry>();
+  const walk = (value: unknown, scope: { port: number | undefined; mount: string | undefined; service: string | undefined; parent: string | undefined }): void => {
     if (Array.isArray(value)) {
-      for (const item of value) walk(item, inheritedPort);
+      for (const item of value) walk(item, scope);
       return;
     }
     if (typeof value !== "object" || value === null) return;
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      const tailnetPort = portFromServeKey(key) ?? inheritedPort;
-      if (typeof child === "string" && tailnetPort !== undefined) {
-        const upstream = loopbackProxy(child);
-        if (upstream !== undefined) {
-          const entry = { tailnetPort, target: child, ...upstream };
-          found.set(`${entry.tailnetPort}\0${entry.target}`, entry);
-        }
+      const next = {
+        port: portFromServeKey(key) ?? scope.port,
+        mount: key.startsWith("/") ? key : scope.mount,
+        service: scope.service ?? (scope.parent === "Services" ? key : undefined),
+        parent: key,
+      };
+      if (typeof child === "string" && next.port !== undefined) {
+        const entry: ServeEntry = {
+          tailnetPort: next.port,
+          target: child,
+          ...(next.mount === undefined ? {} : { mount: next.mount }),
+          ...(next.service === undefined ? {} : { service: next.service }),
+        };
+        found.set(`${entry.tailnetPort}\0${entry.service ?? ""}\0${entry.mount ?? ""}\0${child}`, entry);
       } else {
-        walk(child, tailnetPort);
+        walk(child, next);
       }
     }
   };
-  walk(status);
+  walk(status, { port: undefined, mount: undefined, service: undefined, parent: undefined });
   return [...found.values()].sort((a, b) => a.tailnetPort - b.tailnetPort || a.target.localeCompare(b.target));
+}
+
+export function rootMount(entry: ServeEntry): boolean {
+  return entry.service === undefined && (entry.mount ?? "/") === "/";
 }
 
 export function statusHasPort(status: unknown, port: number): boolean {

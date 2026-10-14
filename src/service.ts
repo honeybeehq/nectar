@@ -9,12 +9,14 @@ import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.j
 import {
   currentPublisher,
   pidAlive,
+  groupBelongsToEnv,
   processBelongsToEnv,
   runCommand,
   runShell,
   scrubbedEnvironment,
   spawnDetached,
   spawnDetachedExecutable,
+  stopEnvGroup,
   stopProcessGroup,
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
@@ -26,10 +28,12 @@ import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
 import { logTail, prepareLog } from "./logs.js";
 import {
+  loopbackProxy,
   remoteNectar,
   resolveTailscale,
+  rootMount,
+  serveEntries,
   servePackStore,
-  serveProxyEntries,
   serveStatus,
   serveWeb,
   statusHasFunnel,
@@ -39,11 +43,22 @@ import {
   stopServe,
   TAILSCALE_FALLBACKS,
   tailnetIdentity,
-  type ServeProxyEntry,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
-import { hasProbeableServe, holdsRuntime, portAnswers, probeLiveness } from "./liveness.js";
+import { givenUp, hasProbeableServe, holdsRuntime, portAnswers, probeLiveness } from "./liveness.js";
+import {
+  classifyServeEntry,
+  commandTools,
+  guardSharedPorts,
+  inTailnetRange,
+  serveEntryOwner,
+  type ClassifiedServeEntry,
+  type DoctorAction,
+  type DoctorCheck,
+} from "./doctor.js";
+import { installUnit, onPath, readInstalledUnit, unitSpec, unitStatus } from "./daemon-unit.js";
+import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, type StaticSite } from "./static-site.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
@@ -69,6 +84,7 @@ import type {
   DesktopRecipe,
   DevRecipe,
   EnvRecord,
+  EnvStatus,
   IosRecipe,
   MachineConfig,
   Mode,
@@ -76,6 +92,7 @@ import type {
   PacketFields,
   Recipe,
   ResolveResult,
+  ServeRecord,
   TestpackManifest,
   WebRecipe,
 } from "./types.js";
@@ -117,15 +134,57 @@ export interface ReviveResult {
   mesh?: boolean;
 }
 
-interface ServeOrphan extends ServeProxyEntry {
-  env?: string;
-  direct?: string;
+interface GcReport {
+  dry_run: boolean;
+  transitions: Array<{ env: string; action: GcTransition }>;
+  serve_orphans: Array<{ tailnet_port: number; target: string; env: string | null; reason: string; fixed: boolean; direct?: string }>;
+  skipped: Array<{ env: string; reason: string }>;
+  packs_pruned: Array<{ file: string; size_bytes: number }>;
+  staging_pruned: string[];
+  evidence_pruned: string[];
+  ran_at: string;
 }
+
+interface DeadHolder {
+  env: string;
+  status: EnvStatus;
+  expires_at: string;
+  process: boolean;
+  pgid: number;
+  serve_entry: number | null;
+}
+
+interface NectardState {
+  problem?: "missing" | "other-home" | "stale" | "inactive";
+  facts?: Record<string, unknown>;
+  check?: DoctorCheck;
+  unitPath?: string;
+}
+
+interface Diagnosis {
+  healthy: boolean;
+  checks: DoctorCheck[];
+  config: MachineConfig;
+  online: boolean;
+  funnelOn: boolean;
+  gcPlan: GcReport;
+  gcOverdue: boolean;
+  holders: DeadHolder[];
+  nectard: NectardState;
+  packServerLive: boolean;
+  proxyPresent: boolean;
+}
+
+const DEAD_STATUSES: ReadonlySet<EnvStatus> = new Set(["expired", "cold", "stopped", "crashed"]);
 
 function staticWebRecipe(): WebRecipe {
   const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
   const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
   return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
+}
+
+function ownsLoopbackPort(serve: ServeRecord | undefined, port: number | undefined): boolean {
+  return port !== undefined && (serve?.upstream_port === port || serve?.proxy_port === port);
 }
 
 function loopbackPorts(records: EnvRecord[]): Set<number> {
@@ -437,9 +496,7 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      const stops: Array<Promise<unknown>> = [stopProcessGroup(record.serve.pgid)];
-      if (record.serve.tailnet_port !== undefined) stops.push(stopServe(record.serve.tailnet_port));
-      await Promise.all(stops);
+      await Promise.all([stopEnvGroup(record.serve.pgid, record.name), this.releaseServeEntry(record.serve)]);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
   }
@@ -448,7 +505,7 @@ export class NectarService {
     const cleanupErrors: string[] = [];
     if (record.serve !== undefined) {
       const owned = record.serve;
-      const processCleanup = await Promise.resolve(stopProcessGroup(owned.pgid)).then(
+      const processCleanup = await Promise.resolve(stopEnvGroup(owned.pgid, record.name)).then(
         () => ({ ok: true as const }),
         (error: unknown) => ({ ok: false as const, error }),
       );
@@ -456,12 +513,16 @@ export class NectarService {
         cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.error)}`);
       }
       if (owned.tailnet_port !== undefined) {
-        const serveCleanup = await Promise.resolve(stopServe(owned.tailnet_port)).then(
-          (removed) => ({ ok: removed }),
-          () => ({ ok: false }),
-        );
-        if (!serveCleanup.ok) {
-          cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+        if (await this.foreignServeAt(owned)) {
+          cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: points at a target Nectar did not create; left alone`);
+        } else {
+          const serveCleanup = await Promise.resolve(stopServe(owned.tailnet_port)).then(
+            (removed) => ({ ok: removed }),
+            () => ({ ok: false }),
+          );
+          if (!serveCleanup.ok) {
+            cleanupErrors.push(`tailscale serve :${owned.tailnet_port}: could not confirm removal`);
+          }
         }
       }
     }
@@ -485,43 +546,59 @@ export class NectarService {
     await this.store.writeEnv(record);
   }
 
-  private async deadServeProxies(status: unknown, config: MachineConfig): Promise<ServeOrphan[]> {
-    const records = await this.store.listEnvs();
-    const candidates = serveProxyEntries(status).filter(
-      (entry) =>
-        entry.tailnetPort >= config.tailnet_port_start &&
-        entry.tailnetPort <= config.tailnet_port_end &&
-        entry.tailnetPort !== 8440,
-    );
-    const inspected = await Promise.all(
-      candidates.map(async (entry): Promise<ServeOrphan | undefined> => {
-        const open =
-          entry.upstreamHost === "localhost"
-            ? await portAnswers(entry.upstreamPort)
-            : await portOpenOnHost(entry.upstreamPort, entry.upstreamHost);
-        if (open) return undefined;
-        const owner = records.find((record) => record.serve?.tailnet_port === entry.tailnetPort);
-        const direct =
-          owner?.serve?.proxy_port === entry.upstreamPort &&
-          owner.serve.upstream_port !== undefined &&
-          owner.urls.local !== null &&
-          (await portAnswers(owner.serve.upstream_port))
-            ? owner.urls.local
-            : undefined;
-        return { ...entry, ...(owner === undefined ? {} : { env: owner.name }), ...(direct === undefined ? {} : { direct }) };
-      }),
-    );
-    return inspected.filter((entry): entry is ServeOrphan => entry !== undefined);
+  private async foreignServeAt(serve: ServeRecord, status?: unknown): Promise<boolean> {
+    if (serve.tailnet_port === undefined || serve.upstream_port === undefined) return false;
+    const entries = serveEntries(status ?? (await serveStatus())).filter((entry) => entry.tailnetPort === serve.tailnet_port);
+    return entries.some((entry) => !rootMount(entry) || !ownsLoopbackPort(serve, loopbackProxy(entry.target)?.upstreamPort));
   }
 
-  private async cleanupServeOrphan(orphan: ServeOrphan): Promise<boolean> {
+  private async soleEntryAt(tailnetPort: number, target: string): Promise<boolean> {
+    const entries = serveEntries(await serveStatus()).filter((entry) => entry.tailnetPort === tailnetPort);
+    return entries.length > 0 && entries.every((entry) => rootMount(entry) && entry.target === target);
+  }
+
+  private async releaseServeEntry(serve: ServeRecord): Promise<boolean> {
+    if (serve.tailnet_port === undefined) return true;
+    if (await this.foreignServeAt(serve)) return false;
+    return stopServe(serve.tailnet_port);
+  }
+
+  private async classifyServe(status: unknown, config: MachineConfig): Promise<ClassifiedServeEntry[]> {
+    const records = await this.store.listEnvs();
+    const entries = serveEntries(status).filter((entry) => inTailnetRange(entry.tailnetPort, config));
+    const classified = await Promise.all(
+      entries.map(async (entry) => {
+        const upstream = loopbackProxy(entry.target);
+        const owner = serveEntryOwner(entry, records);
+        const answering =
+          upstream === undefined
+            ? false
+            : upstream.upstreamHost === "localhost"
+              ? await portAnswers(upstream.upstreamPort)
+              : await portOpenOnHost(upstream.upstreamPort, upstream.upstreamHost);
+        const ownerAlive = owner?.serve === undefined ? false : await groupBelongsToEnv(owner.serve.pgid, owner.name);
+        const appAnswers =
+          !answering && owner?.serve?.upstream_port !== undefined && upstream?.upstreamPort === owner.serve.proxy_port
+            ? await portAnswers(owner.serve.upstream_port)
+            : false;
+        return classifyServeEntry(entry, records, config, { answering, ownerAlive, appAnswers });
+      }),
+    );
+    return guardSharedPorts(classified);
+  }
+
+  private async cleanupServeOrphan(orphan: ClassifiedServeEntry): Promise<boolean> {
+    if (orphan.class !== "orphan" || !(await this.soleEntryAt(orphan.tailnetPort, orphan.target))) return false;
     if (orphan.env === undefined) return stopServe(orphan.tailnetPort);
     if (orphan.direct !== undefined) return serveWeb(orphan.tailnetPort, orphan.direct);
     const env = orphan.env;
     try {
       return await this.store.withLock(env, async () => {
         const record = await this.store.readEnv(env);
-        if (record.serve?.tailnet_port !== orphan.tailnetPort) return stopServe(orphan.tailnetPort);
+        if (record.serve?.tailnet_port !== orphan.tailnetPort || !ownsLoopbackPort(record.serve, orphan.upstreamPort)) return false;
+        if (record.status === "expired" || record.status === "cold" || record.status === "stopped") {
+          return this.releaseServeEntry(record.serve);
+        }
         const cleanupErrors = await this.cleanupRuntime(record);
         record.status = "crashed";
         record.failure = {
@@ -1304,6 +1381,10 @@ export class NectarService {
     if (!hasProbeableServe(record)) return record;
     const serve = record.serve;
     const liveness = await probeLiveness(serve);
+    if (givenUp(record)) {
+      record.liveness = liveness;
+      return record;
+    }
     const previous = { status: record.status, reason: record.liveness?.reason };
     record.status = liveness.state;
     record.liveness = liveness;
@@ -1311,7 +1392,7 @@ export class NectarService {
     await this.store.updateEnv(
       record.name,
       (current) => {
-        if (!hasProbeableServe(current) || current.serve.pid !== serve.pid) return;
+        if (!hasProbeableServe(current) || current.serve.pid !== serve.pid || givenUp(current)) return;
         current.status = liveness.state;
         current.liveness = liveness;
       },
@@ -1398,6 +1479,10 @@ export class NectarService {
     if (tailnetPort === undefined || record.urls.local === null || !identity.online || identity.dnsName === undefined) {
       return false;
     }
+    if (record.serve !== undefined && (await this.foreignServeAt(record.serve))) {
+      record.urls.mesh = null;
+      return false;
+    }
     if (!(await serveWeb(tailnetPort, await this.meshTarget(record)))) return false;
     record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     return true;
@@ -1443,8 +1528,10 @@ export class NectarService {
     await this.store.updateEnv(
       name,
       async (record) => {
-        const tailnetPort = record.serve?.tailnet_port;
-        if (record.mode !== "web" || record.urls.mesh === null || record.urls.local === null || tailnetPort === undefined) return;
+        const serve = record.serve;
+        const tailnetPort = serve?.tailnet_port;
+        if (record.mode !== "web" || record.urls.mesh === null || record.urls.local === null || serve === undefined || tailnetPort === undefined) return;
+        if (await this.foreignServeAt(serve)) return;
         restored = await serveWeb(tailnetPort, record.urls.local);
       },
       { bestEffort: true },
@@ -1464,7 +1551,7 @@ export class NectarService {
   }
 
   private async abandon(record: EnvRecord, code: string, message: string): Promise<void> {
-    if (record.serve?.tailnet_port !== undefined) await stopServe(record.serve.tailnet_port);
+    if (record.serve !== undefined) await this.releaseServeEntry(record.serve);
     record.status = "crashed";
     record.urls.mesh = null;
     record.failure = { code, message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
@@ -1484,6 +1571,7 @@ export class NectarService {
         expires_in: formatRemaining(record.expires_at),
         publisher_bee: record.publisher.hive_bee ?? null,
         liveness: record.liveness ?? null,
+        failure: record.failure?.code ?? null,
       }));
     return { envs };
   }
@@ -2082,17 +2170,18 @@ export class NectarService {
     });
   }
 
-  async gc(options: { dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
+  async gc(options: { dryRun?: boolean } = {}): Promise<GcReport> {
     const now = new Date();
     const config = await this.store.readConfig();
-    const serveOrphans = await this.deadServeProxies(await serveStatus(), config);
-    const orphanReport = [] as Array<{ tailnet_port: number; target: string; env: string | null; fixed: boolean; direct?: string }>;
+    const serveOrphans = (await this.classifyServe(await serveStatus(), config)).filter((entry) => entry.class === "orphan");
+    const orphanReport = [] as GcReport["serve_orphans"];
     for (const orphan of serveOrphans) {
       const fixed = options.dryRun ? false : await this.cleanupServeOrphan(orphan);
       orphanReport.push({
         tailnet_port: orphan.tailnetPort,
         target: orphan.target,
         env: orphan.env ?? null,
+        reason: orphan.reason,
         fixed,
         ...(orphan.direct === undefined ? {} : { direct: orphan.direct }),
       });
@@ -2123,6 +2212,7 @@ export class NectarService {
             await this.stopRuntime(record);
             if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
+            delete record.liveness;
             record.status = "expired";
             await this.store.writeEnv(record);
           } else if (currentAction === "cold") {
@@ -2131,6 +2221,7 @@ export class NectarService {
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
             if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
+            delete record.liveness;
             record.status = "cold";
             await this.store.writeEnv(record);
             await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
@@ -2229,19 +2320,29 @@ export class NectarService {
     return { config: updated, started: true };
   }
 
-  async doctor(options: { fix?: boolean } = {}): Promise<Record<string, unknown>> {
+  async doctor(options: { fix?: boolean; dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
+    if (options.dryRun === true && options.fix !== true) {
+      throw new NectarError("E_USAGE", "--dry-run plans repairs; pass it together with --fix");
+    }
     await this.store.init();
-    let config = await this.store.readConfig();
+    const before = await this.diagnose();
+    if (options.fix !== true) return { healthy: before.healthy, checks: before.checks };
+    const actions = this.planRepairs(before);
+    if (options.dryRun === true) return { dry_run: true, healthy: before.healthy, checks: before.checks, actions };
+    await this.runRepairs(actions);
+    const after = await this.diagnose();
+    const unhealthyBefore = new Set(before.checks.filter((check) => check.status !== "pass").map((check) => check.name));
+    const checks = after.checks.map((check) =>
+      check.status === "pass" && unhealthyBefore.has(check.name) ? { ...check, fixed: true } : check,
+    );
+    return { dry_run: false, healthy: after.healthy, checks, actions };
+  }
+
+  private async diagnose(): Promise<Diagnosis> {
+    const config = await this.store.readConfig();
     const identity = await tailnetIdentity();
     const status = await serveStatus();
-    const checks: Array<{
-      name: string;
-      status: "pass" | "warn" | "fail";
-      message: string;
-      fixed?: boolean;
-      binary?: string | null;
-      binary_source?: string;
-    }> = [];
+    const checks: DoctorCheck[] = [];
     const portlessBin = process.env.NECTAR_PORTLESS_BIN ?? "portless";
     let portlessPresent = false;
     let portlessProxy = false;
@@ -2267,10 +2368,15 @@ export class NectarService {
       name: "portless",
       status: portlessPresent && portlessProxy ? "pass" : "warn",
       message: !portlessPresent
-        ? "Portless is not installed; v0 web publishes intentionally degrade local URLs to loopback"
+        ? `Portless is not on this PATH (looked for '${portlessBin}'); v0 web publishes intentionally degrade local URLs to loopback`
         : portlessProxy
           ? "Portless and its proxy are up (name adoption remains deferred in v0)"
           : "Portless is installed but its proxy status could not be confirmed; local URLs degrade to loopback",
+      ...(portlessPresent
+        ? {}
+        : {
+            hint: "If Portless is installed, put its directory on PATH or set NECTAR_PORTLESS_BIN, then re-run `nectar daemon install` from that shell. Nectar never starts, stops or configures Portless.",
+          }),
     });
     const tailscale = resolveTailscale();
     checks.push({
@@ -2300,52 +2406,82 @@ export class NectarService {
         ? "A Tailscale Funnel entry exists; Nectar never invokes Funnel and will not alter unrelated public exposure"
         : "Tailscale Funnel is off in the Serve configuration",
     });
-    const serveOrphans = await this.deadServeProxies(status, config);
-    const orphanFixes = options.fix
-      ? await Promise.all(serveOrphans.map(async (orphan) => this.cleanupServeOrphan(orphan)))
-      : serveOrphans.map(() => false);
-    const remainingOrphans = serveOrphans.filter((_orphan, index) => orphanFixes[index] !== true);
+    const serve = await this.classifyServe(status, config);
+    const describe = (entry: ClassifiedServeEntry): string => `:${entry.tailnetPort} -> ${entry.target}`;
+    const detail = (entry: ClassifiedServeEntry): Record<string, unknown> => ({
+      tailnet_port: entry.tailnetPort,
+      target: entry.target,
+      env: entry.env ?? null,
+      reason: entry.reason,
+    });
+    const orphans = serve.filter((entry) => entry.class === "orphan");
     checks.push({
       name: "serve-orphans",
-      status: remainingOrphans.length === 0 ? "pass" : "fail",
+      status: orphans.length === 0 ? "pass" : "fail",
       message:
-        serveOrphans.length === 0
+        orphans.length === 0
           ? "No Nectar Serve entries point at dead local ports"
-          : remainingOrphans.length === 0
-            ? `Removed ${serveOrphans.length} Nectar Serve ${serveOrphans.length === 1 ? "entry" : "entries"} pointing at dead local ports`
-            : `${remainingOrphans.length} Nectar Serve ${remainingOrphans.length === 1 ? "entry points" : "entries point"} at dead local ports: ${remainingOrphans.map((orphan) => `:${orphan.tailnetPort} -> ${orphan.target}`).join(", ")}`,
-      ...(serveOrphans.length > 0 && remainingOrphans.length === 0 ? { fixed: true } : {}),
+          : `${orphans.length} Nectar Serve ${orphans.length === 1 ? "entry points" : "entries point"} at dead local ports: ${orphans.map(describe).join(", ")}`,
+      ...(orphans.length === 0 ? {} : { hint: "nectar doctor --fix removes them", details: orphans.map(detail) }),
     });
-    let packServerLive = await this.packServerAlive(config);
-    let packServerFixed = false;
-    let proxyPresent = statusHasProxyTarget(status, 8440, `http://127.0.0.1:${config.pack_server_port}`);
-    let proxyFixed = false;
-    let fixMessage = "";
-    if (options.fix && identity !== undefined && !funnelOn) {
-      try {
-        const local = await this.ensurePackServer(config);
-        config = local.config;
-        packServerFixed = local.started;
-        packServerLive = true;
-        if (!proxyPresent || local.started) {
-          const result = await servePackStore(`http://127.0.0.1:${config.pack_server_port}`);
-          proxyPresent = result.ok;
-          proxyFixed = result.ok;
-          fixMessage = result.message;
-        }
-      } catch (error) {
-        fixMessage = error instanceof Error ? error.message : String(error);
-        packServerLive = await this.packServerAlive(config);
-      }
+    for (const [name, kind, label] of [
+      ["serve-foreign", "foreign", "point at targets Nectar did not create"],
+      ["serve-ambiguous", "ambiguous", "cannot be proven to be Nectar's"],
+    ] as const) {
+      const found = serve.filter((entry) => entry.class === kind);
+      checks.push({
+        name,
+        status: found.length === 0 ? "pass" : "warn",
+        message:
+          found.length === 0
+            ? `No Serve entries in Nectar's tailnet range ${label}`
+            : `${found.length} Serve ${found.length === 1 ? "entry" : "entries"} in Nectar's tailnet range ${label}; reported and left alone: ${found.map(describe).join(", ")}`,
+        ...(found.length === 0
+          ? {}
+          : { hint: "Remove by hand with `tailscale serve --https=<port> off` once you know whose it is", details: found.map(detail) }),
+      });
     }
+    const gcPlan = await this.gc({ dryRun: true });
+    const holders = await this.deadHolders(status);
+    const pending = gcPlan.transitions.filter((item) => item.action !== "idle-stop");
+    checks.push({
+      name: "env-resources",
+      status: holders.length === 0 && pending.length === 0 ? "pass" : "warn",
+      message:
+        holders.length === 0 && pending.length === 0
+          ? "No dead or expired env records hold processes or Serve entries"
+          : [
+              pending.length === 0 ? undefined : `gc would ${pending.map((item) => `${item.action} ${item.env}`).join(", ")}`,
+              holders.length === 0
+                ? undefined
+                : `${holders.length} dead or expired ${holders.length === 1 ? "env holds" : "envs hold"} resources: ${holders
+                    .map((holder) => `${holder.env} (${[holder.process ? "process" : undefined, holder.serve_entry === null ? undefined : `serve :${holder.serve_entry}`].filter(Boolean).join(", ")})`)
+                    .join(", ")}`,
+            ]
+              .filter(Boolean)
+              .join("; "),
+      ...(holders.length === 0 && pending.length === 0 ? {} : { hint: "nectar doctor --fix runs gc and releases them", details: [...pending, ...holders] }),
+    });
+    const gcAge = config.last_gc_at === undefined ? Number.POSITIVE_INFINITY : Date.now() - new Date(config.last_gc_at).getTime();
+    const gcOverdue = gcAge > 24 * 60 * 60 * 1_000;
+    checks.push({
+      name: "gc-recency",
+      status: gcOverdue ? "warn" : "pass",
+      message: config.last_gc_at === undefined ? "GC has never run on this machine" : `Last GC: ${config.last_gc_at}`,
+      ...(gcOverdue ? { hint: "nectar doctor --fix runs gc now; nectard runs it hourly" } : {}),
+    });
+    const nectard = await this.nectardState();
+    if (nectard.check !== undefined) checks.push(nectard.check);
+    checks.push(await this.pathToolsCheck(nectard.unitPath));
+    const packServerLive = await this.packServerAlive(config);
+    const proxyPresent = statusHasProxyTarget(status, 8440, `http://127.0.0.1:${config.pack_server_port}`);
     const packs = await packCandidates(this.paths.packs, new Set());
     const packBytes = packs.reduce((sum, file) => sum + file.size, 0);
     const packDownStatus = packs.length === 0 ? "warn" : "fail";
     const packScope = "it serves desktop/ios testpacks only; web previews do not use it";
-    const packRemedy = fixMessage
-      ? `: ${fixMessage}`
-      : options.fix && identity === undefined
-        ? "; --fix skipped because Tailscale is not up"
+    const packRemedy =
+      identity === undefined
+        ? "; nectar doctor --fix starts it once Tailscale is up"
         : packs.length === 0
           ? `; no packs stored yet, so nothing needs it (${packScope}). Run nectar doctor --fix to start it`
           : `; ${packs.length} stored pack(s) are unreachable (${packScope}). Run nectar doctor --fix`;
@@ -2355,7 +2491,6 @@ export class NectarService {
       message: packServerLive
         ? `Read-only pack server PID ${config.pack_server_pid} is live on 127.0.0.1:${config.pack_server_port}`
         : `Read-only pack server is not running${packRemedy}`,
-      ...(packServerFixed ? { fixed: true } : {}),
     });
     checks.push({
       name: "pack-store-8440",
@@ -2364,7 +2499,6 @@ export class NectarService {
         packServerLive && proxyPresent
           ? `Tailnet HTTPS :8440 proxies to the read-only loopback server on ${config.pack_server_port}`
           : `${packServerLive ? "Tailnet HTTPS :8440 does not proxy to the pack server" : "Tailnet HTTPS :8440 has no live pack server behind it"}${packRemedy}`,
-      ...(proxyFixed ? { fixed: true } : {}),
     });
     const upstreamFree = await this.hasFreePort(config.upstream_port_start, config.upstream_port_end);
     const tailnetFree = await this.hasFreePort(config.tailnet_port_start, config.tailnet_port_end);
@@ -2382,12 +2516,6 @@ export class NectarService {
       name: "pack-quota",
       status: packBytes <= config.pack_quota_bytes ? "pass" : "warn",
       message: `${packBytes} of ${config.pack_quota_bytes} pack bytes used`,
-    });
-    const gcAge = config.last_gc_at === undefined ? Number.POSITIVE_INFINITY : Date.now() - new Date(config.last_gc_at).getTime();
-    checks.push({
-      name: "gc-recency",
-      status: gcAge <= 24 * 60 * 60 * 1_000 ? "pass" : "warn",
-      message: config.last_gc_at === undefined ? "GC has never run on this machine" : `Last GC: ${config.last_gc_at}`,
     });
     if (process.platform === "darwin" || process.env.NECTAR_XCRUN_BIN !== undefined) {
       try {
@@ -2411,7 +2539,7 @@ export class NectarService {
     checks.push({
       name: "tailnet-acl",
       status: "warn",
-      message: "Verify tailnet ACLs restrict ports 8440-8542 to operator-owned devices",
+      message: `Verify tailnet ACLs restrict ports 8440 and ${config.tailnet_port_start}-${config.tailnet_port_end} to operator-owned devices`,
     });
     for (const [name, target] of Object.entries(config.exposures ?? {})) {
       if (target.kind !== "relay") continue;
@@ -2424,7 +2552,319 @@ export class NectarService {
           : `Relay '${name}' (${target.host}) unreachable — exposes to ${target.domain} will fail: ${health.detail}`,
       });
     }
-    return { healthy: checks.every((check) => check.status !== "fail"), checks };
+    return {
+      healthy: checks.every((check) => check.status !== "fail"),
+      checks,
+      config,
+      online: identity !== undefined,
+      funnelOn,
+      gcPlan,
+      gcOverdue,
+      holders,
+      nectard,
+      packServerLive,
+      proxyPresent,
+    };
+  }
+
+  private async deadHolders(status: unknown): Promise<DeadHolder[]> {
+    const nowMs = Date.now();
+    const entries = serveEntries(status);
+    const holders = await Promise.all(
+      (await this.store.listEnvs()).map(async (record): Promise<DeadHolder | undefined> => {
+        const serve = record.serve;
+        const dead = DEAD_STATUSES.has(record.status) || Date.parse(record.expires_at) <= nowMs;
+        if (serve === undefined || !dead) return undefined;
+        const processHeld = await groupBelongsToEnv(serve.pgid, record.name);
+        const entryHeld =
+          serve.tailnet_port !== undefined &&
+          serve.upstream_port !== undefined &&
+          entries.some((entry) => entry.tailnetPort === serve.tailnet_port && ownsLoopbackPort(serve, loopbackProxy(entry.target)?.upstreamPort));
+        if (!processHeld && !entryHeld) return undefined;
+        return {
+          env: record.name,
+          status: record.status,
+          expires_at: record.expires_at,
+          process: processHeld,
+          pgid: serve.pgid,
+          serve_entry: entryHeld ? (serve.tailnet_port ?? null) : null,
+        };
+      }),
+    );
+    return holders.filter((holder): holder is DeadHolder => holder !== undefined);
+  }
+
+  private async nectardState(): Promise<NectardState> {
+    if (process.platform !== "darwin" && process.platform !== "linux") return {};
+    const [installed, status] = await Promise.all([readInstalledUnit(), unitStatus(this.paths)]);
+    const spec = unitSpec(this.paths);
+    const expected = spec.program;
+    const facts = {
+      unit: status.unit,
+      active: status.active,
+      pid: status.pid,
+      program: installed?.program ?? null,
+      expected_program: expected,
+      unit_nectar_home: installed?.env.NECTAR_HOME ?? null,
+    };
+    const unitPath = installed?.env.PATH;
+    const withPath = (state: NectardState): NectardState => (unitPath === undefined ? state : { ...state, unitPath });
+    if (installed === undefined) {
+      return {
+        problem: "missing",
+        facts,
+        check: {
+          name: "nectard",
+          status: "warn",
+          message: "nectard is not installed: crashed envs are not revived, envs do not come back after a reboot and gc runs only when invoked",
+          hint: "nectar doctor --fix runs `nectar daemon install`; `nectar daemon uninstall` removes it",
+          details: [facts],
+        },
+      };
+    }
+    if (installed.env.NECTAR_HOME !== this.paths.root) {
+      return withPath({
+        problem: "other-home",
+        facts,
+        check: {
+          name: "nectard",
+          status: "warn",
+          message: `nectard's unit supervises NECTAR_HOME ${installed.env.NECTAR_HOME ?? "(unset)"}, not ${this.paths.root}; left alone`,
+          hint: "Run doctor with that NECTAR_HOME, or `nectar daemon install` from this home if it should take over",
+          details: [facts],
+        },
+      });
+    }
+    if (installed.program.join("\0") !== expected.join("\0")) {
+      return withPath({
+        problem: "stale",
+        facts,
+        check: {
+          name: "nectard",
+          status: "warn",
+          message: `nectard's unit runs ${installed.program.slice(0, 2).join(" ")}, but this install is ${expected.slice(0, 2).join(" ")}`,
+          hint: "nectar doctor --fix re-runs `nectar daemon install` so the unit points at this node and CLI",
+          details: [facts],
+        },
+      });
+    }
+    const [startedMs, builtMs] = await Promise.all(
+      [pidFile(this.paths), expected[1] ?? ""].map(async (file) => stat(file).then((info) => info.mtimeMs, () => undefined)),
+    );
+    if (status.pid !== null && startedMs !== undefined && builtMs !== undefined && builtMs > startedMs) {
+      return withPath({
+        problem: "stale",
+        facts,
+        check: {
+          name: "nectard",
+          status: "warn",
+          message: `nectard (pid ${status.pid}) started before ${expected[1] ?? "the CLI"} was rebuilt, so it runs the old code`,
+          hint: "nectar doctor --fix re-runs `nectar daemon install`, which restarts it",
+          details: [facts],
+        },
+      });
+    }
+    if (status.active !== "active" && status.active !== "running") {
+      return withPath({
+        problem: "inactive",
+        facts,
+        check: {
+          name: "nectard",
+          status: "warn",
+          message: `nectard is installed but ${status.active}`,
+          hint: "nectar doctor --fix re-runs `nectar daemon install`, which restarts it",
+          details: [facts],
+        },
+      });
+    }
+    return withPath({
+      facts,
+      check: {
+        name: "nectard",
+        status: "pass",
+        message: `nectard is ${status.active}${status.pid === null ? "" : ` (pid ${status.pid})`} and runs this install`,
+      },
+    });
+  }
+
+  private async pathToolsCheck(unitPath: string | undefined): Promise<DoctorCheck> {
+    const needs = new Map<string, Set<string>>();
+    const need = (tool: string, env: string): void => {
+      const envs = needs.get(tool) ?? new Set<string>();
+      envs.add(env);
+      needs.set(tool, envs);
+    };
+    for (const record of await this.store.listEnvs()) {
+      if (record.status === "cold" || !existsSync(record.worktree)) continue;
+      const recipe = await loadRecipe(record.worktree).catch(() => undefined);
+      const commands = [record.serve?.cmd, record.dev?.run, recipe?.web?.serve, recipe?.web?.build, recipe?.dev?.run, recipe?.dev?.warm];
+      for (const command of commands) if (command !== undefined) for (const tool of commandTools(command)) need(tool, record.name);
+      for (const tool of recipe?.web?.requires ?? []) need(tool, record.name);
+    }
+    const missing = [];
+    for (const [tool, envs] of [...needs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const onShell = await onPath(tool);
+      const onUnit = unitPath === undefined ? null : await onPath(tool, unitPath);
+      if (!onShell || onUnit === false) missing.push({ tool, envs: [...envs].sort(), on_path: onShell, on_nectard_path: onUnit });
+    }
+    if (missing.length === 0) {
+      return {
+        name: "path-tools",
+        status: "pass",
+        message:
+          needs.size === 0
+            ? "No env recipes on this machine need extra tools"
+            : `Tools env recipes need are on PATH${unitPath === undefined ? "" : " and nectard's PATH"}: ${[...needs.keys()].sort().join(", ")}`,
+      };
+    }
+    return {
+      name: "path-tools",
+      status: "warn",
+      message: `Tools env recipes need are missing: ${missing
+        .map((item) => `${item.tool} (${!item.on_path ? "not on PATH" : "not on nectard's PATH"}; ${item.envs.join(", ")})`)
+        .join(", ")}`,
+      hint: "Install the tool or put its directory on PATH, then re-run `nectar daemon install` from that shell so nectard's unit captures the same PATH",
+      details: missing,
+    };
+  }
+
+  private planRepairs(diagnosis: Diagnosis): DoctorAction[] {
+    const actions: DoctorAction[] = [];
+    const planned = (action: string, target: string, reason: string, before: unknown): DoctorAction => ({
+      action,
+      target,
+      reason,
+      status: "planned",
+      before,
+      after: null,
+    });
+    const plan = diagnosis.gcPlan;
+    const pruning = plan.packs_pruned.length + plan.staging_pruned.length + plan.evidence_pruned.length;
+    if (diagnosis.gcOverdue || plan.transitions.length > 0 || plan.serve_orphans.length > 0 || pruning > 0) {
+      for (const orphan of plan.serve_orphans) {
+        actions.push(
+          planned(orphan.direct === undefined ? "remove-serve-entry" : "repoint-serve-entry", `:${orphan.tailnet_port}`, orphan.reason, {
+            tailnet_port: orphan.tailnet_port,
+            target: orphan.target,
+            env: orphan.env,
+          }),
+        );
+      }
+      for (const transition of plan.transitions) {
+        const holder = diagnosis.holders.find((item) => item.env === transition.env);
+        actions.push(
+          planned(`gc-${transition.action}`, transition.env, `gc policy: ${transition.action}`, {
+            env: transition.env,
+            process: holder?.process ?? false,
+            serve_entry: holder?.serve_entry ?? null,
+          }),
+        );
+      }
+      actions.push(
+        planned("gc", this.paths.root, diagnosis.gcOverdue ? "gc has not run in 24 h" : "gc has pending work", {
+          last_gc_at: diagnosis.config.last_gc_at ?? null,
+          prunes: pruning,
+        }),
+      );
+    }
+    const gcEnvs = new Set(plan.transitions.map((transition) => transition.env));
+    const gcPorts = new Set(plan.serve_orphans.map((orphan) => orphan.tailnet_port));
+    for (const holder of diagnosis.holders) {
+      if (gcEnvs.has(holder.env) || (!holder.process && holder.serve_entry !== null && gcPorts.has(holder.serve_entry))) continue;
+      actions.push(planned("release-env", holder.env, `${holder.env} is ${holder.status} but still holds its process or Serve entry`, holder));
+    }
+    const problem = diagnosis.nectard.problem;
+    if (problem === "missing" || problem === "stale" || problem === "inactive") {
+      actions.push(
+        planned(problem === "missing" ? "install-nectard" : "reinstall-nectard", "nectar daemon install", `nectard is ${problem}`, diagnosis.nectard.facts),
+      );
+    }
+    if (diagnosis.online && !diagnosis.funnelOn) {
+      const pack = { pid: diagnosis.config.pack_server_pid ?? null, port: diagnosis.config.pack_server_port, live: diagnosis.packServerLive };
+      if (!diagnosis.packServerLive) actions.push(planned("start-pack-server", "pack-store", "the read-only pack server is down", pack));
+      if (!diagnosis.packServerLive || !diagnosis.proxyPresent) {
+        actions.push(planned("serve-pack-store", ":8440", "tailnet :8440 does not proxy to the pack server", { proxy: diagnosis.proxyPresent }));
+      }
+    }
+    return actions;
+  }
+
+  private async runRepairs(actions: DoctorAction[]): Promise<void> {
+    const settle = async (action: DoctorAction, work: () => Promise<{ ok: boolean; after: unknown }>): Promise<void> => {
+      try {
+        const result = await work();
+        action.status = result.ok ? "done" : "failed";
+        action.after = result.after;
+      } catch (error) {
+        action.status = "failed";
+        action.error = asNectarError(error).message;
+      }
+    };
+    const gcAction = actions.find((action) => action.action === "gc");
+    if (gcAction !== undefined) {
+      let report: GcReport | undefined;
+      await settle(gcAction, async () => {
+        report = await this.gc();
+        return { ok: true, after: { last_gc_at: report.ran_at, skipped: report.skipped } };
+      });
+      const holders = await this.deadHolders(await serveStatus());
+      for (const action of actions) {
+        if (action.action === "remove-serve-entry" || action.action === "repoint-serve-entry") {
+          const port = Number(action.target.slice(1));
+          const done = report?.serve_orphans.find((orphan) => orphan.tailnet_port === port);
+          action.status = done?.fixed === true ? "done" : "failed";
+          action.after = done?.direct === undefined ? { present: done?.fixed !== true } : { tailnet_port: port, target: done.fixed ? done.direct : done.target };
+        } else if (action.action.startsWith("gc-")) {
+          const done = report?.transitions.some((transition) => transition.env === action.target);
+          const record = await this.store.readEnv(action.target).catch(() => undefined);
+          const holder = holders.find((item) => item.env === action.target);
+          action.status = done === true ? "done" : "skipped";
+          action.after =
+            record === undefined
+              ? { record: "reaped" }
+              : { status: record.status, process: holder?.process ?? false, serve_entry: holder?.serve_entry ?? null };
+        }
+      }
+    }
+    for (const action of actions) {
+      if (action.action === "release-env") {
+        await settle(action, async () => {
+          const record = await this.store.withLock(action.target, async () => {
+            const current = await this.store.readEnv(action.target);
+            await this.stopRuntime(current);
+            delete current.liveness;
+            await this.store.writeEnv(current);
+            return current;
+          });
+          const holder = (await this.deadHolders(await serveStatus())).find((item) => item.env === record.name);
+          return { ok: holder === undefined, after: holder ?? { env: record.name, status: record.status, process: false, serve_entry: null } };
+        });
+      } else if (action.action === "install-nectard" || action.action === "reinstall-nectard") {
+        await settle(action, async () => {
+          await installUnit(this.paths);
+          const state = await this.nectardState();
+          return { ok: state.problem === undefined, after: state.facts };
+        });
+      }
+    }
+    const startPack = actions.find((action) => action.action === "start-pack-server");
+    const servePack = actions.find((action) => action.action === "serve-pack-store");
+    let config = await this.store.readConfig();
+    if (startPack !== undefined) {
+      await settle(startPack, async () => {
+        const local = await this.ensurePackServer(config);
+        config = local.config;
+        return { ok: true, after: { pid: config.pack_server_pid ?? null, port: config.pack_server_port, live: true, started: local.started } };
+      });
+    }
+    if (servePack !== undefined && startPack?.status !== "failed") {
+      await settle(servePack, async () => {
+        const result = await servePackStore(`http://127.0.0.1:${config.pack_server_port}`);
+        return { ok: result.ok, after: { proxy: result.ok, ...(result.message ? { message: result.message } : {}) } };
+      });
+    } else if (servePack !== undefined) {
+      servePack.status = "skipped";
+    }
   }
 
   private async hasFreePort(start: number, end: number): Promise<boolean> {

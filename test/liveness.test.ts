@@ -136,6 +136,20 @@ describe("liveness on read", () => {
     expect(await nectar.store.readEnv("demo--main--web")).toMatchObject({ status: "serving" });
   });
 
+  it.each(["E_PORTS", "E_CRASH_LOOP"])("keeps a %s env crashed even when a stranger answers on its port", async (code) => {
+    const nectar = await service();
+    const { port } = await listen();
+    const failure = { code, message: "given up", failed_at: "2026-10-14T00:00:00.000Z", log_tail: [] };
+    await nectar.store.writeEnv(record({ status: "crashed", failure, urls: { local: null, mesh: null }, serve: serve(await deadProcess(), port) }));
+
+    const listed = (await nectar.list()).envs as Array<Record<string, unknown>>;
+    expect(listed[0]).toMatchObject({ status: "crashed", failure: code, liveness: { reason: "port_open" } });
+    expect(await nectar.show("demo--main--web")).toMatchObject({ env: { status: "crashed", failure: { code } } });
+    const stored = await nectar.store.readEnv("demo--main--web");
+    expect(stored).toMatchObject({ status: "crashed", failure: { code } });
+    expect(stored.liveness).toBeUndefined();
+  });
+
   it("leaves stopped and expired envs alone", async () => {
     const nectar = await service();
     const { port } = await listen();

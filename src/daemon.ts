@@ -3,7 +3,7 @@ import path from "node:path";
 import { appendFile, open, readFile, unlink } from "node:fs/promises";
 import { pidAlive } from "./commands.js";
 import { asNectarError, NectarError } from "./errors.js";
-import { hasProbeableServe, probeLiveness } from "./liveness.js";
+import { givenUp, hasProbeableServe, probeLiveness } from "./liveness.js";
 import { rotateLog } from "./logs.js";
 import type { NectarPaths } from "./paths.js";
 import { DEFAULT_TOUCH_EVERY_MS, EnvProxy, upstreamOf } from "./proxy.js";
@@ -32,8 +32,6 @@ interface Watch {
   unhealthyStreak: number;
 }
 
-const GIVEN_UP: ReadonlySet<string> = new Set(["E_CRASH_LOOP", "E_PORTS"]);
-
 type SupervisedRecord = EnvRecord & { serve: ServeRecord };
 type FrontedRecord = SupervisedRecord & { serve: { upstream_port: number; tailnet_port: number } };
 
@@ -41,7 +39,7 @@ export function fronted(record: EnvRecord): record is FrontedRecord {
   return (
     record.mode === "web" &&
     hasProbeableServe(record) &&
-    !GIVEN_UP.has(record.failure?.code ?? "") &&
+    !givenUp(record) &&
     record.serve.upstream_port !== undefined &&
     record.serve.tailnet_port !== undefined
   );
@@ -139,7 +137,7 @@ export function supervised(record: EnvRecord, nowMs: number): record is Supervis
   return (
     record.mode === "web" &&
     hasProbeableServe(record) &&
-    !GIVEN_UP.has(record.failure?.code ?? "") &&
+    !givenUp(record) &&
     Date.parse(record.expires_at) > nowMs
   );
 }

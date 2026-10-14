@@ -176,10 +176,11 @@ program
 
 program
   .command("doctor")
-  .description("check local dependencies, serve entries, ports, and quotas")
-  .option("--fix", "repair the :8440 pack-store chain and remove dead Nectar Serve entries")
-  .action(async (options: { fix?: boolean }) =>
-    execute("doctor", async () => new NectarService().doctor({ fix: options.fix ?? false })),
+  .description("check nectard, gc, env resources, serve entries, PATH tools, ports, and the pack store")
+  .option("--fix", "run gc, remove orphaned Nectar Serve entries, install nectard, and repair the :8440 pack-store chain")
+  .option("--dry-run", "with --fix: list the repairs without making them")
+  .action(async (options: { fix?: boolean; dryRun?: boolean }) =>
+    execute("doctor", async () => new NectarService().doctor({ fix: options.fix ?? false, dryRun: options.dryRun ?? false })),
   );
 
 const daemon = program.command("daemon").description("nectard: revive crashed envs, restore them after reboot, run gc hourly");

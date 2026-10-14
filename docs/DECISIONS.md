@@ -812,8 +812,10 @@ without `--local` is classified locally; web and static go to a pool host picked
 host's listener hello, which now reports version, nectard, mesh rights, the `[deps]`
 postgres provider, env counts and load. Skipped: hosts that do not answer, report nectard
 down or `mesh: denied`, and, for `[deps] postgres`, report no provider (Docker first, then
-local). Placement is sticky through `placements.json` on the publisher, and an env that
-already exists locally stays local. Desktop, iOS and dev never leave the publishing node.
+local). Placement is sticky through `placements.json` on the publisher while the host is still in
+the pool, and an env that already exists locally stays local, as does a static page in a
+repo with uncommitted changes (a pool host would serve the commit, a local publish the
+edit). Desktop, iOS and dev never leave the publishing node.
 No usable host: publish locally and say why. `placed_on` and `placement_reason` are in the
 result and the dry-run plan. `nectar pool ls|add|rm|check` manage and probe it. Also fixed:
 `publish --host` of anything inside a repo ships `git archive` of the commit plus the

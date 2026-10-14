@@ -307,6 +307,67 @@ describe("pool placement", () => {
   });
 });
 
+describe("pool placement edges", () => {
+  it("keeps a static page with uncommitted changes in a repo here and places it once committed", async () => {
+    const { a, b } = await mesh();
+    await setPool(a, { hosts: ["nodeb"] });
+    const { dir, git } = await repo({ "index.html": "<h1>committed</h1>" }, "proto");
+    await writeFile(path.join(dir, "index.html"), "<h1>edited</h1>");
+    const client = new NectarService(a);
+    const edited = await client.publish({ repo: dir, dryRun: true });
+    expect(edited).toMatchObject({ placed_on: "nodea" });
+    expect(edited.placement_reason).toContain("the repo has uncommitted changes");
+    await writeFile(path.join(dir, "new.html"), "<h1>new</h1>");
+    const fresh = await client.publish({ repo: path.join(dir, "new.html"), dryRun: true });
+    expect(fresh.placement_reason).toBe("new.html has uncommitted changes and a pool host gets only the commit, so it stays on this host; commit to let the pool take it");
+    await git("add", "-A");
+    await git("commit", "-qm", "edit");
+    expect(await client.publish({ repo: dir, dryRun: true })).toMatchObject({ placed_on: "nodeb" });
+    expect(await envs(b)).toEqual([]);
+  });
+
+  it("re-places an env whose host left the pool even while that host still answers", async () => {
+    const { a, b, c } = await mesh();
+    await setPool(a, { hosts: ["nodeb", "nodec"] });
+    const client = new NectarService(a);
+    const dir = await site("<h1>moves</h1>");
+    const first = await client.publish({ repo: dir, branch: "main" });
+    await track(b, first.env as string);
+    expect(first.placed_on).toBe("nodeb");
+    await client.poolChange({ remove: ["nodeb"] });
+    const moved = await client.publish({ repo: dir, branch: "main" });
+    await track(c, moved.env as string);
+    expect(moved).toMatchObject({ placed_on: "nodec" });
+    expect(moved.placement_reason).toMatch(/^demo--main--web lived on nodeb, which is no longer in the pool; pool: nodec/);
+    await client.remove("nectar://nodeb/demo--main--web", true);
+    await client.remove("nectar://nodec/demo--main--web", true);
+  });
+
+  it("never places a publish it received from another node, and says nothing about placement", async () => {
+    const { a, b } = await mesh();
+    await setPool(b, { hosts: ["nodec"] });
+    const published = await new NectarService(a).publish({ repo: await site("<h1>received</h1>"), host: "nodeb", branch: "main" });
+    await track(b, published.env as string);
+    expect(published).toMatchObject({ ref: "nectar://nodeb/demo--main--web" });
+    expect(published).not.toHaveProperty("placed_on");
+    expect(published).not.toHaveProperty("placement_reason");
+    expect(await envs(b)).toEqual(["demo--main--web"]);
+  });
+
+  it("reports the deps provider as unknown instead of stalling the hello on a slow Docker", async () => {
+    const bin = await tempDir("pool-slow-docker");
+    const docker = path.join(bin, "docker");
+    await writeFile(docker, "#!/bin/sh\nsleep 5\n", { mode: 0o755 });
+    vi.stubEnv("NECTAR_DOCKER_BIN", docker);
+    vi.stubEnv("NECTAR_PG_BIN", await tempDir("pool-no-pg"));
+    vi.resetModules();
+    const { depsProvider } = await import("../src/pool.js");
+    const started = Date.now();
+    expect(await depsProvider(200)).toBe("unknown");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 describe("publish --host of a repo", () => {
   it("ships the committed tree of a repo without nectar.toml and lets the target detect its recipe", async () => {
     const { a, b } = await mesh();

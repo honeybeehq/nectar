@@ -432,7 +432,7 @@ tailnet port range whose loopback target is dead, §10.2.)
     from `path` inside it when given: the same static-site check and recipe detection
     (`nectar.toml`, a `package.json` dev script, the Python and Rails fallbacks, static
     only when nothing else matches) as a local publish of that commit. A received publish
-    never goes on to this node's own pool (§4.6).
+    never goes on to this node's own pool (§4.6) and carries no placement fields.
     The record's `publisher` is `{user, via: "tailnet", node, node_name, login?, hive_bee?,
     hive_session?}`; `node`, `node_name` and `login` come from WhoIs, not the request.
   - Replies are the CLI's envelope, redacted for the peer. `ls` drops `publisher_bee`.
@@ -449,7 +449,9 @@ tailnet port range whose loopback target is dead, §10.2.)
     short commit), `nectard: {ok, pid}`, `mesh` (`ok`, `denied` when this user may not
     change Serve config, i.e. is not a Tailscale operator, or `unknown`), `deps` (the
     `[deps]` postgres provider §5.1 would pick: `docker`, `local` or `none`; cached for a
-    minute), `envs: {total, serving}` and `load: {load1, cpus, per_cpu}`.
+    minute, and `unknown` while the first probe takes longer than 3 s, so a slow Docker
+    cannot make the hello miss the caller's 8 s timeout), `envs: {total, serving}` and
+    `load: {load1, cpus, per_cpu}`.
   - Logs: one `remote` event per request with the caller's node ID and login. Every refused
     request also logs `remote_refused` with `rule`, `op`, `code`, `peer_address`,
     `node_name`, `node_id`, `login`, `tags`, `user_id`, `node_user_id`, `owner`, `whois`
@@ -559,17 +561,21 @@ on this node, exactly as before. A malformed `pool` is `E_USAGE` on publish.
    it publishes here and reports the real error.
 2. `desktop`, `ios` and `dev` envs, and a category not in `default_for`, stay here.
 3. An env that already exists on this node stays here (`<env> already lives on this host`).
+   So does a static page or directory inside a repo with uncommitted changes (`git status`
+   lists it, untracked files included; ignored build output does not count): a pool host
+   would get only the commit, and a local static publish serves the working tree.
 4. **Sticky.** If `placements.json` says where this source's env went (key: the repo's
    root commits, or a static site's path outside any repo, plus the env name, so another
-   Cell's checkout of the same repo sticks too), it goes there again while that node's
-   nectard answers, mesh-denied or not. If it no longer answers, the env is placed anew
-   and the reason says so. `rm nectar://<node>/<env>` drops the entry.
+   Cell's checkout of the same repo sticks too), it goes there again while that node is
+   still in `hosts` and its nectard answers, mesh-denied or not. If it no longer answers or
+   has left the pool, the env is placed anew and the reason says so.
+   `rm nectar://<node>/<env>` drops the entry.
 5. Otherwise every pool host is asked for `GET /v1/hello` (8 s timeout; this node's own
    entry is evaluated in-process). A host is skipped when it does not answer, refuses
    (`E_FORBIDDEN`, `E_REMOTE`), reports nectard down, reports `mesh: denied` (a preview
    placed there would have no tailnet URL, and every placed publish needs one), or, for an
    env with `[deps] postgres`, reports `deps: none`. A postgres env prefers `docker`, then
-   `local`, then a host that reports nothing. Then `first-healthy` takes the first in pool
+   `local`, then a host whose provider is `unknown` or not reported. Then `first-healthy` takes the first in pool
    order and `least-loaded` the lowest `load.per_cpu`, then fewest serving envs, then pool
    order. A host on an older nectard that reports no fields is usable and sorts last by load.
 6. The publish goes to the chosen host as `publish --host <host>` would. No usable host:

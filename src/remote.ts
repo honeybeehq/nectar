@@ -291,7 +291,7 @@ async function receive(
       name: text("name"),
       dryRun: flag("dry_run"),
       fresh: flag("fresh"),
-      local: true,
+      received: true,
     };
     return service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)));
   });

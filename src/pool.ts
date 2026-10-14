@@ -15,9 +15,10 @@ export const POOL_CATEGORIES: readonly PoolCategory[] = ["web", "static"];
 export const POOL_POLICIES: readonly PoolPolicy[] = ["first-healthy", "least-loaded"];
 const PLACEMENTS_LOCK = "machine--placements";
 const PROVIDER_CACHE_MS = 60_000;
+const PROVIDER_WAIT_MS = 3_000;
 
 export type MeshState = "ok" | "denied" | "unknown";
-export type DepsProvider = "docker" | "local" | "none";
+export type DepsProvider = "docker" | "local" | "none" | "unknown";
 
 export interface Pool {
   hosts: string[];
@@ -96,12 +97,26 @@ export function nectarVersion(): Promise<string> {
 }
 
 let providerSeen: { at: number; provider: DepsProvider } | undefined;
+let providerProbe: Promise<DepsProvider> | undefined;
 
-export async function depsProvider(): Promise<DepsProvider> {
+export async function depsProvider(waitMs = PROVIDER_WAIT_MS): Promise<DepsProvider> {
   if (providerSeen !== undefined && Date.now() - providerSeen.at < PROVIDER_CACHE_MS) return providerSeen.provider;
-  const provider = (await new PostgresProviders().auto().catch(() => undefined)) ?? "none";
-  providerSeen = { at: Date.now(), provider };
-  return provider;
+  providerProbe ??= new PostgresProviders()
+    .auto()
+    .catch(() => undefined)
+    .then((found) => {
+      const provider: DepsProvider = found ?? "none";
+      providerSeen = { at: Date.now(), provider };
+      providerProbe = undefined;
+      return provider;
+    });
+  let timer: NodeJS.Timeout | undefined;
+  const waited = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), waitMs);
+  });
+  const provider = await Promise.race([providerProbe, waited]);
+  clearTimeout(timer);
+  return provider ?? providerSeen?.provider ?? "unknown";
 }
 
 export async function hostReport(paths: NectarPaths, daemonPid?: number): Promise<HostReport> {

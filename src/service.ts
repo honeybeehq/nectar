@@ -18,6 +18,7 @@ import {
   runGit,
   gitIgnored,
   inCommit,
+  uncommitted,
   sameRepository,
   shortCommit,
   sourceIdentity,
@@ -178,6 +179,7 @@ interface PublishOptions {
   fresh?: boolean;
   host?: string;
   local?: boolean;
+  received?: boolean;
 }
 
 interface PublishShape {
@@ -185,6 +187,7 @@ interface PublishShape {
   env: string;
   key: string;
   postgres: boolean;
+  uncommitted?: string;
 }
 
 interface PlacementDecision {
@@ -465,7 +468,7 @@ export class NectarService {
   }
 
   private async place(options: PublishOptions): Promise<PlacementDecision | undefined> {
-    if (!existsSync(this.paths.config)) return undefined;
+    if (options.received === true || !existsSync(this.paths.config)) return undefined;
     const pool = poolSettings(await this.store.readConfig());
     if (pool === undefined) return undefined;
     if (options.local === true) return { host: undefined, reason: "--local keeps it on this host" };
@@ -479,7 +482,11 @@ export class NectarService {
       return { host: undefined, reason: POOL_CATEGORIES.includes(shape.category as never) ? `pool.default_for does not include ${shape.category}, so it stays on this host` : `${shape.category} envs always stay on this host` };
     }
     if ((await this.store.maybeEnv(shape.env)) !== undefined) return { host: undefined, reason: `${shape.env} already lives on this host` };
-    const sticky = (await readPlacements(this.paths))[shape.key];
+    if (shape.uncommitted !== undefined) {
+      return { host: undefined, reason: `${shape.uncommitted} has uncommitted changes and a pool host gets only the commit, so it stays on this host; commit to let the pool take it` };
+    }
+    const recorded = (await readPlacements(this.paths))[shape.key];
+    const sticky = recorded !== undefined && pool.hosts.includes(recorded.host.toLowerCase()) ? recorded : undefined;
     const stickyProbe = sticky === undefined ? undefined : await this.probePoolHost(sticky.host);
     if (sticky !== undefined && stickyProbe?.local === true) return { host: undefined, reason: `${shape.env} was placed on this host` };
     if (sticky !== undefined && stickyProbe?.error === undefined && stickyProbe?.report?.nectard?.ok !== false) {
@@ -487,7 +494,12 @@ export class NectarService {
     }
     const probes = await Promise.all(pool.hosts.map(async (host) => (host === sticky?.host && stickyProbe !== undefined ? stickyProbe : this.probePoolHost(host))));
     const choice = choosePoolHost(probes, { postgres: shape.postgres }, pool.prefer);
-    const moved = sticky === undefined ? "" : `${sticky.env} lived on ${sticky.host}, which is unhealthy (${stickyProbe?.error?.message ?? "nectard is not running"}); `;
+    const moved =
+      sticky !== undefined
+        ? `${sticky.env} lived on ${sticky.host}, which is unhealthy (${stickyProbe?.error?.message ?? "nectard is not running"}); `
+        : recorded !== undefined
+          ? `${recorded.env} lived on ${recorded.host}, which is no longer in the pool; `
+          : "";
     if (choice.host === undefined) return { host: undefined, reason: `${moved}${choice.reason}; published on this host` };
     const local = probes.find((probe) => probe.host === choice.host)?.local === true;
     return { host: local ? undefined : choice.host, reason: `${moved}${choice.reason}`, key: shape.key };
@@ -498,8 +510,10 @@ export class NectarService {
     if (site !== undefined) {
       const env = envName(appSlug(options.name ?? site.name), await this.staticBranch(site, options), "web");
       const repo = await resolveRepo(path.dirname(site.file ?? path.join(site.root, "index.html"))).catch(() => undefined);
-      const source = repo === undefined ? site.source : `roots:${(await sourceIdentity(repo, "HEAD")).roots.join(",")}`;
-      return { category: "static", env, key: `${source}\0${env}`, postgres: false };
+      if (repo === undefined) return { category: "static", env, key: `${site.source}\0${env}`, postgres: false };
+      const source = `roots:${(await sourceIdentity(repo, "HEAD")).roots.join(",")}`;
+      const published = path.relative(await realpath(repo), await realpath(site.file ?? site.root)).split(path.sep).join("/");
+      return { category: "static", env, key: `${source}\0${env}`, postgres: false, ...((await uncommitted(repo, published)) ? { uncommitted: published || "the repo" } : {}) };
     }
     const repo = await resolveRepo(options.repo ?? process.cwd());
     const slot = await resolveBranch(repo, options.branch, (this.publisher ?? currentPublisher()).hive_bee);

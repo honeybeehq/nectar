@@ -222,6 +222,11 @@ export async function inCommit(repo: string, ref: string, relative: string): Pro
   return (await runGit(["cat-file", "-e", `${ref}:${relative}`], repo)).exitCode === 0;
 }
 
+export async function uncommitted(repo: string, relative: string): Promise<boolean> {
+  const status = await runGit(["status", "--porcelain", "--untracked-files=all", "--", relative === "" ? "." : relative], repo);
+  return status.exitCode !== 0 || status.stdout.trim() !== "";
+}
+
 export async function gitIgnored(repo: string, relative: string): Promise<boolean> {
   return (await runGit(["check-ignore", "-q", "--no-index", "--", relative], repo)).exitCode === 0;
 }

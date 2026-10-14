@@ -548,8 +548,15 @@ node's `nectar.json`:
 "pool": { "hosts": ["metal-3", "trmd-moria-mini03"], "default_for": ["web", "static"], "prefer": "least-loaded" }
 ```
 
-`hosts` are node names in order of preference (as for `--host`; this node may be one of
-them). `default_for` takes `web` (a `nectar.toml` `[web]` recipe or a §6.1.2 fallback such
+`hosts` are the other nodes, by name, in order of preference (as for `--host`).
+`pool add` refuses this node itself (`E_USAGE`, "… is this host"), matched against
+tailscaled's own host name and MagicDNS name, short or full, and the machine host name.
+A publish that should stay here needs no entry: it stays here when no pool host is usable,
+and `--local` keeps it here. If `nectar.json` already lists this node, `pool ls` and `pool
+check` show the entry as `excluded` with a note, `check` marks it `(this host, excluded)`
+and does not probe it, and placement skips it. `pool rm` removes any listed host,
+this one included. It matches the short name, the full name and a trailing dot alike.
+Neither command ever adds an entry the user did not list. `default_for` takes `web` (a `nectar.toml` `[web]` recipe or a §6.1.2 fallback such
 as a `package.json` dev script) and `static`, both by default. `prefer` is `first-healthy`
 (default) or `least-loaded`. No `pool`, or no hosts: every publish without `--host` stays
 on this node, exactly as before. A malformed `pool` is `E_USAGE` on publish.
@@ -570,8 +577,8 @@ on this node, exactly as before. A malformed `pool` is `E_USAGE` on publish.
    still in `hosts` and its nectard answers, mesh-denied or not. If it no longer answers or
    has left the pool, the env is placed anew and the reason says so.
    `rm nectar://<node>/<env>` drops the entry.
-5. Otherwise every pool host is asked for `GET /v1/hello` (8 s timeout; this node's own
-   entry is evaluated in-process). A host is skipped when it does not answer, refuses
+5. Otherwise every pool host other than this node is asked for `GET /v1/hello` (8 s
+   timeout). A host is skipped when it does not answer, refuses
    (`E_FORBIDDEN`, `E_REMOTE`), reports nectard down, reports `mesh: denied` (a preview
    placed there would have no tailnet URL, and every placed publish needs one), or, for an
    env with `[deps] postgres`, reports `deps: none`. A postgres env prefers `docker`, then
@@ -1201,8 +1208,14 @@ ships a tar. Anything inside a git repo ships as `git archive` of the branch's c
 (`--branch`, else the current branch, else the D29 slot for a detached HEAD) plus the
 published path inside it, so the target gets only committed files, never `.git` or its
 config, and runs the same detection as a local publish of that commit (a repo without
-`nectar.toml` included). Uncommitted edits are not shipped. A static page or directory in
-a repo that is not committed is `E_USAGE` ("commit it first"), except when git ignores it
+`nectar.toml` included). A static site inside a repo ships only its own path from that
+commit (the page, or the directory holding `index.html`), so the rest of the repo, its
+symlinks included, never leaves this node. A recipe publish ships the whole committed tree.
+Before sending, the publisher reads the archive's symlinks and refuses (`E_USAGE`,
+`refused: "symlink"`, `links: […]`) any that is absolute or leads outside what is shipped,
+naming each one: `Symlink 'site/leak.md' (-> ../other/readme.md) points outside site`. The
+target's archive rules below are unchanged and still apply. Uncommitted edits are not
+shipped. A static page or directory in a repo that is not committed is `E_USAGE` ("commit it first"), except when git ignores it
 (build output such as `dist/`), which ships as files. A static site outside any repo ships
 the files a local static publish would copy. For a static site `--branch` is a label, so
 an unknown branch ships `HEAD`. `--worktree` does not apply.

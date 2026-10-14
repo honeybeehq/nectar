@@ -259,7 +259,7 @@ function poolTable(result: Record<string, unknown>): string {
   const columns = ["host", "healthy", "version", "nectard", "mesh", "deps", "envs", "serving", "load"];
   const cell = (row: Record<string, unknown>, column: string): string => {
     const value = row[column];
-    if (column === "host" && row.local === true) return `${String(value)} (this host)`;
+    if (column === "host" && row.excluded === true) return `${String(value)} (this host, excluded)`;
     return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : "-";
   };
   const rows = [columns, ...hosts.map((row) => columns.map((column) => cell(row, column)))];
@@ -268,7 +268,8 @@ function poolTable(result: Record<string, unknown>): string {
   const errors = hosts.filter((row) => row.error !== undefined).map((row) => `${String(row.host)}: ${(row.error as { message?: string }).message ?? ""}`);
   const next = result.next as { web?: string | null; postgres?: string | null; reason?: string } | undefined;
   const summary = next === undefined ? [] : [`next web/static publish: ${next.web ?? "this host (no usable pool host)"}; next [deps] postgres publish: ${next.postgres ?? "this host"}`, next.reason ?? ""];
-  return `${[...lines, ...errors, ...summary].filter(Boolean).join("\n")}\n`;
+  const note = typeof result.note === "string" ? result.note : "";
+  return `${[...lines, ...errors, note, ...summary].filter(Boolean).join("\n")}\n`;
 }
 
 const pool = program.command("pool").description("the hosts that take web and static publishes when no --host is given");

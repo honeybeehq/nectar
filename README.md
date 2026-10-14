@@ -111,7 +111,8 @@ Remote `show` and `ls` leave out paths, bee ids, commands and database credentia
 (SPEC §4.5).
 
 `--host` ships committed files only: in a repo, commit first. Build output that git ignores
-(`dist/`) ships as files.
+(`dist/`) ships as files. A static site inside a repo ships only its own directory, and a
+symlink in it that leads outside is refused, with the link named.
 
 To move web previews off a busy machine by default, give it a pool of nodes whose
 listeners are on. Web and static publishes without `--host` then go to a healthy pool host;
@@ -125,7 +126,8 @@ nectar publish --json                          # lands on the chosen host; a rep
 nectar publish --local --json                  # stay on this machine
 ```
 
-Hosts whose user is not a Tailscale operator (no mesh URL) are skipped, and an app with
+List the other nodes; `pool add` refuses this machine itself, and `pool rm` takes out any
+listed host, short or full name. Hosts whose user is not a Tailscale operator (no mesh URL) are skipped, and an app with
 `[deps] postgres` prefers a host with Docker, then one with local Postgres (SPEC §4.6).
 
 Then, in any repo with a `dev` script (or a `nectar.toml`):

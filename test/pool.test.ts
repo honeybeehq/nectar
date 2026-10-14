@@ -1,7 +1,7 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarError } from "../src/errors.js";
@@ -307,6 +307,36 @@ describe("pool placement", () => {
   });
 });
 
+describe("the own host in the pool", () => {
+  it("refuses to add this host, in short or full form, and writes nothing", async () => {
+    const { a } = await mesh();
+    const client = new NectarService(a);
+    for (const own of ["nodea", "NodeA.tail.ts.net."]) {
+      const refused = await client.poolChange({ add: ["nodeb", own] }).catch((error: unknown) => error);
+      expect(refused).toMatchObject({ code: "E_USAGE" });
+      expect((refused as Error).message).toMatch(/is this host/);
+    }
+    expect(await client.poolList()).toMatchObject({ pool: null });
+  });
+
+  it("shows a listed own host as excluded, never places on it, and removes it with rm in any form", async () => {
+    const { a, b } = await mesh();
+    await setPool(a, { hosts: ["nodea", "nodeb.tail.ts.net"] });
+    const client = new NectarService(a);
+    expect(await client.poolList()).toMatchObject({ pool: { hosts: ["nodea", "nodeb.tail.ts.net"] }, excluded: ["nodea"], note: expect.stringContaining("nectar pool rm nodea") as string });
+    const checked = await client.poolCheck();
+    expect(checked).toMatchObject({ excluded: ["nodea"], hosts: [{ host: "nodea", local: true, excluded: true }, { host: "nodeb.tail.ts.net", healthy: true }], next: { web: "nodeb.tail.ts.net" } });
+    const plan = await client.publish({ repo: await site("<h1>skip self</h1>"), branch: "main", dryRun: true });
+    expect(plan).toMatchObject({ placed_on: "nodeb.tail.ts.net" });
+    expect(await envs(b)).toEqual([]);
+    expect(await client.poolChange({ remove: ["NODEA.tail.ts.net."] })).toMatchObject({ pool: { hosts: ["nodeb.tail.ts.net"] } });
+    expect(await client.poolList()).not.toHaveProperty("excluded");
+    await client.poolChange({ add: ["nodeb"] });
+    expect(await client.poolList()).toMatchObject({ pool: { hosts: ["nodeb.tail.ts.net"] } });
+    expect(await client.poolChange({ remove: ["nodeb"] })).toMatchObject({ pool: null });
+  });
+});
+
 describe("pool placement edges", () => {
   it("keeps a static page with uncommitted changes in a repo here and places it once committed", async () => {
     const { a, b } = await mesh();
@@ -409,5 +439,50 @@ describe("publish --host of a repo", () => {
     await git("add", "draft");
     await git("commit", "-qm", "draft");
     expect(await client.publish({ repo: path.join(dir, "draft"), host: "nodeb", dryRun: true })).toMatchObject({ name: "draft--main--web", stack: "static" });
+  });
+
+  it("ships only the static subdirectory, so out-of-tree symlinks elsewhere in the repo do not matter", async () => {
+    const { a, b } = await mesh();
+    const { dir, git } = await repo({ "site/index.html": "<h1>subtree</h1>", "site/about.html": "<p>about</p>", "other/readme.md": "x" }, "kit");
+    await symlink("../../../outside-the-repo", path.join(dir, "other", "escape"));
+    await symlink("about.html", path.join(dir, "site", "alias.html"));
+    await git("add", "-A");
+    await git("commit", "-qm", "links");
+    const client = new NectarService(a);
+    const published = await client.publish({ repo: path.join(dir, "site"), host: "nodeb" });
+    await track(b, published.env as string);
+    expect(published).toMatchObject({ env: "site--main--web" });
+    expect(await get((published.urls as { local: string }).local)).toEqual({ status: 200, body: "<h1>subtree</h1>" });
+    const [key] = await readdir(path.join(b, "inbox"));
+    expect((await readdir(path.join(b, "inbox", key ?? "", "kit"))).sort()).toEqual([".git", "site"]);
+
+    await symlink("../other/readme.md", path.join(dir, "site", "leak.md"));
+    await git("add", "-A");
+    await git("commit", "-qm", "leak");
+    const refused = await client.publish({ repo: path.join(dir, "site"), host: "nodeb", dryRun: true }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: "E_USAGE", details: { refused: "symlink", links: ["site/leak.md"] } });
+    expect((refused as Error).message).toContain("'site/leak.md' (-> ../other/readme.md) points outside site");
+  });
+
+  it("refuses a static root that is a symlink to elsewhere in the repo, naming it", async () => {
+    const { a } = await mesh();
+    const { dir, git } = await repo({ "build/out/index.html": "<h1>built</h1>" }, "linked");
+    await symlink("build/out", path.join(dir, "public"));
+    await git("add", "-A");
+    await git("commit", "-qm", "public link");
+    const refused = await new NectarService(a).publish({ repo: dir, host: "nodeb", dryRun: true }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: "E_USAGE", details: { refused: "symlink", links: ["public"] } });
+    expect((refused as Error).message).toContain("'public' (-> build/out) points outside public");
+  });
+
+  it("refuses a whole-repo publish whose tree has a symlink leaving the repo, naming the link", async () => {
+    const { a } = await mesh();
+    const { dir, git } = await repo({ "package.json": JSON.stringify({ name: "linky", scripts: { dev: "vite" } }), "index.html": "<h1>app</h1>" }, "linky");
+    await symlink("../../elsewhere", path.join(dir, "shared"));
+    await git("add", "-A");
+    await git("commit", "-qm", "link");
+    const refused = await new NectarService(a).publish({ repo: dir, host: "nodeb", dryRun: true }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: "E_USAGE", details: { refused: "symlink", links: ["shared"] } });
+    expect((refused as Error).message).toContain("'shared' (-> ../../elsewhere) points outside the repo");
   });
 });

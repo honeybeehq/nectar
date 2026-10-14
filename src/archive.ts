@@ -210,6 +210,33 @@ const TYPES: Record<string, string> = {
   "6": "FIFO",
 };
 
+export function linksLeaving(tar: Buffer, within: string): Array<{ link: string; target: string }> {
+  const leaving: Array<{ link: string; target: string }> = [];
+  let pax: Record<string, string> = {};
+  for (let offset = 0; offset + BLOCK <= tar.length; ) {
+    const block = tar.subarray(offset, offset + BLOCK);
+    if (block.every((byte) => byte === 0)) break;
+    const type = String.fromCharCode(block[156] ?? 0).replace("\0", "0");
+    const size = pax.size === undefined ? number(block, 124, 12) : Number(pax.size);
+    const data = tar.subarray(offset + BLOCK, offset + BLOCK + size);
+    offset += BLOCK + Math.ceil(size / BLOCK) * BLOCK;
+    if (type === "g") continue;
+    if (type === "x") {
+      pax = { ...pax, ...parsePax(data) };
+      continue;
+    }
+    const prefix = text(block, 345, 155);
+    const name = (pax.path ?? (prefix === "" ? text(block, 0, 100) : `${prefix}/${text(block, 0, 100)}`)).replace(/\/+$/, "");
+    const target = pax.linkpath ?? text(block, 157, 100);
+    pax = {};
+    if (type !== "2") continue;
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), target));
+    const outside = path.posix.isAbsolute(target) || (within === "" ? resolved === ".." || resolved.startsWith("../") : resolved !== within && !resolved.startsWith(`${within}/`));
+    if (outside) leaving.push({ link: name, target });
+  }
+  return leaving;
+}
+
 export async function extractTar(source: AsyncIterable<unknown>, destination: string, limits: ExtractLimits = { maxBytes: MAX_TREE_BYTES, maxEntries: MAX_ENTRIES }): Promise<Extracted> {
   const root = await realpath(destination);
   const reader = new ByteReader(source[Symbol.asyncIterator](), limits.maxBytes + limits.maxEntries * BLOCK * 4);

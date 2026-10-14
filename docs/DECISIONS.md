@@ -841,3 +841,23 @@ files, since that is the point of publishing `dist/`. (f) desktop/iOS/dev must s
 before anything is shipped, and the dry run must show the placement, so the publisher
 needs the classification anyway; the target still runs its own detection on the commit.
 
+**Amendment (2026-10-14, the own host and in-repo static sites).** `pool add` refuses this
+node itself, matched by tailscaled's host and MagicDNS names, short or full, and the
+machine host name. `pool rm` matches names the same way. `ls` and `check` show a listed
+own host as `excluded`, and placement no longer considers it: before, a healthy own entry
+first in pool order kept the publish here instead of going to the next host. A static site inside a repo now
+ships only its own path from the commit (`git --literal-pathspecs archive <commit> --
+<path>`). The publisher refuses, naming the link, any symlink in what it ships that is
+absolute or leads outside it. A recipe publish still ships the whole tree under the same
+check, and the target's archive rules are unchanged.
+**Alternatives:** (a) store the own host but mark it excluded; (b) let the target relax its
+symlink rule for links outside the published path; (c) drop out-of-tree symlinks from the
+archive silently.
+**Why:** (a) a pool entry that never takes a publish shows the user something that isn't
+so, so the publisher refuses it at the door, and an existing entry is shown as excluded
+until it is removed. (b) the target's rules are the security boundary and stay as they
+are. (c) dropping a link silently would publish a page that breaks on the target with
+nothing to explain it. A static site never needed the rest of its repo. A link inside it
+that leaves it would dangle on the target, so naming the link up front is the honest
+answer.
+

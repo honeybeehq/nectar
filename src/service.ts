@@ -2,9 +2,12 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import zlib from "node:zlib";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import {
+  archiveCommit,
   currentBranch,
   installDependencies,
   prepareWorktree,
@@ -97,7 +100,9 @@ import {
 import { installUnit, onPath, readInstalledUnit, unitSpec, unitStatus } from "./daemon-unit.js";
 import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
-import { findStaticSite, stageStaticSite, STATIC_ROOTS, type StaticSite } from "./static-site.js";
+import { findStaticSite, stageStaticSite, STATIC_ROOTS, staticFiles, type StaticSite } from "./static-site.js";
+import { MAX_TREE_BYTES, packFiles } from "./archive.js";
+import { callRemote, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
@@ -154,6 +159,7 @@ interface PublishOptions {
   name?: string;
   dryRun?: boolean;
   fresh?: boolean;
+  host?: string;
 }
 
 interface MachineIdentity {
@@ -345,6 +351,8 @@ export class NectarService {
     // Validate caller input before touching the repo — a bad --ttl is a usage
     // error, not a checkout problem.
     const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
+    if (options.host !== undefined && !(await this.isLocalHost(options.host))) return this.publishRemote(options.host, options);
+    this.assertWritable("publish");
     const site = await this.staticCandidate(options);
     if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
     const repo = await resolveRepo(options.repo ?? process.cwd());
@@ -382,6 +390,69 @@ export class NectarService {
     if (mode === "ios") return this.publishIos(publishOptions);
     if (mode === "dev") return this.publishDev(publishOptions);
     return this.publishDesktop(publishOptions);
+  }
+
+  private assertWritable(command: string): void {
+    if (this.readOnly === undefined) return;
+    throw new NectarError("E_DAEMON", `NECTAR_HOME is read-only here and nectar ${command} cannot run on this host without nectard`, { hint: "nectar daemon install" });
+  }
+
+  private remoteCaller(): { hive_bee?: string; hive_session?: string } {
+    const publisher = this.publisher ?? currentPublisher();
+    return {
+      ...(publisher.hive_bee === undefined ? {} : { hive_bee: publisher.hive_bee }),
+      ...(publisher.hive_session === undefined ? {} : { hive_session: publisher.hive_session }),
+    };
+  }
+
+  private async remote<T extends object = Record<string, unknown>>(host: string, op: RemoteOp, args: Record<string, unknown>, sshArgs: string[]): Promise<T> {
+    try {
+      return (await callRemote(host, op, { args, caller: this.remoteCaller() })) as T;
+    } catch (error) {
+      if (!(error instanceof NectarError) || error.details.transport !== true) throw error;
+      const config = await this.store.readConfig().catch(() => undefined);
+      if (config?.remote?.ssh_fallback !== true) throw error;
+      return this.remoteResult<T>(host, sshArgs);
+    }
+  }
+
+  private async publishRemote(host: string, options: PublishOptions): Promise<Record<string, unknown>> {
+    if (options.worktree !== undefined) throw new NectarError("E_USAGE", "--worktree does not apply with --host; the target checks out its own copy");
+    const common = {
+      name: options.name,
+      ttl: options.ttl,
+      packet: options.packet,
+      verify: options.verify,
+      dry_run: options.dryRun,
+      fresh: options.fresh,
+    };
+    const site = await this.staticCandidate(options);
+    let tar: Buffer;
+    let args: Record<string, unknown>;
+    if (site !== undefined) {
+      if (options.verify === true) throw new NectarError("E_USAGE", "--worktree and --verify do not apply to static sites");
+      if (site.file === undefined) tar = await packFiles(site.root, (await staticFiles(site.root)).files);
+      else tar = await packFiles(path.dirname(site.file), [{ relative: path.basename(site.file), name: sourceDir(path.basename(site.file)) }]);
+      args = {
+        kind: "static",
+        source: site.source,
+        dir: sourceDir(path.basename(site.file === undefined ? site.source : path.dirname(site.file))),
+        ...(site.file === undefined ? {} : { entry: sourceDir(path.basename(site.file)) }),
+        branch: await this.staticBranch(site, options),
+        ...common,
+      };
+    } else {
+      const repo = await resolveRepo(options.repo ?? process.cwd());
+      const slot = await resolveBranch(repo, options.branch);
+      const commit = slot.commit ?? (await resolveCommit(repo, slot.branch));
+      tar = await archiveCommit(repo, commit, MAX_TREE_BYTES);
+      const source = `roots:${(await sourceIdentity(repo, commit)).roots.join(",")}`;
+      args = { kind: "git", source, dir: sourceDir(path.basename(repo)), branch: slot.branch, commit, mode: options.mode, ...common };
+    }
+    const archive = await promisify(zlib.gzip)(tar);
+    if (archive.length > MAX_ARCHIVE_BYTES) throw new NectarError("E_USAGE", `The source is ${archive.length} bytes compressed; --host takes at most ${MAX_ARCHIVE_BYTES}`);
+    const payload = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined));
+    return (await callRemote(host, "publish", { args: payload, caller: this.remoteCaller() }, archive)) as Record<string, unknown>;
   }
 
   private async staticCandidate(options: PublishOptions): Promise<StaticSite | undefined> {
@@ -1888,7 +1959,12 @@ export class NectarService {
     record.failure = { code, message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
   }
 
-  async list(options: { mode?: string; status?: string } = {}): Promise<Record<string, unknown>> {
+  async list(options: { mode?: string; status?: string; host?: string } = {}): Promise<Record<string, unknown>> {
+    if (options.host !== undefined && !(await this.isLocalHost(options.host))) {
+      const filters = { mode: options.mode, status: options.status };
+      const flags = [...(options.mode === undefined ? [] : ["--mode", options.mode]), ...(options.status === undefined ? [] : ["--status", options.status])];
+      return this.remote(options.host, "ls", Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined)), ["ls", ...flags, "--json"]);
+    }
     const refreshed = await Promise.all((await this.store.listEnvs()).map(async (record) => this.refreshLiveness(record)));
     const envs = refreshed
       .filter((record) => options.mode === undefined || record.mode === options.mode)
@@ -1910,7 +1986,7 @@ export class NectarService {
   async show(input: string): Promise<Record<string, unknown>> {
     if (isRef(input)) {
       const parsed = parseRef(input);
-      if (!(await this.isLocalHost(parsed.host))) return this.remoteResult(parsed.host, ["show", parsed.env, "--json"]);
+      if (!(await this.isLocalHost(parsed.host))) return this.remote(parsed.host, "show", { target: parsed.env }, ["show", parsed.env, "--json"]);
       input = parsed.env;
     }
     const record = await this.refreshLiveness(await this.store.readEnv(validateEnvName(input)));
@@ -2031,7 +2107,7 @@ export class NectarService {
     if (!isRef(input)) return this.localResolve(validateEnvName(input), identity.host, true);
     const parsed = parseRef(input);
     if (await this.isLocalHost(parsed.host, identity)) return this.localResolve(parsed.env, parsed.host, true);
-    const remote = await this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
+    const remote = await this.remote<ResolveResult | MultiResolveResult>(parsed.host, "resolve", { target: parsed.env }, ["resolve", parsed.env, "--json"]);
     const remoteResolution = (resolution: ResolveResult): ResolveResult => {
       const ref = resolution.ref ?? `nectar://${parsed.host}/${resolution.env}`;
       return {
@@ -2345,10 +2421,11 @@ export class NectarService {
     if (isRef(input)) {
       const parsed = parseRef(input);
       if (!(await this.isLocalHost(parsed.host))) {
-        return this.remoteResult(parsed.host, ["touch", parsed.env, ...(ttl === undefined ? [] : ["--ttl", ttl]), "--json"]);
+        return this.remote(parsed.host, "touch", ttl === undefined ? { target: parsed.env } : { target: parsed.env, ttl }, ["touch", parsed.env, ...(ttl === undefined ? [] : ["--ttl", ttl]), "--json"]);
       }
       input = parsed.env;
     }
+    this.assertWritable("touch");
     const names = this.isQualified(input)
       ? [validateEnvName(input)]
       : (await this.store.listEnvs()).filter((record) => record.name.startsWith(`${validateEnvName(input)}--`)).map((record) => record.name);
@@ -2369,6 +2446,12 @@ export class NectarService {
   }
 
   async stop(name: string): Promise<Record<string, unknown>> {
+    if (isRef(name)) {
+      const parsed = parseRef(name);
+      if (!(await this.isLocalHost(parsed.host))) return this.remote(parsed.host, "stop", { env: parsed.env }, ["stop", parsed.env, "--json"]);
+      name = parsed.env;
+    }
+    this.assertWritable("stop");
     const record = await this.store.withLock(validateEnvName(name), async () => {
       const current = await this.store.readEnv(name);
       await this.releaseRuntime(current);
@@ -2395,6 +2478,14 @@ export class NectarService {
   }
 
   async remove(name: string, force = false): Promise<Record<string, unknown>> {
+    if (isRef(name)) {
+      const parsed = parseRef(name);
+      if (!(await this.isLocalHost(parsed.host))) {
+        return this.remote(parsed.host, "rm", force ? { env: parsed.env, force } : { env: parsed.env }, ["rm", parsed.env, ...(force ? ["--force"] : []), "--json"]);
+      }
+      name = parsed.env;
+    }
+    this.assertWritable("rm");
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
       if (holdsRuntime(record.status) && !force) {
@@ -2413,8 +2504,18 @@ export class NectarService {
       await this.tearDownExposure(record).catch(() => undefined);
       await trashPaths(targets, this.paths.root);
       await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
+      await this.releaseInbox(record);
       return { env: record.name, removed: true, forced: force, borrowed_worktree_preserved: record.borrowed_worktree };
     });
+  }
+
+  private async releaseInbox(record: EnvRecord): Promise<void> {
+    const inbox = path.join(this.paths.root, "inbox");
+    const key = path.relative(inbox, record.repo).split(path.sep)[0] ?? "";
+    if (!/^[0-9a-f]{16}$/.test(key)) return;
+    const slot = path.join(inbox, key);
+    const others = (await this.store.listEnvs()).some((other) => other.name !== record.name && path.relative(slot, other.repo).split(path.sep)[0] !== "..");
+    if (!others) await rm(slot, { recursive: true, force: true });
   }
 
   // Remove a live public route (nctr.site relay, D21). The relay's own hourly prune is
@@ -2578,6 +2679,7 @@ export class NectarService {
             if (!record.borrowed_worktree) targets.push(record.worktree);
             await trashPaths(targets, this.paths.root);
             await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
+            await this.releaseInbox(record);
           }
         });
       } catch (error) {
@@ -2721,6 +2823,12 @@ export class NectarService {
       message: `tailscaled refuses serve changes from ${os.userInfo().username} ("${rights.message}"); publishes will be local-only with no mesh URL`,
       hint: `Make this user a Tailscale operator once: ${OPERATOR_HINT}. Nectar never runs sudo, and doctor --fix leaves this alone`,
     };
+  }
+
+  async setRemoteListen(listen: boolean): Promise<void> {
+    const config = await this.store.readConfig();
+    config.remote = { ...config.remote, listen };
+    await this.store.writeConfig(config);
   }
 
   async enableDaemon(): Promise<void> {

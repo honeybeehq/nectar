@@ -11,6 +11,8 @@ import { callDaemon, callerFromEnv, homeWritable, isControlOp, selectRoute, star
 import { getPaths } from "./paths.js";
 import { DEFAULT_CONFIG } from "./state.js";
 import { debugEnabled, traceTailscale } from "./tailscale.js";
+import { isRef } from "./refs.js";
+import { remotePort, startRemoteListener } from "./remote.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
@@ -26,10 +28,13 @@ function directRequested(): boolean {
   return program.opts<{ direct?: boolean }>().direct === true;
 }
 
-async function routed(command: ControlOp, args: Record<string, unknown>, local: (service: NectarService) => Promise<unknown>): Promise<unknown> {
+async function routed(command: ControlOp, args: Record<string, unknown>, local: (service: NectarService) => Promise<unknown>, remote = false): Promise<unknown> {
   const paths = getPaths();
-  const route = await selectRoute(command, paths, { direct: directRequested() });
-  if (route.kind === "direct") return local(new NectarService());
+  const route = await selectRoute(command, paths, { direct: directRequested(), ...(remote ? { writable: () => Promise.resolve(true) } : {}) });
+  if (route.kind === "direct") {
+    if (remote && !(await homeWritable(paths.root))) return local(new NectarService(undefined, { readOnly: "NECTAR_HOME is read-only here and nectard is not reachable" }));
+    return local(new NectarService());
+  }
   if (route.kind === "readonly") return local(new NectarService(undefined, { readOnly: route.reason }));
   try {
     return await callDaemon(route.socket, command, { nectar_home: path.resolve(paths.root), caller: callerFromEnv(), args });
@@ -91,10 +96,11 @@ program
   .option("--name <app>", "app name for the env (default: the recipe name, or the directory or file name)")
   .option("--dry-run", "print the detected recipe source, build and serve commands without publishing")
   .option("--fresh", "drop and recreate the env's [deps] databases (and re-run the seed)")
+  .option("--host <node>", "ship the committed tree (or static dir) to another node's nectard and publish there")
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean; host?: string },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
@@ -111,6 +117,7 @@ program
           name: options.name,
           dry_run: options.dryRun,
           fresh: options.fresh,
+          host: options.host,
         };
         return routed("publish", args, async (service) => service.publish({
           repo: source,
@@ -123,7 +130,8 @@ program
           ...(options.name === undefined ? {} : { name: options.name }),
           ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
           ...(options.fresh === undefined ? {} : { fresh: options.fresh }),
-        }));
+          ...(options.host === undefined ? {} : { host: options.host }),
+        }), options.host !== undefined);
       }),
   );
 
@@ -132,8 +140,9 @@ program
   .description("list this machine's environments")
   .option("--mode <mode>")
   .option("--status <status>")
-  .action(async (options: { mode?: string; status?: string }) =>
-    execute("ls", async () => routed("ls", options, async (service) => service.list(options))),
+  .option("--host <node>", "list another node's environments over the tailnet")
+  .action(async (options: { mode?: string; status?: string; host?: string }) =>
+    execute("ls", async () => routed("ls", options, async (service) => service.list(options), options.host !== undefined)),
   );
 
 program
@@ -167,20 +176,20 @@ program
   .description("reset an environment's TTL")
   .option("--ttl <duration>", "time to live (default: the env's own TTL)")
   .action(async (input: string, options: { ttl?: string }) =>
-    execute("touch", async () => routed("touch", { target: input, ttl: options.ttl }, async (service) => service.touch(input, options.ttl))),
+    execute("touch", async () => routed("touch", { target: input, ttl: options.ttl }, async (service) => service.touch(input, options.ttl), isRef(input))),
   );
 
 program
-  .command("stop <env>")
+  .command("stop <env-or-ref>")
   .description("stop serving and retain environment files")
-  .action(async (input: string) => execute("stop", async () => routed("stop", { env: input }, async (service) => service.stop(input))));
+  .action(async (input: string) => execute("stop", async () => routed("stop", { env: input }, async (service) => service.stop(input), isRef(input))));
 
 program
-  .command("rm <env>")
+  .command("rm <env-or-ref>")
   .description("stop and trash an environment")
   .option("--force", "confirm removal of a serving environment")
   .action(async (input: string, options: { force?: boolean }) =>
-    execute("rm", async () => routed("rm", { env: input, force: options.force }, async (service) => service.remove(input, options.force ?? false))),
+    execute("rm", async () => routed("rm", { env: input, force: options.force }, async (service) => service.remove(input, options.force ?? false), isRef(input))),
   );
 
 program
@@ -253,7 +262,9 @@ daemon
         log({ event: "control_unavailable", message: asNectarError(error).message });
         return undefined;
       });
+      const remote = config.remote?.listen === true ? startRemoteListener(service.paths, log) : undefined;
       const shutdown = async (): Promise<void> => {
+        await remote?.close();
         await control?.close();
         await supervisor.stop();
         await release();
@@ -272,12 +283,15 @@ daemon
 daemon
   .command("install")
   .description("install and start nectard as a launchd user agent (macOS) or systemd --user unit (Linux)")
-  .action(async () =>
+  .option("--remote", "also serve the control API on this node's tailnet address (port 8441)")
+  .option("--no-remote", "turn the tailnet listener off")
+  .action(async (options: { remote?: boolean }) =>
     execute("daemon", async () => {
       const service = new NectarService();
+      if (options.remote !== undefined) await service.setRemoteListen(options.remote);
       const installed = await installUnit(service.paths);
       await service.enableDaemon();
-      return installed;
+      return { ...installed, remote: { listen: (await service.store.readConfig()).remote?.listen === true } };
     }),
   );
 
@@ -289,7 +303,13 @@ daemon
 daemon
   .command("status")
   .description("show whether nectard is installed and running")
-  .action(async () => execute("daemon", async () => unitStatus(new NectarService().paths)));
+  .action(async () =>
+    execute("daemon", async () => {
+      const service = new NectarService();
+      const config = await service.store.readConfig().catch(() => undefined);
+      return { ...(await unitStatus(service.paths)), remote: { listen: config?.remote?.listen === true, port: remotePort() } };
+    }),
+  );
 
 try {
   await program.parseAsync(process.argv);

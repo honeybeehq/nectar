@@ -154,7 +154,10 @@ export interface Publisher {
   hive_session?: string;
   user: string;
   cell?: string;
-  via?: "nectard";
+  via?: "nectard" | "tailnet";
+  node?: string;
+  node_name?: string;
+  login?: string;
 }
 
 export interface TestpackManifest {
@@ -247,6 +250,18 @@ export interface MachineConfig {
   last_gc_at?: string;
   exposures?: Record<string, ExposureTarget>;
   daemon?: "disabled";
+  remote?: RemoteConfig;
+}
+
+export interface RemoteAllow {
+  node_id?: string;
+  login?: string;
+}
+
+export interface RemoteConfig {
+  listen?: boolean;
+  allow?: RemoteAllow[];
+  ssh_fallback?: boolean;
 }
 
 export interface ResolveResult {

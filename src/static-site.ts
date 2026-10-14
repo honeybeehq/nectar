@@ -45,7 +45,7 @@ export async function findStaticSite(target: string): Promise<StaticSite | undef
   return undefined;
 }
 
-async function collect(root: string): Promise<{ files: Array<{ relative: string; size: number }>; skippedLinks: number }> {
+export async function staticFiles(root: string): Promise<{ files: Array<{ relative: string; size: number }>; skippedLinks: number }> {
   const files: Array<{ relative: string; size: number }> = [];
   let skippedLinks = 0;
   let bytes = 0;
@@ -85,7 +85,7 @@ export async function stageStaticSite(site: StaticSite, destination: string): Pr
       files = [{ relative: "index.html", size: (await lstat(site.file)).size }];
       await copyFile(site.file, path.join(staging, "index.html"));
     } else {
-      ({ files, skippedLinks } = await collect(site.root));
+      ({ files, skippedLinks } = await staticFiles(site.root));
       for (const file of files) {
         await mkdir(path.join(staging, path.dirname(file.relative)), { recursive: true });
         await copyFile(path.join(site.root, file.relative), path.join(staging, file.relative));

@@ -58,10 +58,10 @@ type ArgSpec = Record<string, "string" | "boolean">;
 
 const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
-    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean" },
+    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", host: "string" },
     required: ["path"],
   },
-  ls: { spec: { mode: "string", status: "string" }, required: [] },
+  ls: { spec: { mode: "string", status: "string", host: "string" }, required: [] },
   show: { spec: { target: "string" }, required: ["target"] },
   resolve: { spec: { target: "string" }, required: ["target"] },
   touch: { spec: { target: "string", ttl: "string" }, required: ["target"] },
@@ -164,11 +164,12 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
         name: text("name"),
         dryRun: flag("dry_run"),
         fresh: flag("fresh"),
+        host: text("host"),
       };
       return { ...(await service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)))), via: "nectard" };
     }
     case "ls":
-      return service.list(Object.fromEntries(Object.entries({ mode: text("mode"), status: text("status") }).filter(([, value]) => value !== undefined)));
+      return service.list(Object.fromEntries(Object.entries({ mode: text("mode"), status: text("status"), host: text("host") }).filter(([, value]) => value !== undefined)));
     case "show":
       return service.show(target);
     case "resolve":

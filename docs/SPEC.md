@@ -110,6 +110,7 @@ without it; the daemon only calls the same code the CLI calls.
 ~/.nectar/
   envs/<name>.json          # <name> includes --web/--desktop; source of truth
   work/<name>/              # nectar-owned git worktree/clone of the branch, or a static site's copy
+  work/<name>.deps/         # [deps] state (§5.1): compose.json + secrets.json (0600), sqlite copies
   packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
     acme-desktop--agent-coupons-stack.testpack.zip
   evidence/<name>/          # shell recordings, smoke output, screenshots
@@ -256,7 +257,9 @@ tailnet port range whose loopback target is dead, §10.2.)
   command re-derived from the running install, so a reinstall or node upgrade that moved the
   recorded absolute paths does not break revival. It waits for HTTP 200 at `ready_path`,
   then re-asserts `tailscale serve --https=<tailnet_port>` so the mesh URL stays the same,
-  stamps `serve.started_at`, and sets `serving`.
+  stamps `serve.started_at`, and sets `serving`. An env with `[deps]` postgres first runs
+  `docker compose up -d --wait` on its own project (§5.1) and gets its dep vars again; a dep
+  that does not come up marks the env `crashed` with `E_DEPS` and spawns nothing.
 - **Port taken.** If the env's process is gone but something else answers on its upstream
   port, or the port is held when it wants to revive, nectard spawns nothing and signals
   nothing. It removes the env's own `tailscale serve` entry (so the mesh URL never fronts an
@@ -420,6 +423,20 @@ stream = true                   # false = simpack-only publish (no serve-sim str
 
 [secrets]                       # optional; resolved via `hem get` at publish time (§9.2)
 STRIPE_KEY = "project/acme/stripe-test"
+
+[deps.db]                       # web envs only; one Postgres per env (§5.1)
+kind = "postgres:16"            # "postgres:<tag>" pins the official image; bare "postgres" = 17
+env = "DATABASE_URL"            # default; PG* vars are added when there is one postgres dep
+database = "app"                # default "app"
+user = "nectar"                 # default "nectar"; the password is generated per env
+
+[deps.files]
+kind = "sqlite"
+path = "data/app.db"            # copied from the checkout into the env's own deps dir
+env = "DATABASE_PATH"           # default; the absolute path of the copy
+
+[scenarios.review]              # only seed + default so far; entry/login are E_NO_RECIPE
+seed = "pnpm db:seed:review"    # runs once when the env's deps are created, and on --fresh
 ```
 
 Sections are independent; a repo declares only the modes it supports. **Fallbacks without a
@@ -442,6 +459,50 @@ Relation to Apiary's per-product review recipes: Apiary's recipe stores *who rev
 which surface kind*; `nectar.toml` is the only owner of *how to produce that surface*. The
 Apiary recipe's "test surface" line is descriptive (`nectar publish` + the mode), never a
 second command definition (DECISIONS D8).
+
+### 5.1 `[deps]` — per-env databases (amendment · 2026-10-14, DECISIONS D16, D30)
+
+Built so far: `kind = "postgres:<tag>"` on hosts with Docker and Compose v2, and
+`kind = "sqlite"`. `[deps].compose`, `provision`/`teardown` commands and other kinds are
+`E_NO_RECIPE` until built. Deps apply to web envs; other modes ignore them. The recipe is read
+from the published branch, as for `[web]`.
+
+- **Postgres.** Each env gets its own Compose project `nectar-<env>`, generated as
+  `work/<env>.deps/compose.json`: the official image, a named volume `<dep>-data`, a
+  `pg_isready` healthcheck, and the container's 5432 published on `127.0.0.1:<port>` only.
+  The port comes from the upstream range under the same machine-wide lock as serve ports and
+  is kept across republishes. Publish runs `docker compose up -d --wait` and starts the build
+  only once the container is healthy. The password is random per env and lives in
+  `secrets.json` (0600) next to the compose file, never in the env record.
+- **Injection.** The dep's `env` var (`DATABASE_URL` =
+  `postgresql://<user>:<password>@127.0.0.1:<port>/<database>`) plus `PGHOST`, `PGPORT`,
+  `PGUSER`, `PGPASSWORD`, `PGDATABASE` (one postgres dep only) go into the scrubbed
+  environment of build, seed, serve, and nectard revives. `show`, and the publish result,
+  carry `deps` with the URL's password replaced by `***`.
+- **SQLite.** The repo file is copied to `work/<env>.deps/<dep>/<file>` and the absolute path
+  is injected (`DATABASE_PATH` by default), so envs never share one file. If the repo has no
+  such file, the path is injected anyway and the app creates it.
+- **Lifecycle.** A republish reuses the database, so its data persists. `publish --fresh`
+  drops and recreates it (volume and password), or re-copies the SQLite file, and re-runs the
+  seed. A live republish's old serve can briefly see the database disappear while that
+  happens. `stop` and gc expire stop the containers. gc cold, reap and `rm` remove the
+  containers, the network and the volume, and trash the deps dir. A publish whose new
+  database never turns healthy removes what it created and fails `E_DEPS`. An existing
+  database is never removed for a failed republish.
+- **Only Nectar's own.** Every container, volume and network carries `dev.nectar.env=<env>`
+  and `dev.nectar.home=<NECTAR_HOME>`. Teardown lists by both labels (`docker ps -a`,
+  `network ls`, `volume ls` with `--filter label=…`) and removes only what it listed. Volumes
+  must also be named `nectar-…`. It never uses `compose down` or any prune.
+- **Seed.** The default scenario's `seed` (or the only scenario's) runs in the worktree with
+  the dep vars and `NECTAR_SCENARIO`, once when a dep is created and again on `--fresh`.
+  A failing seed fails the publish `E_SEED` with its log tail.
+- **Docker access.** nectard and the CLI run as the user, so the user must be able to reach
+  the Docker daemon: membership in the `docker` group (root-equivalent) or rootless Docker
+  with `DOCKER_HOST`. `NECTAR_DOCKER_BIN` picks the binary (default `docker`). Without
+  access, publishing an app with postgres deps fails `E_PLATFORM` before any checkout, with
+  that hint. `doctor` reports a `docker` check (fail when an existing env needs it, warn
+  otherwise) and never changes Docker access. macOS without Docker Desktop gets the same
+  error. A shared-Postgres fallback is not built yet.
 
 ## 6. The five modalities
 
@@ -872,12 +933,14 @@ plus (added post-v0 review, 2026-07-19):
   back to a read-only view instead.)
   `error.hint` is `nectar daemon install`. The user runs it from a shell outside any
   Cell. An agent reports it as a blocker and does not install anything itself.
+- `E_DEPS` — a `[deps]` database did not come up healthy, or Docker refused a teardown
+  step (§5.1); `log_tail` has Compose's output. `E_SEED` — the scenario seed exited non-zero.
 
 ### Commands
 
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
-               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--dry-run] [--json]
+               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--fresh] [--dry-run] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable; a failed web republish leaves the old serve
     # running (§6.1). --name overrides the app name for any source; a different source
@@ -886,7 +949,8 @@ nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch 
     # [path] overrides --repo. Static sites (a directory of HTML or one .html file) are
     # detected or forced with --mode static and publish as web envs (§6.1.1). Python and
     # Rails apps without a recipe publish through the §5 fallbacks (§6.1.2). --dry-run
-    # prints the matched recipe source, stack, reason, build and serve; it changes nothing.
+    # prints the matched recipe source, stack, reason, build, serve, deps and seed; it changes
+    # nothing. --fresh drops and recreates the env's [deps] databases and re-runs the seed (§5.1).
 
 nectar ls [--json] [--mode <m>] [--status <s>]
     # This machine's envs: name, mode, status, urls.mesh, expires_at (ISO), expires_in,
@@ -894,7 +958,9 @@ nectar ls [--json] [--mode <m>] [--status <s>]
 
 nectar show <env|ref> [--json]
     # { env: <full record>, name, mode, status, ref, urls, serve, pid, pgid,
-    #   ports: { upstream, tailnet }, liveness, expires_at, expires_in, failure }
+    #   ports: { upstream, tailnet }, liveness, deps, expires_at, expires_in, failure }
+    # deps: per dep { kind, env, image, project, port, database, user, file, url } with
+    #   the password in url shown as *** (§5.1); null without [deps].
     # (missing values are null) + log_tail (last 40 lines) when status is crashed or
     # unhealthy. Touches the env (TTL reset).
 
@@ -1114,7 +1180,8 @@ hold less-trusted code.
 ### 10.2 GC policy
 
 `nectar gc` (idempotent, per-env lockfiles): expire past-TTL envs (stop process group,
-remove tailscale-serve entry) → cold at expiry+24 h (delete worktree) → reap records at
+remove tailscale-serve entry, stop `[deps]` containers) → cold at expiry+24 h (delete
+worktree; remove `[deps]` containers, network and volume by label, §5.1) → reap records at
 cold+14 d → prune pack store/evidence to quota. Grace: envs *touched after publish* within
 the last 6 h are never transitioned, so an open review can't be reaped underneath the
 reviewer (open/resolve/show/touch all bump `last_touched_at`). The publish stamp itself does not
@@ -1157,6 +1224,7 @@ warns if `gc` hasn't run in 24 h.
 | F13 | simctl failure (no runtime, boot timeout, install/launch error) | publish fails `E_SIM` with simctl stderr; env kept as `crashed`; nectar-created device cleaned up |
 | F14 | `open` on a Mac without a matching iOS runtime | `E_PLATFORM` with the `preview_url`-needs-nothing hint; non-Mac `open` goes straight to the stream URL |
 | F15 | publishing host requests its own tailnet Serve URL | Tailscale supplies no caller identity and Serve returns 403; `resolve.is_self: true` tells consumers to prefer `urls.local`; packet `preview_url` remains the canonical mesh URL |
+| F16 | `[deps]` postgres on a host where this user cannot reach Docker | publish fails `E_PLATFORM` before any checkout, with the docker-group / rootless hint; Nectar never changes Docker access; `doctor`'s `docker` check says the same |
 
 ### 10.5 `doctor --fix`
 

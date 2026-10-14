@@ -116,6 +116,23 @@ nectar publish --dry-run     # recipe source, stack, reason, build and serve com
 Order: `nectar.toml` > `package.json` dev script > Python > Rails > static HTML
 (SPEC §5, §6.1.2).
 
+An app that needs a database declares it, and each preview gets its own (SPEC §5.1):
+
+```toml
+[deps.db]
+kind = "postgres:16"   # its own container, volume and loopback port per env; DATABASE_URL + PG* injected
+
+[scenarios.review]
+seed = "pnpm db:seed"  # runs when the database is created, and again on publish --fresh
+```
+
+Republishing keeps the data, `nectar publish --fresh` starts from an empty database, and
+`nectar rm` removes the container and its volume. This needs Docker with Compose that the
+user can reach (docker group or rootless Docker); without it the publish fails `E_PLATFORM`.
+Nectar only ever touches containers, volumes and networks labelled `dev.nectar.env`.
+`kind = "sqlite"` with `path = "data/app.db"` gives each env its own copy of the file
+instead.
+
 ## The CLI
 
 `publish` · `ls` · `show` · `open` · `resolve` · `touch` · `stop` · `rm` · `gc` ·
@@ -129,7 +146,8 @@ per-machine and tailnet-first; every preview is disposable and carries a TTL.
 
 **Built and tested.** Web / desktop / iOS publish, cross-machine resolve & open, atomic
 file state, garbage collection, `doctor`, and public exposure (`expose`/`unexpose` via the
-nctr.site relay) are implemented and covered by unit + fixture-backed integration tests.
+nctr.site relay) and per-env Postgres/SQLite `[deps]` are implemented and covered by unit +
+fixture-backed integration tests.
 `cli` and `backend` modes are next.
 
 ## Docs

@@ -604,3 +604,26 @@ redact them. The Unix socket stays the local route, so a Cell on the target
 node keeps working when the tailnet listener is off. The client side is the same
 `callDaemon` with an `http://<node>:8441` base URL. WireGuard already encrypts the hop.
 Putting `tailscale serve` in front would hide the peer address that WhoIs needs.
+
+## D30 — `[deps]` v1: generated Compose per env, torn down by label
+
+**Chose:** build D16's `kind` sugar first, for `postgres:<tag>` and `sqlite`. Nectar writes
+one Compose file per env (project `nectar-<env>`, a named volume, a healthcheck, a Nectar
+loopback port) and runs `docker compose up -d --wait`. Every container, volume and network
+is labelled `dev.nectar.env=<env>` and `dev.nectar.home=<NECTAR_HOME>`. Stop and teardown
+list by those labels and act only on the IDs they listed. The password is generated per env
+and kept in a 0600 file beside the compose file. A missing Docker, or one the user cannot
+reach, is `E_PLATFORM` before any work. A scenario `seed` runs when deps are created and on
+`--fresh`. (SPEC §5.1.)
+**Alternatives:** (a) `[deps].compose` or provision/teardown first, as D16's build order
+says; (b) `docker compose down -v` for teardown; (c) password in the env record; (d) a
+shared Postgres with a database per env.
+**Why:** (a) the phase-3 goal is "a database-reliant preview works smoothly". Postgres
+covers most of those apps, and with the generated file Nectar controls the labels, port
+and health, so isolation and teardown are provable. A repo's own compose file would need
+the same guarantees retrofitted, so it waits for its own slice. (b) `down` acts on the
+Compose project label, which anything can carry, and metal-1 runs CI and other services
+beside Nectar. Two Nectar labels plus the `nectar-` volume prefix are the only proof of
+ownership. (c) records are shown and copied into envelopes, and D17 keeps them
+secret-free. (d) is the planned macOS fallback, not the default: it shares one failure
+domain and makes `--fresh` a drop/create dance (D16).

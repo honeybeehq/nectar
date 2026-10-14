@@ -16,7 +16,7 @@ import { remoteStatus, startRemoteListener } from "./remote.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
-const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor", "expose", "unexpose", "daemon"];
+const knownCommands = ["publish", "ls", "show", "open", "resolve", "touch", "stop", "rm", "gc", "doctor", "expose", "unexpose", "daemon", "pool"];
 const requestedCommand = argv.find((arg) => knownCommands.includes(arg)) ?? "nectar";
 
 function output(value: unknown, json: boolean): void {
@@ -44,16 +44,17 @@ async function routed(command: ControlOp, args: Record<string, unknown>, local: 
   }
 }
 
-async function execute<T>(command: string, action: () => Promise<T>): Promise<void> {
+async function execute<T>(command: string, action: () => Promise<T>, text?: (result: T) => string): Promise<void> {
   const json = program.opts<{ json?: boolean }>().json === true || jsonRequested;
   if (debugEnabled()) {
     const log = daemonLogger(getPaths(), DEFAULT_CONFIG.log_max_bytes, () => undefined);
     traceTailscale((event) => log({ ...event, by: "cli", pid: process.pid }), { all: true });
   }
   try {
-    if (command !== "daemon" && !isControlOp(command)) await selectRoute(command, getPaths(), { direct: directRequested() });
+    if (command !== "daemon" && command !== "pool" && !isControlOp(command)) await selectRoute(command, getPaths(), { direct: directRequested() });
     const result = await action();
-    output(json ? successEnvelope(command, result) : result, json);
+    if (!json && text !== undefined) process.stdout.write(text(result));
+    else output(json ? successEnvelope(command, result) : result, json);
   } catch (error) {
     const nectarError = asNectarError(error);
     if (json) output(errorEnvelope(command, nectarError), true);
@@ -97,10 +98,11 @@ program
   .option("--dry-run", "print the detected recipe source, build and serve commands without publishing")
   .option("--fresh", "drop and recreate the env's [deps] databases (and re-run the seed)")
   .option("--host <node>", "ship the committed tree (or static dir) to another node's nectard and publish there")
+  .option("--local", "publish on this host even when a pool is configured")
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean; host?: string },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean; host?: string; local?: boolean },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
@@ -118,6 +120,7 @@ program
           dry_run: options.dryRun,
           fresh: options.fresh,
           host: options.host,
+          local: options.local,
         };
         return routed("publish", args, async (service) => service.publish({
           repo: source,
@@ -131,6 +134,7 @@ program
           ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
           ...(options.fresh === undefined ? {} : { fresh: options.fresh }),
           ...(options.host === undefined ? {} : { host: options.host }),
+          ...(options.local === undefined ? {} : { local: options.local }),
         }), options.host !== undefined);
       }),
   );
@@ -239,6 +243,61 @@ program
       new NectarService().doctor({ fix: options.fix ?? false, dryRun: options.dryRun ?? false, noDaemon: !options.daemon, save: options.save ?? false }),
     ),
   );
+
+async function poolService(): Promise<NectarService> {
+  const paths = getPaths();
+  return (await homeWritable(paths.root)) ? new NectarService() : new NectarService(undefined, { readOnly: "NECTAR_HOME is read-only here; change the pool from a shell outside the Cell" });
+}
+
+function list(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function poolTable(result: Record<string, unknown>): string {
+  const hosts = Array.isArray(result.hosts) ? (result.hosts as Array<Record<string, unknown>>) : [];
+  if (hosts.length === 0) return `${typeof result.note === "string" ? result.note : "The pool is empty"}\n`;
+  const columns = ["host", "healthy", "version", "nectard", "mesh", "deps", "envs", "serving", "load"];
+  const cell = (row: Record<string, unknown>, column: string): string => {
+    const value = row[column];
+    if (column === "host" && row.local === true) return `${String(value)} (this host)`;
+    return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : "-";
+  };
+  const rows = [columns, ...hosts.map((row) => columns.map((column) => cell(row, column)))];
+  const widths = columns.map((_, index) => Math.max(...rows.map((row) => (row[index] ?? "").length)));
+  const lines = rows.map((row) => row.map((value, index) => value.padEnd(widths[index] ?? 0)).join("  ").trimEnd());
+  const errors = hosts.filter((row) => row.error !== undefined).map((row) => `${String(row.host)}: ${(row.error as { message?: string }).message ?? ""}`);
+  const next = result.next as { web?: string | null; postgres?: string | null; reason?: string } | undefined;
+  const summary = next === undefined ? [] : [`next web/static publish: ${next.web ?? "this host (no usable pool host)"}; next [deps] postgres publish: ${next.postgres ?? "this host"}`, next.reason ?? ""];
+  return `${[...lines, ...errors, ...summary].filter(Boolean).join("\n")}\n`;
+}
+
+const pool = program.command("pool").description("the hosts that take web and static publishes when no --host is given");
+
+pool
+  .command("ls")
+  .description("show the pool and the placements made from this host")
+  .action(async () => execute("pool", async () => (await poolService()).poolList()));
+
+pool
+  .command("add <hosts...>")
+  .description("add nodes to the pool (in order of preference)")
+  .option("--prefer <policy>", "first-healthy or least-loaded")
+  .option("--for <categories>", "what the pool takes: web,static", list)
+  .action(async (hosts: string[], options: { prefer?: string; for?: string[] }) =>
+    execute("pool", async () =>
+      (await poolService()).poolChange({ add: hosts, ...(options.prefer === undefined ? {} : { prefer: options.prefer }), ...(options.for === undefined ? {} : { defaultFor: options.for }) }),
+    ),
+  );
+
+pool
+  .command("rm <hosts...>")
+  .description("remove nodes from the pool")
+  .action(async (hosts: string[]) => execute("pool", async () => (await poolService()).poolChange({ remove: hosts })));
+
+pool
+  .command("check")
+  .description("ask each pool host's nectard for its health, mesh, deps provider and load")
+  .action(async () => execute("pool", async () => (await poolService()).poolCheck(), poolTable));
 
 const daemon = program.command("daemon").description("nectard: revive crashed envs, restore them after reboot, run gc hourly");
 

@@ -131,7 +131,8 @@ without it; the daemon only calls the same code the CLI calls.
     smoke-20260718T1204.txt
   logs/<name>/serve.log     # dev-server stdout+stderr, rotated at 10 MB
   inbox/<key>/<dir>/        # sources other nodes shipped with publish --host (§4.5); removed with their last env
-  nectar.json               # machine config: port ranges, quotas, tailnet name cache
+  nectar.json               # machine config: port ranges, quotas, tailnet name cache, pool (§4.6)
+  placements.json           # where the pool put this node's publishes, for sticky republish (§4.6)
 ```
 
 State is **one JSON file per env**, written atomically (temp + rename). No SQLite: records
@@ -415,7 +416,9 @@ tailnet port range whose loopback target is dead, §10.2.)
     100 000 entries unpacked), and `x-nectar-request` holds base64url JSON
     `{args, caller}` with `args`: `kind` (`git` or `static`), `source` (a key only: the
     repo's root commits for git, the site's path for static), `dir` (the source directory's name), `entry` (static single
-    file), `branch`, `commit`, `mode`, `ttl`, `packet`, `verify`, `name`, `dry_run`, `fresh`.
+    file), `branch`, `commit`, `mode`, `ttl`, `packet`, `verify`, `name`, `dry_run`, `fresh`,
+    and `path` (git only: the directory or file inside the repo that was published, as
+    plain `/`-separated components with no `.`, `..` or `.git`; absent for the repo root).
     nectard unpacks into `inbox/<key>/<dir>`, where `key` hashes the caller's stable node
     ID and `source`. So a repo republishes into the same copy from any checkout on that
     node (another Cell, after a move), and each node has its own. The archive is refused
@@ -425,7 +428,11 @@ tailnet port range whose loopback target is dead, §10.2.)
     inside it, a bad checksum, a truncated stream, or a cap. Files are created `O_EXCL |
     O_NOFOLLOW` with mode 0644 or 0755. A `static` tree publishes as a static site. A `git`
     tree becomes one commit on `branch` in the inbox repository (`git init`, `add`,
-    `commit`, all with the §9.3 git hardening), which then publishes like a local repo.
+    `commit`, all with the §9.3 git hardening), which then publishes like a local repo,
+    from `path` inside it when given: the same static-site check and recipe detection
+    (`nectar.toml`, a `package.json` dev script, the Python and Rails fallbacks, static
+    only when nothing else matches) as a local publish of that commit. A received publish
+    never goes on to this node's own pool (§4.6).
     The record's `publisher` is `{user, via: "tailnet", node, node_name, login?, hive_bee?,
     hive_session?}`; `node`, `node_name` and `login` come from WhoIs, not the request.
   - Replies are the CLI's envelope, redacted for the peer. `ls` drops `publisher_bee`.
@@ -437,6 +444,12 @@ tailnet port range whose loopback target is dead, §10.2.)
     `warnings`, `mesh_error` and `deps` as `{kind}`. Error details are cut to `hint`,
     `refused` and `node_id` (`publish` keeps `log_tail`). In messages, warnings and log
     tails `NECTAR_HOME` reads `$NECTAR_HOME` and every other absolute path reads `<path>`.
+  - `GET /v1/hello` answers an authorized caller with `{api, ops, host, caller}` plus this
+    node's report for pool placement (§4.6): `version` (package version + the install's
+    short commit), `nectard: {ok, pid}`, `mesh` (`ok`, `denied` when this user may not
+    change Serve config, i.e. is not a Tailscale operator, or `unknown`), `deps` (the
+    `[deps]` postgres provider §5.1 would pick: `docker`, `local` or `none`; cached for a
+    minute), `envs: {total, serving}` and `load: {load1, cpus, per_cpu}`.
   - Logs: one `remote` event per request with the caller's node ID and login. Every refused
     request also logs `remote_refused` with `rule`, `op`, `code`, `peer_address`,
     `node_name`, `node_id`, `login`, `tags`, `user_id`, `node_user_id`, `owner`, `whois`
@@ -523,6 +536,58 @@ reachable>)`.
 Nectar runs the CLI with its own environment minus launchd's job identity (`XPC_SERVICE_NAME`,
 `XPC_FLAGS`), so a CLI started from nectard's launchd agent sees what it sees in a login
 shell. `tailscale status --json` and `serve status --json` get 15 s, `serve` changes 20 s.
+
+### 4.6 The publishing pool (amendment · 2026-10-14, DECISIONS D34)
+
+A node can hand its web and static publishes to other nodes. The pool lives in that
+node's `nectar.json`:
+
+```json
+"pool": { "hosts": ["metal-3", "trmd-moria-mini03"], "default_for": ["web", "static"], "prefer": "least-loaded" }
+```
+
+`hosts` are node names in order of preference (as for `--host`; this node may be one of
+them). `default_for` takes `web` (a `nectar.toml` `[web]` recipe or a §6.1.2 fallback such
+as a `package.json` dev script) and `static`, both by default. `prefer` is `first-healthy`
+(default) or `least-loaded`. No `pool`, or no hosts: every publish without `--host` stays
+on this node, exactly as before. A malformed `pool` is `E_USAGE` on publish.
+
+`publish` without `--host` and without `--local`, when a pool is configured:
+
+1. The publishing node works out locally what the publish is (static site, or the
+   recipe's mode and whether it has `[deps] postgres`) and the env name. If that fails,
+   it publishes here and reports the real error.
+2. `desktop`, `ios` and `dev` envs, and a category not in `default_for`, stay here.
+3. An env that already exists on this node stays here (`<env> already lives on this host`).
+4. **Sticky.** If `placements.json` says where this source's env went (key: the repo's
+   root commits, or a static site's path outside any repo, plus the env name, so another
+   Cell's checkout of the same repo sticks too), it goes there again while that node's
+   nectard answers, mesh-denied or not. If it no longer answers, the env is placed anew
+   and the reason says so. `rm nectar://<node>/<env>` drops the entry.
+5. Otherwise every pool host is asked for `GET /v1/hello` (8 s timeout; this node's own
+   entry is evaluated in-process). A host is skipped when it does not answer, refuses
+   (`E_FORBIDDEN`, `E_REMOTE`), reports nectard down, reports `mesh: denied` (a preview
+   placed there would have no tailnet URL, and every placed publish needs one), or, for an
+   env with `[deps] postgres`, reports `deps: none`. A postgres env prefers `docker`, then
+   `local`, then a host that reports nothing. Then `first-healthy` takes the first in pool
+   order and `least-loaded` the lowest `load.per_cpu`, then fewest serving envs, then pool
+   order. A host on an older nectard that reports no fields is usable and sorts last by load.
+6. The publish goes to the chosen host as `publish --host <host>` would. No usable host:
+   it publishes here.
+
+The result, and the `--dry-run` plan, carry `placed_on` (the node) and `placement_reason`
+(for example `pool: metal-3, because it is the least loaded (load 0.12 per CPU, 2 serving
+envs); skipped netcup-4 (mesh denied: …)`). A dry run asks the chosen host for its plan and
+records nothing. `--local` publishes here and is `E_USAGE` together with `--host`.
+
+`nectar pool ls` shows the pool and the recorded placements. `nectar pool add <hosts…>
+[--prefer first-healthy|least-loaded] [--for web,static]` and `nectar pool rm <hosts…>`
+change it (they write `nectar.json`, so they run where `NECTAR_HOME` is writable, not in a
+Cell). `nectar pool check` asks every host for its hello and prints a table (`--json`: an
+envelope) with `healthy`, `version`, `nectard`, `mesh`, `deps`, `envs`, `serving`, `load`,
+the error for a host that did not answer, and where the next web and postgres publish would go.
+`ls`, `check` and placement also work from a Cell with a read-only home (placement then
+records nothing unless it runs in nectard, which is how Cells publish).
 
 ## 5. Recipes — `nectar.toml`
 
@@ -1126,9 +1191,15 @@ tailscaled's status by MagicDNS name, its first label or its host name; none is
 and otherwise run in-process even when `NECTAR_HOME` is read-only, since they write
 nothing here. Only when `remote.ssh_fallback` is `true` in `nectar.json` does a node
 that cannot be reached fall back to `tailscale ssh <node> nectar …`. `publish --host`
-ships a tar: for a static site, the files a local static publish would copy; otherwise
-`git archive` of the branch's commit (`--branch`, else the current branch), so the target
-gets the committed tree and never `.git` or its config. `--worktree` does not apply.
+ships a tar. Anything inside a git repo ships as `git archive` of the branch's commit
+(`--branch`, else the current branch, else the D29 slot for a detached HEAD) plus the
+published path inside it, so the target gets only committed files, never `.git` or its
+config, and runs the same detection as a local publish of that commit (a repo without
+`nectar.toml` included). Uncommitted edits are not shipped. A static page or directory in
+a repo that is not committed is `E_USAGE` ("commit it first"), except when git ignores it
+(build output such as `dist/`), which ships as files. A static site outside any repo ships
+the files a local static publish would copy. For a static site `--branch` is a label, so
+an unknown branch ships `HEAD`. `--worktree` does not apply.
 
 Route (D29): `publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` go through the
 local nectard (§4.5 control socket) when it answers for the same `NECTAR_HOME`.
@@ -1184,7 +1255,7 @@ plus (added post-v0 review, 2026-07-19):
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
                [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--fresh] [--dry-run]
-               [--host <node>] [--json]
+               [--host <node> | --local] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable; a failed web republish leaves the old serve
     # running (§6.1). --name overrides the app name for any source; a different source
@@ -1197,6 +1268,13 @@ nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch 
     # nothing. --fresh drops and recreates the env's [deps] databases and re-runs the seed (§5.1).
     # --host <node> ships the source to that node's nectard and publishes there (§4.5, §7
     # route); the result's ref is nectar://<node>/<env> and its URLs are the node's.
+    # Without --host, a configured pool (§4.6) may place web and static publishes on another
+    # node; the result then carries placed_on and placement_reason. --local stays here.
+
+nectar pool ls | add <hosts…> [--prefer first-healthy|least-loaded] [--for web,static]
+          | rm <hosts…> | check [--json]
+    # The hosts that take this node's web and static publishes (§4.6). check asks each
+    # host's listener for version, nectard, mesh, deps provider, env count and load.
 
 nectar ls [--json] [--mode <m>] [--status <s>] [--host <node>]
     # This machine's envs: name, mode, status, urls.mesh, expires_at (ISO), expires_in,

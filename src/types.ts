@@ -256,6 +256,17 @@ export interface MachineConfig {
   exposures?: Record<string, ExposureTarget>;
   daemon?: "disabled";
   remote?: RemoteConfig;
+  pool?: PoolConfig;
+}
+
+export type PoolCategory = "web" | "static";
+
+export type PoolPolicy = "first-healthy" | "least-loaded";
+
+export interface PoolConfig {
+  hosts?: string[];
+  default_for?: PoolCategory[];
+  prefer?: PoolPolicy;
 }
 
 export interface RemoteAllow {

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import {
   archiveCommit,
   currentBranch,
@@ -16,6 +16,8 @@ import {
   resolveCommit,
   resolveRepo,
   runGit,
+  gitIgnored,
+  inCommit,
   sameRepository,
   shortCommit,
   sourceIdentity,
@@ -116,7 +118,8 @@ import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, staticFiles, type StaticSite } from "./static-site.js";
 import { MAX_TREE_BYTES, packFiles } from "./archive.js";
-import { callRemote, listenerCheck, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
+import { callRemote, helloRemote, listenerCheck, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
+import { choosePoolHost, hostReport, poolSettings, POOL_CATEGORIES, POOL_POLICIES, readPlacements, updatePlacements, type PoolProbe } from "./pool.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
@@ -174,6 +177,20 @@ interface PublishOptions {
   dryRun?: boolean;
   fresh?: boolean;
   host?: string;
+  local?: boolean;
+}
+
+interface PublishShape {
+  category: string;
+  env: string;
+  key: string;
+  postgres: boolean;
+}
+
+interface PlacementDecision {
+  host: string | undefined;
+  reason: string;
+  key?: string;
 }
 
 interface MachineIdentity {
@@ -365,7 +382,24 @@ export class NectarService {
     // Validate caller input before touching the repo — a bad --ttl is a usage
     // error, not a checkout problem.
     const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
+    if (options.host !== undefined && options.local === true) throw new NectarError("E_USAGE", "--host and --local exclude each other");
     if (options.host !== undefined && !(await this.isLocalHost(options.host))) return this.publishRemote(options.host, options);
+    const placement = options.host === undefined ? await this.place(options) : undefined;
+    if (placement === undefined) return this.publishHere(options, ttlMs);
+    const placed = { placed_on: placement.host ?? (await this.identity()).host, placement_reason: placement.reason };
+    if (placement.host === undefined) return { ...(await this.publishHere(options, ttlMs)), ...placed };
+    const result = await this.publishRemote(placement.host, options);
+    if (options.dryRun !== true && placement.key !== undefined && this.readOnly === undefined && typeof result.env === "string") {
+      const key = placement.key;
+      const entry = { host: placement.host, env: result.env, at: new Date().toISOString() };
+      await updatePlacements(this.paths, (placements) => {
+        placements[key] = entry;
+      });
+    }
+    return { ...result, ...placed };
+  }
+
+  private async publishHere(options: PublishOptions, ttlMs: number): Promise<Record<string, unknown>> {
     this.assertWritable("publish");
     const site = await this.staticCandidate(options);
     if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
@@ -430,6 +464,140 @@ export class NectarService {
     }
   }
 
+  private async place(options: PublishOptions): Promise<PlacementDecision | undefined> {
+    if (!existsSync(this.paths.config)) return undefined;
+    const pool = poolSettings(await this.store.readConfig());
+    if (pool === undefined) return undefined;
+    if (options.local === true) return { host: undefined, reason: "--local keeps it on this host" };
+    let shape: PublishShape;
+    try {
+      shape = await this.publishShape(options);
+    } catch {
+      return undefined;
+    }
+    if (!(pool.default_for as string[]).includes(shape.category)) {
+      return { host: undefined, reason: POOL_CATEGORIES.includes(shape.category as never) ? `pool.default_for does not include ${shape.category}, so it stays on this host` : `${shape.category} envs always stay on this host` };
+    }
+    if ((await this.store.maybeEnv(shape.env)) !== undefined) return { host: undefined, reason: `${shape.env} already lives on this host` };
+    const sticky = (await readPlacements(this.paths))[shape.key];
+    const stickyProbe = sticky === undefined ? undefined : await this.probePoolHost(sticky.host);
+    if (sticky !== undefined && stickyProbe?.local === true) return { host: undefined, reason: `${shape.env} was placed on this host` };
+    if (sticky !== undefined && stickyProbe?.error === undefined && stickyProbe?.report?.nectard?.ok !== false) {
+      return { host: sticky.host, reason: `sticky: ${sticky.env} already lives on ${sticky.host} (placed ${sticky.at})`, key: shape.key };
+    }
+    const probes = await Promise.all(pool.hosts.map(async (host) => (host === sticky?.host && stickyProbe !== undefined ? stickyProbe : this.probePoolHost(host))));
+    const choice = choosePoolHost(probes, { postgres: shape.postgres }, pool.prefer);
+    const moved = sticky === undefined ? "" : `${sticky.env} lived on ${sticky.host}, which is unhealthy (${stickyProbe?.error?.message ?? "nectard is not running"}); `;
+    if (choice.host === undefined) return { host: undefined, reason: `${moved}${choice.reason}; published on this host` };
+    const local = probes.find((probe) => probe.host === choice.host)?.local === true;
+    return { host: local ? undefined : choice.host, reason: `${moved}${choice.reason}`, key: shape.key };
+  }
+
+  private async publishShape(options: PublishOptions): Promise<PublishShape> {
+    const site = await this.staticCandidate(options);
+    if (site !== undefined) {
+      const env = envName(appSlug(options.name ?? site.name), await this.staticBranch(site, options), "web");
+      const repo = await resolveRepo(path.dirname(site.file ?? path.join(site.root, "index.html"))).catch(() => undefined);
+      const source = repo === undefined ? site.source : `roots:${(await sourceIdentity(repo, "HEAD")).roots.join(",")}`;
+      return { category: "static", env, key: `${source}\0${env}`, postgres: false };
+    }
+    const repo = await resolveRepo(options.repo ?? process.cwd());
+    const slot = await resolveBranch(repo, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
+    const loaded = await loadRecipe(repo);
+    const recipe = options.name === undefined ? loaded : { ...loaded, name: appSlug(options.name) };
+    const mode = selectMode(recipe, options.mode);
+    const env = envName(recipe.name, slot.branch, mode);
+    const source = `roots:${(await sourceIdentity(repo, slot.commit ?? slot.branch)).roots.join(",")}`;
+    const postgres = mode === "web" && Object.values(recipe.deps ?? {}).some((dep) => dep.kind === "postgres");
+    return { category: mode, env, key: `${source}\0${env}`, postgres };
+  }
+
+  private async probePoolHost(host: string): Promise<PoolProbe> {
+    if (await this.isLocalHost(host)) return { host, local: true, report: await hostReport(this.paths) };
+    try {
+      return { host, local: false, report: await helloRemote(host) };
+    } catch (error) {
+      const failure = asNectarError(error);
+      return { host, local: false, error: { code: failure.code, message: failure.message } };
+    }
+  }
+
+  private async forgetPlacement(host: string, env: string): Promise<void> {
+    const aliases = hostAliases(host);
+    const placements = await readPlacements(this.paths);
+    const stale = Object.entries(placements).filter(([, entry]) => entry.env === env && [...hostAliases(entry.host)].some((alias) => aliases.has(alias)));
+    if (stale.length === 0) return;
+    await updatePlacements(this.paths, (current) => {
+      for (const [key] of stale) delete current[key];
+    });
+  }
+
+  async poolList(): Promise<Record<string, unknown>> {
+    const config = await this.store.readConfig();
+    const pool = poolSettings(config);
+    const placements = await readPlacements(this.paths);
+    return {
+      pool: pool ?? null,
+      placements: Object.values(placements).sort((a, b) => (a.env < b.env ? -1 : a.env > b.env ? 1 : 0)),
+      ...(pool === undefined ? { note: "No pool: every publish without --host stays on this host" } : {}),
+    };
+  }
+
+  async poolChange(change: { add?: string[]; remove?: string[]; prefer?: string; defaultFor?: string[] }): Promise<Record<string, unknown>> {
+    this.assertWritable("pool");
+    const config = await this.store.readConfig();
+    const current = poolSettings(config);
+    const hosts = [...(current?.hosts ?? [])];
+    for (const host of change.add ?? []) {
+      const name = host.trim().toLowerCase();
+      if (name === "") throw new NectarError("E_USAGE", "A pool host needs a node name");
+      if (!hosts.includes(name)) hosts.push(name);
+    }
+    const removed = new Set((change.remove ?? []).map((host) => host.trim().toLowerCase()));
+    const missing = [...removed].filter((host) => !hosts.includes(host));
+    if (missing.length > 0) throw new NectarError("E_NOT_FOUND", `Not in the pool: ${missing.join(", ")}`);
+    if (change.prefer !== undefined && !(POOL_POLICIES as readonly string[]).includes(change.prefer)) {
+      throw new NectarError("E_USAGE", `--prefer takes ${POOL_POLICIES.join(" or ")}`);
+    }
+    if (change.defaultFor !== undefined && (change.defaultFor.length === 0 || change.defaultFor.some((category) => !(POOL_CATEGORIES as readonly string[]).includes(category)))) {
+      throw new NectarError("E_USAGE", `--for takes ${POOL_CATEGORIES.join(",")}; desktop, ios and dev envs always stay on the publishing host`);
+    }
+    const next = {
+      ...(config.pool ?? {}),
+      hosts: hosts.filter((host) => !removed.has(host)),
+      ...(change.prefer === undefined ? {} : { prefer: change.prefer }),
+      ...(change.defaultFor === undefined ? {} : { default_for: change.defaultFor }),
+    } as NonNullable<MachineConfig["pool"]>;
+    poolSettings({ ...config, pool: next });
+    await this.store.writeConfig({ ...config, pool: next });
+    return this.poolList();
+  }
+
+  async poolCheck(): Promise<Record<string, unknown>> {
+    const pool = poolSettings(await this.store.readConfig());
+    if (pool === undefined) return { pool: null, hosts: [], note: "No pool: every publish without --host stays on this host" };
+    const probes = await Promise.all(pool.hosts.map((host) => this.probePoolHost(host)));
+    const web = choosePoolHost(probes, { postgres: false }, pool.prefer);
+    const postgres = choosePoolHost(probes, { postgres: true }, pool.prefer);
+    return {
+      pool,
+      hosts: probes.map((probe) => ({
+        host: probe.host,
+        ...(probe.local ? { local: true } : {}),
+        healthy: probe.error === undefined && probe.report?.nectard?.ok !== false,
+        version: probe.report?.version ?? null,
+        nectard: probe.error === undefined ? (probe.report?.nectard?.ok ?? true ? "ok" : "down") : "unreachable",
+        mesh: probe.report?.mesh ?? null,
+        deps: probe.report?.deps ?? null,
+        envs: probe.report?.envs?.total ?? null,
+        serving: probe.report?.envs?.serving ?? null,
+        load: probe.report?.load?.per_cpu ?? null,
+        ...(probe.error === undefined ? {} : { error: probe.error }),
+      })),
+      next: { web: web.host ?? null, postgres: postgres.host ?? null, reason: web.reason },
+    };
+  }
+
   private async publishRemote(host: string, options: PublishOptions): Promise<Record<string, unknown>> {
     if (options.worktree !== undefined) throw new NectarError("E_USAGE", "--worktree does not apply with --host; the target checks out its own copy");
     const common = {
@@ -441,9 +609,11 @@ export class NectarService {
       fresh: options.fresh,
     };
     const site = await this.staticCandidate(options);
+    const target = path.resolve(options.repo ?? process.cwd());
+    const repo = await this.shippedRepo(target, site, options.branch);
     let tar: Buffer;
     let args: Record<string, unknown>;
-    if (site !== undefined) {
+    if (repo === undefined && site !== undefined) {
       if (options.verify === true) throw new NectarError("E_USAGE", "--worktree and --verify do not apply to static sites");
       if (site.file === undefined) tar = await packFiles(site.root, (await staticFiles(site.root)).files);
       else tar = await packFiles(path.dirname(site.file), [{ relative: path.basename(site.file), name: sourceDir(path.basename(site.file)) }]);
@@ -456,17 +626,45 @@ export class NectarService {
         ...common,
       };
     } else {
-      const repo = await resolveRepo(options.repo ?? process.cwd());
-      const slot = await resolveBranch(repo, options.branch);
-      const commit = slot.commit ?? (await resolveCommit(repo, slot.branch));
-      tar = await archiveCommit(repo, commit, MAX_TREE_BYTES);
-      const source = `roots:${(await sourceIdentity(repo, commit)).roots.join(",")}`;
-      args = { kind: "git", source, dir: sourceDir(path.basename(repo)), branch: slot.branch, commit, mode: options.mode, ...common };
+      const root = repo ?? (await resolveRepo(target));
+      const slot = await resolveBranch(root, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
+      const commit = slot.commit ?? (await this.shippedCommit(root, slot.branch, site));
+      tar = await archiveCommit(root, commit, MAX_TREE_BYTES);
+      const source = `roots:${(await sourceIdentity(root, commit)).roots.join(",")}`;
+      const within = path.relative(await realpath(root), await realpath(target)).split(path.sep).join("/");
+      if (within !== "" && !(await inCommit(root, commit, within))) {
+        throw new NectarError("E_USAGE", `${within} is not in the committed tree of ${slot.branch}; --host ships only committed files, so commit it first`);
+      }
+      args = { kind: "git", source, dir: sourceDir(path.basename(root)), branch: slot.branch, commit, mode: options.mode, ...(within === "" ? {} : { path: within }), ...common };
     }
     const archive = await promisify(zlib.gzip)(tar);
     if (archive.length > MAX_ARCHIVE_BYTES) throw new NectarError("E_USAGE", `The source is ${archive.length} bytes compressed; --host takes at most ${MAX_ARCHIVE_BYTES}`);
     const payload = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined));
     return (await callRemote(host, "publish", { args: payload, caller: this.remoteCaller() }, archive)) as Record<string, unknown>;
+  }
+
+  private async shippedCommit(repo: string, branch: string, site: StaticSite | undefined): Promise<string> {
+    try {
+      return await resolveCommit(repo, branch);
+    } catch (error) {
+      if (site === undefined) throw error;
+      return resolveCommit(repo, "HEAD");
+    }
+  }
+
+  private async shippedRepo(target: string, site: StaticSite | undefined, branch: string | undefined): Promise<string | undefined> {
+    const directory = site?.file === undefined ? target : path.dirname(site.file);
+    let repo: string;
+    try {
+      repo = await resolveRepo(directory);
+    } catch {
+      return undefined;
+    }
+    if (site === undefined) return repo;
+    const page = path.relative(await realpath(repo), await realpath(site.file ?? path.join(site.root, "index.html"))).split(path.sep).join("/");
+    if (await inCommit(repo, await this.shippedCommit(repo, branch ?? "HEAD", site), page)) return repo;
+    if (await gitIgnored(repo, page)) return undefined;
+    throw new NectarError("E_USAGE", `${page} is not committed; --host ships a repo's committed tree, so commit it first (ignored build output is shipped as files)`);
   }
 
   private async staticCandidate(options: PublishOptions): Promise<StaticSite | undefined> {
@@ -2629,7 +2827,9 @@ export class NectarService {
     if (isRef(name)) {
       const parsed = parseRef(name);
       if (!(await this.isLocalHost(parsed.host))) {
-        return this.remote(parsed.host, "rm", force ? { env: parsed.env, force } : { env: parsed.env }, ["rm", parsed.env, ...(force ? ["--force"] : []), "--json"]);
+        const removed = await this.remote(parsed.host, "rm", force ? { env: parsed.env, force } : { env: parsed.env }, ["rm", parsed.env, ...(force ? ["--force"] : []), "--json"]);
+        if (this.readOnly === undefined) await this.forgetPlacement(parsed.host, parsed.env);
+        return removed;
       }
       name = parsed.env;
     }

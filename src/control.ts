@@ -61,7 +61,7 @@ type ArgSpec = Record<string, "string" | "boolean">;
 
 const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
-    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", host: "string" },
+    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", host: "string", local: "boolean" },
     required: ["path"],
   },
   ls: { spec: { mode: "string", status: "string", host: "string" }, required: [] },
@@ -168,6 +168,7 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
         dryRun: flag("dry_run"),
         fresh: flag("fresh"),
         host: text("host"),
+        local: flag("local"),
       };
       return { ...(await service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)))), via: "nectard" };
     }

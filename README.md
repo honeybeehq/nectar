@@ -110,6 +110,24 @@ empty list refuses everyone (`E_FORBIDDEN`). A node without the listener gives `
 Remote `show` and `ls` leave out paths, bee ids, commands and database credentials
 (SPEC §4.5).
 
+`--host` ships committed files only: in a repo, commit first. Build output that git ignores
+(`dist/`) ships as files.
+
+To move web previews off a busy machine by default, give it a pool of nodes whose
+listeners are on. Web and static publishes without `--host` then go to a healthy pool host;
+desktop, iOS and dev envs stay put:
+
+```bash
+nectar pool add metal-3 trmd-moria-mini03 --prefer least-loaded
+nectar pool check                              # version, nectard, mesh, deps provider, envs, load per host
+nectar publish --dry-run --json                # .result.placed_on and .placement_reason
+nectar publish --json                          # lands on the chosen host; a republish sticks to it
+nectar publish --local --json                  # stay on this machine
+```
+
+Hosts whose user is not a Tailscale operator (no mesh URL) are skipped, and an app with
+`[deps] postgres` prefers a host with Docker, then one with local Postgres (SPEC §4.6).
+
 Then, in any repo with a `dev` script (or a `nectar.toml`):
 
 ```bash

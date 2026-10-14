@@ -217,6 +217,15 @@ export async function archiveCommit(repo: string, commit: string, maxBytes: numb
   });
 }
 
+export async function inCommit(repo: string, ref: string, relative: string): Promise<boolean> {
+  if (ref.startsWith("-")) throw new NectarError("E_CHECKOUT", `Ref '${ref}' is not a valid ref name`);
+  return (await runGit(["cat-file", "-e", `${ref}:${relative}`], repo)).exitCode === 0;
+}
+
+export async function gitIgnored(repo: string, relative: string): Promise<boolean> {
+  return (await runGit(["check-ignore", "-q", "--no-index", "--", relative], repo)).exitCode === 0;
+}
+
 export async function commitTree(repo: string, branch: string, message: string): Promise<void> {
   if (branch.startsWith("-")) throw new NectarError("E_CHECKOUT", `Branch '${branch}' is not a valid ref name`);
   if (!(await maybeFile(path.join(repo, ".git")))) await git(["init", "-q"], repo);

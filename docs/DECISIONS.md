@@ -803,3 +803,39 @@ the same per-major lock as start and create. (f) env names may contain `-`, dep 
 and `_`, and one env may have several postgres deps; `nectar_<env>` alone collides for two
 deps, and plain character mapping collides (`x--a` + `web_db` vs `x--a-web` + `db`). The
 hash keeps names unique and inside 63 bytes while the readable prefix still says whose it is.
+
+## D34 — A per-node publishing pool for web and static previews, chosen by the publisher
+
+**Chose:** a `pool` in the publishing node's `nectar.json` (`hosts`, `default_for` of `web`
+and `static`, `prefer` of `first-healthy` or `least-loaded`). A publish without `--host` and
+without `--local` is classified locally; web and static go to a pool host picked from each
+host's listener hello, which now reports version, nectard, mesh rights, the `[deps]`
+postgres provider, env counts and load. Skipped: hosts that do not answer, report nectard
+down or `mesh: denied`, and, for `[deps] postgres`, report no provider (Docker first, then
+local). Placement is sticky through `placements.json` on the publisher, and an env that
+already exists locally stays local. Desktop, iOS and dev never leave the publishing node.
+No usable host: publish locally and say why. `placed_on` and `placement_reason` are in the
+result and the dry-run plan. `nectar pool ls|add|rm|check` manage and probe it. Also fixed:
+`publish --host` of anything inside a repo ships `git archive` of the commit plus the
+path inside it, and the target runs local detection on that commit; before, a repo with
+an `index.html` and no recipe shipped its working tree as a static site. (SPEC §4.5, §4.6, §7.)
+**Alternatives:** (a) a central scheduler (Queen or a coordinator nectard) that owns the
+pool; (b) fail the publish when no pool host is usable; (c) treat a mesh-denied host as
+usable and hand out its loopback URL; (d) stickiness by asking every pool host whether it
+has the env (resolve) instead of a local record; (e) keep shipping a repo's working tree
+for static repos and document it; (f) classify on the target only (ship first, decide there).
+**Why:** (a) every node already has the listener, WhoIs and the allowlist; a scheduler is
+another service to run and secure, and the pool is a per-node preference (the Studio
+offloads, a mini need not). (b) a preview that lands on the Studio when the satellites are
+down beats no preview; the reason says what happened, and `pool check` shows it. (c) a
+placed preview is only for people on other machines, and a loopback URL on a satellite
+reaches nobody. (d) the env name a host would use is known only after detection, a probe
+of every host costs a round trip each, and the publisher already knows where it sent
+things; the record is keyed by root commits so other Cells of the same repo stick too,
+and a host that stops answering is re-placed rather than waited for. (e) `--host` is
+documented as shipping the committed tree, and an uncommitted edit served on another
+machine is a review of something nobody committed. Ignored build output still ships as
+files, since that is the point of publishing `dist/`. (f) desktop/iOS/dev must stay local
+before anything is shipped, and the dry run must show the placement, so the publisher
+needs the classification anyway; the target still runs its own detection on the commit.
+

@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG: MachineConfig = {
   pack_server_port: 4099,
 };
 
-async function atomicJson(file: string, value: unknown): Promise<void> {
+export async function atomicJson(file: string, value: unknown): Promise<void> {
   const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });

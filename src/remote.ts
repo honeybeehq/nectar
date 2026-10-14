@@ -17,6 +17,7 @@ import { validateEnvName } from "./refs.js";
 import { NectarService } from "./service.js";
 import { StateStore } from "./state.js";
 import { daemonHello, type Hello } from "./control.js";
+import { hostReport } from "./pool.js";
 import { describeEndpoint, readStatus, whoIs as askWhoIs, type LocalApiEndpoint, type StatusJson, type StatusNodeJson, type StatusRead, type TailnetPeer } from "./localapi.js";
 import type { DepRecord, EnvRecord, MachineConfig, Publisher, RemoteConfig } from "./types.js";
 
@@ -38,6 +39,7 @@ const RECEIVE_TIMEOUT_MS = 10 * 60_000;
 const HEADERS_TIMEOUT_MS = 30_000;
 const MAX_CONNECTIONS = 32;
 const PROBE_TIMEOUT_MS = 3_000;
+const HELLO_TIMEOUT_MS = 8_000;
 
 export type Identity = { peer: TailnetPeer; reason?: undefined } | { peer?: undefined; reason: string };
 
@@ -150,7 +152,7 @@ const ARG_SPECS: Record<RemoteOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
     spec: {
       kind: "string", source: "string", dir: "string", entry: "string", commit: "string", branch: "string", mode: "string",
-      ttl: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean",
+      ttl: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", path: "string",
     },
     required: ["kind", "source", "dir", "branch"],
   },
@@ -191,6 +193,15 @@ function checkBees(caller: unknown): { hive_bee?: string; hive_session?: string 
 }
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+function inner(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const parts = value.split("/");
+  if (parts.length > 32 || parts.some((part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git" || part.length > 255 || /[\0\\]/.test(part))) {
+    throw new NectarError("E_USAGE", `path '${value}' must be a plain relative path inside the shipped tree`);
+  }
+  return parts.join("/");
+}
 
 export function sourceDir(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 100);
@@ -236,6 +247,8 @@ async function receive(
   if (entry !== undefined && (kind !== "static" || !SAFE_NAME.test(entry) || !/\.html?$/i.test(entry))) {
     throw new NectarError("E_USAGE", "entry must be an .html file name of a static publish");
   }
+  const within = inner(text("path"));
+  if (within !== undefined && kind !== "git") throw new NectarError("E_USAGE", "path applies only to a shipped repo");
   if (request.headers["content-encoding"] !== "gzip") throw new NectarError("E_USAGE", "publish over the tailnet takes a gzip tar body");
   const key = crypto.createHash("sha256").update(`${caller.node_id}\0${text("source") ?? ""}`).digest("hex").slice(0, 16);
   const store = new StateStore(paths);
@@ -269,7 +282,7 @@ async function receive(
       await rmdir(base).catch(() => undefined);
     }
     const options = {
-      repo: entry === undefined ? tree : path.join(tree, entry),
+      repo: entry === undefined ? path.join(tree, ...(within?.split("/") ?? [])) : path.join(tree, entry),
       mode: kind === "static" ? "static" : text("mode"),
       branch: text("branch"),
       ttl: text("ttl"),
@@ -278,6 +291,7 @@ async function receive(
       name: text("name"),
       dryRun: flag("dry_run"),
       fresh: flag("fresh"),
+      local: true,
     };
     return service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)));
   });
@@ -547,7 +561,7 @@ export async function startRemoteServer(
       const config = await strictConfig(paths);
       if (config.remote?.listen !== true) throw new NectarError("E_REMOTE", "The tailnet listener is turned off on this node", { hint: REMOTE_INSTALL_HINT, rule: "listener_off" });
       caller = authorize(who.peer, config.remote, owner);
-      if (request.method === "GET" && url.pathname === "/v1/hello") return { api: REMOTE_API, ops: [...REMOTE_OPS], host, caller: caller.node_name };
+      if (request.method === "GET" && url.pathname === "/v1/hello") return { api: REMOTE_API, ops: [...REMOTE_OPS], host, caller: caller.node_name, ...(await hostReport(paths, process.pid)) };
       if (request.method !== "POST" || !isRemoteOp(op)) throw new NectarError("E_USAGE", `nectard has no ${request.method ?? ""} ${url.pathname}`);
       const body = op === "publish" ? requestHeader(request) : await readJson(request);
       if (!isObject(body)) throw new NectarError("E_USAGE", "Request must be a JSON object");
@@ -828,6 +842,10 @@ export async function callRemote(host: string, op: RemoteOp, payload: RemoteRequ
     outgoing.on("error", (error) => reject(unreachable(host, address, port, error.message)));
     outgoing.end(body);
   });
+  return replyResult(host, port, reply);
+}
+
+function replyResult(host: string, port: number, reply: { status: number; text: string }): unknown {
   let envelope: { ok?: unknown; result?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
   try {
     envelope = JSON.parse(reply.text) as typeof envelope;
@@ -839,6 +857,24 @@ export async function callRemote(host: string, op: RemoteOp, payload: RemoteRequ
   if (envelope.ok !== false || failure === undefined) throw new NectarError("E_REMOTE", `nectard on ${host} sent an unexpected reply`, { host });
   const { code, message, ...details } = failure;
   throw new NectarError(isErrorCode(code) ? code : "E_REMOTE", typeof message === "string" ? `${host}: ${message}` : `nectard on ${host} failed`, { ...details, host });
+}
+
+export async function helloRemote(host: string, timeoutMs = HELLO_TIMEOUT_MS): Promise<Record<string, unknown>> {
+  const address = await peerAddress(host);
+  const port = remotePort();
+  const reply = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const outgoing = http.get({ host: address, port, path: "/v1/hello" }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+      response.on("error", (error) => reject(unreachable(host, address, port, error.message)));
+    });
+    outgoing.setTimeout(timeoutMs, () => outgoing.destroy(new Error(`no answer within ${timeoutMs / 1000}s`)));
+    outgoing.on("error", (error) => reject(unreachable(host, address, port, error.message)));
+  });
+  const result = replyResult(host, port, reply);
+  if (!isObject(result) || result.api !== REMOTE_API) throw new NectarError("E_REMOTE", `nectard on ${host} speaks another listener API`, { host });
+  return result;
 }
 
 function probeHello(address: string, port: number): Promise<{ envelope: unknown } | { reason: string }> {

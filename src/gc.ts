@@ -22,7 +22,7 @@ export function gcTransition(
   // The initial record stamps both fields equally. Grace is for a reviewer touch,
   // not an implicit six-hour minimum TTL that would make --ttl 1m meaningless.
   if (nowMs >= expiry + ONE_DAY + FOURTEEN_DAYS) return "reap";
-  if (nowMs >= expiry + ONE_DAY) return "cold";
+  if (nowMs >= expiry + ONE_DAY && record.status !== "cold") return "cold";
   const recentlyTouched = touched > published && nowMs - touched < SIX_HOURS;
   if (nowMs >= expiry && !recentlyTouched && record.status !== "expired" && record.status !== "cold") return "expire";
   // Resolve/touch may keep the record alive, but only an explicit open keeps a

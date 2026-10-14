@@ -628,3 +628,25 @@ beside Nectar. Two Nectar labels plus the `nectar-` volume prefix are the only p
 ownership. (c) records are shown and copied into envelopes, and D17 keeps them
 secret-free. (d) is the planned macOS fallback, not the default: it shares one failure
 domain and makes `--fresh` a drop/create dance (D16).
+
+## D31 — doctor follow-ups from the Studio cleanup: one-pass repair, 443 as a warning, no dead mesh URLs
+
+**Chose:** (1) after gc transitions and after `release-env`, classify the Serve table again
+and remove entries that only now prove to be orphans, in the same run and by the same rule
+(D27), so a second `doctor --fix` returns no actions. (2) `serve-443` is a warning with the
+entry's targets and a hint, never a failure. (3) gc expire/cold, `release-env`,
+an orphan cleanup for an expired/stopped/cold owner and `stop` set `urls.mesh` to `null`
+once the env's own entry is gone; the `serve` block and its ports stay, so a republish (or a
+nectard revive) restores the same URL. (4) gc cools an env once: a `cold` env is not
+transitioned to cold again on every pass, which made every `--fix` report `gc-cold` and `gc`.
+(SPEC §10.2, §10.5.)
+**Alternatives:** (a) classify once and let the next run clean up; (b) predict freed entries
+in the plan; (c) keep 443 a failure and add an allowlist; (d) keep the mesh URL and rely on
+`status` to say it is dead.
+**Why:** on the Studio, `--fix` released helidex and offshore, which freed upstream 4102, and
+the entry :8445 pointing at it was only removed by a second run. (a) is that bug. (b) cannot be
+proven before the process actually stops, so the plan stays honest and the run reports what
+it did. 443 there belongs to portless's own Serve entry by design, and no Nectar feature binds
+443 through Serve, so a failure kept doctor unhealthy forever over something Nectar must not
+touch; (c) adds config for a check that has no failure case. (d) hands consumers a URL that
+answers nothing, or answers for whoever takes the port next.

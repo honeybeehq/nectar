@@ -230,6 +230,30 @@ interface Diagnosis {
 
 const DEAD_STATUSES: ReadonlySet<EnvStatus> = new Set(["expired", "cold", "stopped", "crashed"]);
 
+type SweptOrphan = GcReport["serve_orphans"][number];
+
+function orphanAction(orphan: SweptOrphan): DoctorAction {
+  return {
+    action: orphan.direct === undefined ? "remove-serve-entry" : "repoint-serve-entry",
+    target: `:${orphan.tailnet_port}`,
+    reason: orphan.reason,
+    status: "planned",
+    before: { tailnet_port: orphan.tailnet_port, target: orphan.target, env: orphan.env },
+    after: null,
+  };
+}
+
+function isOrphanAction(action: DoctorAction): boolean {
+  return action.action === "remove-serve-entry" || action.action === "repoint-serve-entry";
+}
+
+function settleOrphanAction(action: DoctorAction, swept: SweptOrphan[]): void {
+  const port = Number(action.target.slice(1));
+  const done = swept.find((orphan) => orphan.tailnet_port === port);
+  action.status = done?.fixed === true ? "done" : "failed";
+  action.after = done?.direct === undefined ? { present: done?.fixed !== true } : { tailnet_port: port, target: done.fixed ? done.direct : done.target };
+}
+
 function staticWebRecipe(): WebRecipe {
   const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
   const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -583,6 +607,19 @@ export class NectarService {
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
   }
 
+  private async releaseRuntime(record: EnvRecord): Promise<void> {
+    await this.stopRuntime(record);
+    if (record.serve?.tailnet_port !== undefined && (await this.ownEntryAt(record.serve)) === false) record.urls.mesh = null;
+  }
+
+  private async ownEntryAt(serve: ServeRecord): Promise<boolean | undefined> {
+    const status = await serveStatus();
+    if (status === undefined) return undefined;
+    return serveEntries(status).some(
+      (entry) => entry.tailnetPort === serve.tailnet_port && rootMount(entry) && ownsLoopbackPort(serve, loopbackProxy(entry.target)?.upstreamPort),
+    );
+  }
+
   private async cleanupRuntime(record: EnvRecord): Promise<string[]> {
     const cleanupErrors: string[] = [];
     if (record.serve !== undefined) {
@@ -679,7 +716,12 @@ export class NectarService {
         const record = await this.store.readEnv(env);
         if (record.serve?.tailnet_port !== orphan.tailnetPort || !ownsLoopbackPort(record.serve, orphan.upstreamPort)) return false;
         if (record.status === "expired" || record.status === "cold" || record.status === "stopped") {
-          return this.releaseServeEntry(record.serve);
+          const released = await this.releaseServeEntry(record.serve);
+          if (released) {
+            record.urls.mesh = null;
+            await this.store.writeEnv(record);
+          }
+          return released;
         }
         const cleanupErrors = await this.cleanupRuntime(record);
         record.status = "crashed";
@@ -2265,7 +2307,7 @@ export class NectarService {
   async stop(name: string): Promise<Record<string, unknown>> {
     const record = await this.store.withLock(validateEnvName(name), async () => {
       const current = await this.store.readEnv(name);
-      await this.stopRuntime(current);
+      await this.releaseRuntime(current);
       await this.stopDeps(current);
       // A stopped env's public URL would 502; take it down with the serve.
       await this.tearDownExposure(current).catch(() => undefined);
@@ -2415,19 +2457,7 @@ export class NectarService {
   async gc(options: { dryRun?: boolean } = {}): Promise<GcReport> {
     const now = new Date();
     const config = await this.store.readConfig();
-    const serveOrphans = (await this.classifyServe(await serveStatus(), config)).filter((entry) => entry.class === "orphan");
-    const orphanReport = [] as GcReport["serve_orphans"];
-    for (const orphan of serveOrphans) {
-      const fixed = options.dryRun ? false : await this.cleanupServeOrphan(orphan);
-      orphanReport.push({
-        tailnet_port: orphan.tailnetPort,
-        target: orphan.target,
-        env: orphan.env ?? null,
-        reason: orphan.reason,
-        fixed,
-        ...(orphan.direct === undefined ? {} : { direct: orphan.direct }),
-      });
-    }
+    const orphanReport = await this.sweepServeOrphans(config, options.dryRun === true);
     const report: Array<{ env: string; action: GcTransition }> = [];
     const skipped: Array<{ env: string; reason: string }> = [];
     for (const snapshot of await this.store.listEnvs()) {
@@ -2451,7 +2481,7 @@ export class NectarService {
             record.status = "warm";
             await this.store.writeEnv(record);
           } else if (currentAction === "expire") {
-            await this.stopRuntime(record);
+            await this.releaseRuntime(record);
             await this.stopDeps(record);
             if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
@@ -2459,7 +2489,7 @@ export class NectarService {
             record.status = "expired";
             await this.store.writeEnv(record);
           } else if (currentAction === "cold") {
-            await this.stopRuntime(record);
+            await this.releaseRuntime(record);
             if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
@@ -2491,6 +2521,13 @@ export class NectarService {
         skipped.push({ env: snapshot.name, reason: nectarError.code === "E_BUSY" ? "busy" : nectarError.message });
       }
     }
+    if (!options.dryRun && report.length > 0) {
+      for (const freed of await this.sweepServeOrphans(config, false)) {
+        const seen = orphanReport.findIndex((orphan) => orphan.tailnet_port === freed.tailnet_port);
+        if (seen === -1) orphanReport.push(freed);
+        else orphanReport[seen] = freed;
+      }
+    }
     const current = await this.store.listEnvs();
     const protectedPacks = new Set(
       current
@@ -2518,6 +2555,22 @@ export class NectarService {
       evidence_pruned: evidencePrunes.map((file) => path.relative(this.paths.root, file)),
       ran_at: now.toISOString(),
     };
+  }
+
+  private async sweepServeOrphans(config: MachineConfig, dryRun: boolean): Promise<GcReport["serve_orphans"]> {
+    const orphans = (await this.classifyServe(await serveStatus(), config)).filter((entry) => entry.class === "orphan");
+    const swept = [] as GcReport["serve_orphans"];
+    for (const orphan of orphans) {
+      swept.push({
+        tailnet_port: orphan.tailnetPort,
+        target: orphan.target,
+        env: orphan.env ?? null,
+        reason: orphan.reason,
+        fixed: dryRun ? false : await this.cleanupServeOrphan(orphan),
+        ...(orphan.direct === undefined ? {} : { direct: orphan.direct }),
+      });
+    }
+    return swept;
   }
 
   private async packServerAlive(config: MachineConfig): Promise<boolean> {
@@ -2668,13 +2721,18 @@ export class NectarService {
     });
     const serveRights = await this.serveRightsCheck(identity !== undefined);
     checks.push(serveRights);
-    checks.push({
-      name: "serve-443",
-      status: statusHasPort(status, 443) ? "fail" : "pass",
-      message: statusHasPort(status, 443)
-        ? "Tailscale serve has a 443 entry; this conflicts with the portless proxy and Nectar will not modify it"
-        : "No conflicting Tailscale serve entry on 443",
-    });
+    const on443 = serveEntries(status).filter((entry) => entry.tailnetPort === 443);
+    checks.push(
+      statusHasPort(status, 443)
+        ? {
+            name: "serve-443",
+            status: "warn",
+            message: `Tailscale serve has a 443 entry${on443.length === 0 ? "" : ` (${on443.map((entry) => `${entry.mount ?? "/"} -> ${entry.target}`).join(", ")})`}; Nectar never uses 443 (mesh URLs use ${config.tailnet_port_start}-${config.tailnet_port_end}, the pack store 8440), so it is reported and left alone`,
+            hint: "Expected where portless or another service publishes on 443. Otherwise find whose it is and remove it by hand with `tailscale serve --https=443 off`",
+            details: on443.map((entry) => ({ mount: entry.mount ?? "/", target: entry.target })),
+          }
+        : { name: "serve-443", status: "pass", message: "No Tailscale serve entry on 443" },
+    );
     const funnelOn = statusHasFunnel(status);
     checks.push({
       name: "funnel",
@@ -3044,15 +3102,7 @@ export class NectarService {
     const plan = diagnosis.gcPlan;
     const pruning = plan.packs_pruned.length + plan.staging_pruned.length + plan.evidence_pruned.length;
     if (diagnosis.gcOverdue || plan.transitions.length > 0 || plan.serve_orphans.length > 0 || pruning > 0) {
-      for (const orphan of plan.serve_orphans) {
-        actions.push(
-          planned(orphan.direct === undefined ? "remove-serve-entry" : "repoint-serve-entry", `:${orphan.tailnet_port}`, orphan.reason, {
-            tailnet_port: orphan.tailnet_port,
-            target: orphan.target,
-            env: orphan.env,
-          }),
-        );
-      }
+      actions.push(...plan.serve_orphans.map(orphanAction));
       for (const transition of plan.transitions) {
         const holder = diagnosis.holders.find((item) => item.env === transition.env);
         actions.push(
@@ -3111,12 +3161,12 @@ export class NectarService {
         return { ok: true, after: { last_gc_at: report.ran_at, skipped: report.skipped } };
       });
       const holders = await this.deadHolders(await serveStatus());
+      const swept = report?.serve_orphans ?? [];
+      const freed = swept.filter((orphan) => !actions.some((action) => isOrphanAction(action) && action.target === `:${orphan.tailnet_port}`));
+      actions.splice(actions.indexOf(gcAction), 0, ...freed.map(orphanAction));
       for (const action of actions) {
-        if (action.action === "remove-serve-entry" || action.action === "repoint-serve-entry") {
-          const port = Number(action.target.slice(1));
-          const done = report?.serve_orphans.find((orphan) => orphan.tailnet_port === port);
-          action.status = done?.fixed === true ? "done" : "failed";
-          action.after = done?.direct === undefined ? { present: done?.fixed !== true } : { tailnet_port: port, target: done.fixed ? done.direct : done.target };
+        if (isOrphanAction(action)) {
+          settleOrphanAction(action, swept);
         } else if (action.action.startsWith("gc-")) {
           const done = report?.transitions.some((transition) => transition.env === action.target);
           const record = await this.store.readEnv(action.target).catch(() => undefined);
@@ -3129,20 +3179,37 @@ export class NectarService {
         }
       }
     }
-    for (const action of actions) {
-      if (action.action === "release-env") {
-        await settle(action, async () => {
+    const releases = actions.filter((action) => action.action === "release-env");
+    for (const action of releases) {
+      await settle(action, async () => {
           const record = await this.store.withLock(action.target, async () => {
             const current = await this.store.readEnv(action.target);
-            await this.stopRuntime(current);
+            await this.releaseRuntime(current);
             delete current.liveness;
             await this.store.writeEnv(current);
             return current;
           });
           const holder = (await this.deadHolders(await serveStatus())).find((item) => item.env === record.name);
-          return { ok: holder === undefined, after: holder ?? { env: record.name, status: record.status, process: false, serve_entry: null } };
+          return {
+            ok: holder === undefined,
+            after: holder ?? { env: record.name, status: record.status, process: false, serve_entry: null, mesh_url: record.urls.mesh },
+          };
         });
-      } else if (action.action === "install-nectard" || action.action === "reinstall-nectard") {
+    }
+    const lastRelease = releases.at(-1);
+    if (lastRelease !== undefined) {
+      const swept = await this.sweepServeOrphans(await this.store.readConfig(), false);
+      const freed: DoctorAction[] = [];
+      for (const orphan of swept) {
+        const earlier = actions.find((action) => isOrphanAction(action) && action.target === `:${orphan.tailnet_port}`);
+        if (earlier === undefined) freed.push(orphanAction(orphan));
+        else if (orphan.fixed) settleOrphanAction(earlier, swept);
+      }
+      for (const action of freed) settleOrphanAction(action, swept);
+      actions.splice(actions.indexOf(lastRelease) + 1, 0, ...freed);
+    }
+    for (const action of actions) {
+      if (action.action === "install-nectard" || action.action === "reinstall-nectard") {
         await settle(action, async () => {
           await installUnit(this.paths);
           const deadline = Date.now() + 5_000;

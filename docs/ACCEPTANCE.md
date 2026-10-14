@@ -177,8 +177,8 @@ tailscale serve status --json
 
 The `lsof` line must be exactly a `127.0.0.1:<pack-port>` listener. Doctor reports Funnel
 off by inspecting Serve JSON; neither Nectar nor this runbook invokes the Funnel command.
-The 443 conflict is tested with a fake Serve-status fixture because the machine guardrail
-forbids planting a real 443 entry:
+The 443 report (a warning, never touched) is tested with a fake Serve-status fixture because
+the machine guardrail forbids planting a real 443 entry:
 
 ```bash
 pnpm vitest run test/integration.test.ts -t 'doctor fixes only 8440'

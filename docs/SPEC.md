@@ -539,7 +539,8 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    `tailscale serve --bg --https=<tport> <healthy-loopback-origin>`.
    **The 443 caveat is load-bearing**: port 443 on nectar machines belongs to the portless
    proxy (launchd), so tailscale serve must always bind non-443 — nectar never allocates
-   443 and `nectar doctor` flags any existing 443 serve entry as a portless-breaker.
+   443 and `nectar doctor` reports any existing 443 serve entry as a warning (§10.5); it never
+   touches it, since portless or another service may publish there on purpose.
 6. Write the env record; emit the envelope.
 
 **Republish of a live env (amendment · 2026-10-14, DECISIONS D26).** When the env is
@@ -1023,8 +1024,7 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
 nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # Checks (§10.5): portless on PATH + proxy up · tailscale up (names the CLI
     # used and its source, §4.5) · tailscale-serve: this user may change the serve
-    # config (Linux) · no 443 serve entry
-    # (portless killer) · no funnel · Serve entries in Nectar's tailnet range, classified
+    # config (Linux) · a 443 serve entry (warning, left alone) · no funnel · Serve entries in Nectar's tailnet range, classified
     # owned / orphan / foreign / ambiguous · dead or expired envs still holding a process or
     # Serve entry · gc recency · nectard installed, active and pointing at this install ·
     # tools env recipes need on PATH and on nectard's PATH · pack store on 8440 · port
@@ -1190,18 +1190,24 @@ hold less-trusted code.
 
 `nectar gc` (idempotent, per-env lockfiles): expire past-TTL envs (stop process group,
 remove tailscale-serve entry, stop `[deps]` containers) → cold at expiry+24 h (delete
-worktree; remove `[deps]` containers, network and volume by label, §5.1) → reap records at
-cold+14 d → prune pack store/evidence to quota. Grace: envs *touched after publish* within
+worktree; remove `[deps]` containers, network and volume by label, §5.1; once, a `cold` env
+is not cooled again) → reap records at
+cold+14 d → prune pack store/evidence to quota. Expire and cold set `urls.mesh` to
+`null` once the env's own Serve entry is gone (removed, or confirmed absent or foreign), so
+`ls`/`show`/`resolve` never hand out a dead mesh URL; the `serve` block keeps its ports and a
+republish restores the same URL. `nectar stop` does the same. Grace: envs *touched after publish* within
 the last 6 h are never transitioned, so an open review can't be reaped underneath the
 reviewer (open/resolve/show/touch all bump `last_touched_at`). The publish stamp itself does not
 count as a touch — otherwise `--ttl 1m` would silently mean six hours. A busy env (lock
 held by a live publish) is skipped and reported, never an abort of the sweep. Every non-dry
-run also removes Nectar-range Serve entries whose loopback proxy target is dead. An entry
+run also removes Nectar-range Serve entries whose loopback proxy target is dead, once before
+the transitions and again after them when a transition ran, because stopping an env's process
+can free an upstream that another entry still points at. An entry
 whose dead target is the owning env's nectard `proxy_port` while the app still answers is
 pointed back at the app instead (§4.5). Otherwise, if an env
 record owns the entry, GC kills its process group, clears its runtime claims, and marks it
-`crashed` with failure details (an `expired`, `stopped` or `cold` owner keeps its status;
-only the entry goes). "Dead" and "Nectar's" are defined by §10.5's classification, which
+`crashed` with failure details (an `expired`, `stopped` or `cold` owner keeps its status and
+ports; only the entry and its `urls.mesh` go). "Dead" and "Nectar's" are defined by §10.5's classification, which
 `gc`, `doctor` and `doctor --fix` share. Stopping an env's process group (gc, `stop`, `rm`)
 signals it only when a process in the group still carries that env's `NECTAR_ENV`, and
 removing its Serve entry is skipped when anything on its tailnet port is not the env's own `/`
@@ -1260,7 +1266,13 @@ upstream is reported by `env-resources` along with pending gc transitions.
 1. `gc` (when it has not run in 24 h or has pending work), reported as one
    `remove-serve-entry` per orphan, one `gc-<transition>` per env and the `gc` run itself.
 2. `release-env` for dead envs gc did not cover: stop the env's own process group and its own
-   Serve entry; the record keeps its status and ports.
+   Serve entry; the record keeps its status and ports, and `urls.mesh` becomes `null` once
+   the entry is gone (removed, or confirmed absent or foreign), so a republish restores it.
+   After the releases, the Serve table is classified again and entries that only now prove
+   to be orphans (their upstream was answered by a released process) are removed in the same
+   run, with one `remove-serve-entry` / `repoint-serve-entry` each, placed after the
+   releases. gc does the same after its own transitions. `--dry-run` cannot list these: they
+   are `serve-ambiguous` until the process stops.
 3. (skipped with `--no-daemon` or a saved `daemon: "disabled"`; the `nectard` check is then
    `info`) `install-nectard` / `reinstall-nectard` through `nectar daemon install` when nectard is
    missing, inactive, or its unit runs a different node or CLI than the running install. A
@@ -1280,7 +1292,10 @@ answer means it may. Without a socket it warns; on macOS it is not probed. `--fi
 repairs it.
 
 Doctor never starts, stops or configures Portless and never touches port 443, Funnel, or any
-process without the env's `NECTAR_ENV`. Missing tools (`path-tools`, `portless`) are warnings
+process without the env's `NECTAR_ENV`. A Serve entry on 443 is `serve-443` warn with its
+targets and a hint: Nectar allocates no tailnet port below 8440 and no Nectar feature binds
+443 through Serve, so the entry blocks nothing of Nectar's (portless owns local 443 on the
+machines that run it, and some publish their own 443 Serve entry on purpose). Missing tools (`path-tools`, `portless`) are warnings
 with hints, not repairs.
 
 ## 11. Where the implementation lives

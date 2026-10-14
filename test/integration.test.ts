@@ -838,7 +838,7 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     }
   });
 
-  it("doctor fixes only 8440 and flags a planted 443 conflict", async () => {
+  it("doctor fixes only 8440 and reports a planted 443 entry", async () => {
     const { service, fakeDir } = await harness();
     const tailscale = await statefulTailscale(fakeDir);
     const fixed = await service.doctor({ fix: true });
@@ -855,9 +855,9 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     await writeFile(tailscale.state, JSON.stringify({ AllowFunnel: { "8440": true }, Web: { "fixture:443": {}, "fixture:8440": {} } }));
     const conflicted = await service.doctor();
     expect(conflicted.healthy).toBe(false);
-    const checks = conflicted.checks as Array<{ name: string; status: string; message: string }>;
-    expect(checks.find((check) => check.name === "serve-443")).toMatchObject({ name: "serve-443", status: "fail" });
-    expect(checks.find((check) => check.name === "serve-443")?.message).toContain("portless");
+    const checks = conflicted.checks as Array<{ name: string; status: string; message: string; hint?: string }>;
+    expect(checks.find((check) => check.name === "serve-443")).toMatchObject({ name: "serve-443", status: "warn" });
+    expect(checks.find((check) => check.name === "serve-443")?.hint).toContain("portless");
     expect(checks.find((check) => check.name === "funnel")).toMatchObject({ name: "funnel", status: "fail" });
   });
 

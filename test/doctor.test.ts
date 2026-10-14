@@ -144,6 +144,12 @@ describe("doctor --fix on a messy machine", () => {
     return child;
   }
 
+  async function fakePackServer(directory: string): Promise<string> {
+    const entry = path.join(directory, "pack-server.mjs");
+    await writeFile(entry, `import http from "node:http"; http.createServer((_q, r) => { r.writeHead(404); r.end(); }).listen(Number(process.argv[3]), "127.0.0.1");`);
+    return entry;
+  }
+
   async function waitListening(port: number): Promise<void> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const open = await fetch(`http://127.0.0.1:${port}/`).then(
@@ -159,8 +165,7 @@ describe("doctor --fix on a messy machine", () => {
   it("removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent", async () => {
     const state = await tempDir("doctor-state");
     const fakeDir = await tempDir("doctor-bin");
-    const packServer = path.join(fakeDir, "pack-server.mjs");
-    await writeFile(packServer, `import http from "node:http"; http.createServer((_q, r) => { r.writeHead(404); r.end(); }).listen(Number(process.argv[3]), "127.0.0.1");`);
+    const packServer = await fakePackServer(fakeDir);
     await writeFile(
       path.join(state, "nectar.json"),
       JSON.stringify({ upstream_port_start: 4200, upstream_port_end: 4289, pack_server_port: 4295, tailnet_port_start: 8800, tailnet_port_end: 8899 }),
@@ -310,6 +315,138 @@ describe("doctor --fix on a messy machine", () => {
     const again = await service.doctor({ fix: true });
     expect(again.actions).toEqual([]);
     expect(await mutations()).toEqual(removed);
+  });
+
+  it("removes an entry that only becomes an orphan once release-env stops its process, in the same run", async () => {
+    const state = await tempDir("doctor-freed-state");
+    const fakeDir = await tempDir("doctor-freed-bin");
+    await writeFile(
+      path.join(state, "nectar.json"),
+      JSON.stringify({ upstream_port_start: 4300, upstream_port_end: 4389, pack_server_port: 4395, tailnet_port_start: 8800, tailnet_port_end: 8899 }),
+    );
+    vi.stubEnv("NECTAR_HOME", state);
+    vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", await fakePackServer(fakeDir));
+    vi.stubEnv("NECTAR_PORTLESS_BIN", path.join(fakeDir, "no-portless"));
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", path.join(fakeDir, "no-tailscaled.sock"));
+    const service = new NectarService(state);
+    await service.store.init();
+    const reserved = new Set<number>();
+    const port = async (): Promise<number> => {
+      const chosen = await allocatePort({ start: 4300, end: 4389, reserved });
+      reserved.add(chosen);
+      return chosen;
+    };
+    const [heldUp, expiredUp] = [await port(), await port()];
+    const held = listen(heldUp, { NECTAR_ENV: "helidex--main--web" });
+    const expiring = listen(expiredUp, { NECTAR_ENV: "offshore--main--web" });
+    await Promise.all([heldUp, expiredUp].map(waitListening));
+    const past = new Date(Date.now() - 60 * 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60_000).toISOString();
+    await service.store.writeEnv(
+      record({
+        name: "helidex--main--web",
+        status: "crashed",
+        published_at: past,
+        last_touched_at: past,
+        expires_at: future,
+        serve: { cmd: "node s.mjs", ...held, upstream_port: heldUp, tailnet_port: 8852 },
+        urls: { local: `http://127.0.0.1:${heldUp}`, mesh: "https://fixture.tailtest.ts.net:8852" },
+      }),
+    );
+    await service.store.writeEnv(
+      record({
+        name: "offshore--main--web",
+        published_at: past,
+        last_touched_at: past,
+        expires_at: past,
+        serve: { cmd: "node s.mjs", ...expiring, upstream_port: expiredUp, tailnet_port: 8853 },
+        urls: { local: `http://127.0.0.1:${expiredUp}`, mesh: "https://fixture.tailtest.ts.net:8853" },
+      }),
+    );
+    const longAgo = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+    await service.store.writeEnv(
+      record({
+        name: "frozen--main--web",
+        status: "cold",
+        published_at: longAgo,
+        last_touched_at: longAgo,
+        expires_at: new Date(Date.now() - 25 * 60 * 60_000).toISOString(),
+        worktree: path.join(fakeDir, "frozen-worktree"),
+        urls: { local: null, mesh: null },
+      }),
+    );
+    const proxy = (target: string) => ({ Handlers: { "/": { Proxy: target } } });
+    const tailscale = await statefulTailscale(fakeDir, {
+      Web: {
+        "fixture.tailtest.ts.net:8845": proxy(`http://127.0.0.1:${heldUp}`),
+        "fixture.tailtest.ts.net:8846": proxy(`http://127.0.0.1:${expiredUp}`),
+        "fixture.tailtest.ts.net:8852": proxy(`http://127.0.0.1:${heldUp}`),
+        "fixture.tailtest.ts.net:8853": proxy(`http://127.0.0.1:${expiredUp}`),
+      },
+    });
+    const offs = async (): Promise<string[]> => (await readFile(tailscale.log, "utf8")).split("\n").filter((line) => line.endsWith(" off"));
+    const byName = (checks: unknown, name: string): DoctorCheck | undefined => (checks as DoctorCheck[]).find((check) => check.name === name);
+
+    const planned = await service.doctor({ fix: true, dryRun: true, noDaemon: true });
+    expect(byName(planned.checks, "serve-ambiguous")?.message).toContain(":8845");
+    expect(byName(planned.checks, "serve-ambiguous")?.message).toContain(":8846");
+    expect((planned.actions as DoctorAction[]).filter((action) => action.target === ":8845" || action.target === ":8846")).toEqual([]);
+
+    const fixed = await service.doctor({ fix: true, noDaemon: true });
+    const packPgid = (await service.store.readConfig()).pack_server_pgid;
+    if (packPgid !== undefined) started.push(packPgid);
+    const actions = fixed.actions as DoctorAction[];
+    expect(actions.filter((action) => action.status !== "done")).toEqual([]);
+    const order = actions.map((action) => `${action.action} ${action.target}`);
+    expect(order.indexOf("remove-serve-entry :8845")).toBeGreaterThan(order.indexOf("release-env helidex--main--web"));
+    expect(order.indexOf("remove-serve-entry :8846")).toBeLessThan(order.indexOf(`gc ${state}`));
+    expect(order.indexOf("remove-serve-entry :8846")).toBeGreaterThan(-1);
+    expect(actions.find((action) => action.target === ":8845")?.reason).toContain(`nothing listens on Nectar upstream ${heldUp}`);
+    expect((await offs()).sort()).toEqual(["serve --https=8845 off", "serve --https=8846 off", "serve --https=8852 off", "serve --https=8853 off"]);
+    for (let attempt = 0; attempt < 40 && (groupAlive(held.pgid) || groupAlive(expiring.pgid)); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(groupAlive(held.pgid)).toBe(false);
+    expect(groupAlive(expiring.pgid)).toBe(false);
+    expect(byName(fixed.checks, "serve-ambiguous")).toMatchObject({ status: "pass" });
+    expect(byName(fixed.checks, "serve-orphans")).toMatchObject({ status: "pass" });
+
+    const helidex = await service.store.readEnv("helidex--main--web");
+    expect(helidex).toMatchObject({ status: "crashed", urls: { mesh: null }, serve: { upstream_port: heldUp, tailnet_port: 8852 } });
+    const offshore = await service.store.readEnv("offshore--main--web");
+    expect(offshore).toMatchObject({ status: "expired", urls: { mesh: null }, serve: { upstream_port: expiredUp, tailnet_port: 8853 } });
+    const listed = (await service.list()).envs as Array<{ name: string; mesh_url: string | null }>;
+    expect(listed.map((env) => env.mesh_url)).toEqual([null, null, null]);
+    expect(await service.store.readEnv("frozen--main--web")).toMatchObject({ status: "cold" });
+
+    const again = await service.doctor({ fix: true, noDaemon: true });
+    expect(again.actions).toEqual([]);
+  });
+
+  it("reports a foreign 443 entry as a warning and stays healthy", async () => {
+    const state = await tempDir("doctor-443-state");
+    const fakeDir = await tempDir("doctor-443-bin");
+    await writeFile(path.join(state, "nectar.json"), JSON.stringify({ pack_server_port: 4396 }));
+    vi.stubEnv("NECTAR_HOME", state);
+    vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", await fakePackServer(fakeDir));
+    vi.stubEnv("NECTAR_PORTLESS_BIN", path.join(fakeDir, "no-portless"));
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", path.join(fakeDir, "no-tailscaled.sock"));
+    const tailscale = await statefulTailscale(fakeDir, {
+      TCP: { "443": { HTTPS: true } },
+      Web: { "fixture.tailtest.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:4321" } } } },
+    });
+    const service = new NectarService(state);
+    const result = await service.doctor({ noDaemon: true });
+    const check = (result.checks as DoctorCheck[]).find((item) => item.name === "serve-443");
+    expect(check).toMatchObject({ status: "warn", details: [{ mount: "/", target: "http://127.0.0.1:4321" }] });
+    expect(check?.message).toContain("left alone");
+    expect(check?.hint).toContain("portless");
+    expect((result.checks as DoctorCheck[]).filter((item) => item.status === "fail")).toEqual([]);
+    expect(result.healthy).toBe(true);
+    const fixed = await service.doctor({ fix: true, noDaemon: true });
+    const packPgid = (await service.store.readConfig()).pack_server_pgid;
+    if (packPgid !== undefined) started.push(packPgid);
+    expect((await readFile(tailscale.log, "utf8")).split("\n")).not.toContain("serve --https=443 off");
+    expect(JSON.parse(await readFile(tailscale.state, "utf8"))).toMatchObject({ Web: { "fixture.tailtest.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:4321" } } } } });
+    expect(fixed.healthy).toBe(true);
   });
 
   it("flags a unit that runs another node or CLI and leaves another home's unit alone", async () => {

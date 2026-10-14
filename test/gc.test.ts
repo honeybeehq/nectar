@@ -18,6 +18,9 @@ describe("GC selection", () => {
     const expired = record({ status: "expired", expires_at: "2026-07-01T00:00:00.000Z", last_touched_at: "2026-06-30T00:00:00.000Z", published_at: "2026-06-30T00:00:00.000Z" });
     expect(gcTransition(expired, new Date("2026-07-02T01:00:00.000Z"))).toBe("cold");
     expect(gcTransition(expired, new Date("2026-07-17T01:00:00.000Z"))).toBe("reap");
+    const cold = { ...expired, status: "cold" as const };
+    expect(gcTransition(cold, new Date("2026-07-02T01:00:00.000Z"))).toBeUndefined();
+    expect(gcTransition(cold, new Date("2026-07-17T01:00:00.000Z"))).toBe("reap");
   });
 
   it("expires warm dev registrations on the normal disk clock", () => {

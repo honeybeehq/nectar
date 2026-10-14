@@ -33,6 +33,7 @@ import {
   depsDir,
   DOCKER_HINT,
   newPassword,
+  postgresServices,
   probeDocker,
   readSecrets,
   redactedDeps,
@@ -40,7 +41,6 @@ import {
   assertProjectOwned,
   stopLabelled,
   writePrivateJson,
-  type PostgresService,
 } from "./deps.js";
 import { assertRuntimes, missingCommands } from "./fallbacks.js";
 import { getPaths, type NectarPaths } from "./paths.js";
@@ -880,7 +880,6 @@ export class NectarService {
       next[name] = { kind: "sqlite", env: dep.env, file, created_at: prior?.created_at ?? now };
     }
     const secrets = fresh ? {} : await readSecrets(directory);
-    const services: Record<string, PostgresService> = {};
     const before = record.deps;
     const newPostgres: string[] = [];
     await this.store.withLock(PORTS_LOCK, async () => {
@@ -897,7 +896,6 @@ export class NectarService {
         reserved.add(port);
         const password = secrets[name] ?? newPassword();
         secrets[name] = password;
-        services[name] = { recipe: dep, port, password };
         next[name] = {
           kind: "postgres",
           env: dep.env,
@@ -914,16 +912,17 @@ export class NectarService {
     });
     await writePrivateJson(path.join(directory, "secrets.json"), secrets);
     if (postgres.length > 0) {
-      const file = composeFile(this.paths.work, record.name);
-      await writePrivateJson(file, composeSpec(record.name, this.paths.root, services));
       try {
         await assertProjectOwned(composeProject(record.name), this.paths.root);
-        await composeUp(file, composeProject(record.name));
+        await this.composeUpDeps(record.name, next, secrets);
       } catch (error) {
         if (newPostgres.length > 0) await removeLabelled(record.name, this.paths.root, newPostgres).catch(() => undefined);
         if (fresh || before === undefined) delete record.deps;
         else record.deps = before;
         await this.persistDeps(record);
+        if (Object.keys(postgresServices(record.deps, secrets)).length > 0) {
+          await this.composeUpDeps(record.name, record.deps, secrets).catch(() => undefined);
+        }
         throw error;
       }
     }
@@ -931,6 +930,12 @@ export class NectarService {
     const seed = seedScenario(recipe);
     if ((created || newPostgres.length > 0) && seed !== undefined) await this.runSeed(record, seed, depEnv);
     return depEnv;
+  }
+
+  private async composeUpDeps(env: string, deps: Record<string, DepRecord> | undefined, secrets: Record<string, string>): Promise<void> {
+    const file = composeFile(this.paths.work, env);
+    await writePrivateJson(file, composeSpec(env, this.paths.root, postgresServices(deps, secrets)));
+    await composeUp(file, composeProject(env));
   }
 
   // A republish keeps the previous record on disk while the old serve runs, so only
@@ -1648,7 +1653,7 @@ export class NectarService {
       }
       if (Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres")) {
         try {
-          await composeUp(composeFile(this.paths.work, record.name), composeProject(record.name));
+          await this.composeUpDeps(record.name, record.deps, await readSecrets(depsDir(this.paths.work, record.name)));
         } catch (error) {
           return fail("E_DEPS", asNectarError(error).message);
         }

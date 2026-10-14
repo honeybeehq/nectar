@@ -78,6 +78,19 @@ export function composeSpec(env: string, home: string, services: Record<string, 
   return spec;
 }
 
+export function postgresServices(deps: Record<string, DepRecord> | undefined, secrets: Record<string, string>): Record<string, PostgresService> {
+  const services: Record<string, PostgresService> = {};
+  for (const [name, dep] of Object.entries(deps ?? {})) {
+    if (dep.kind !== "postgres" || dep.port === undefined) continue;
+    services[name] = {
+      recipe: { kind: "postgres", image: dep.image ?? "", env: dep.env, database: dep.database ?? "", user: dep.user ?? "" },
+      port: dep.port,
+      password: secrets[name] ?? "",
+    };
+  }
+  return services;
+}
+
 export function newPassword(): string {
   return crypto.randomBytes(18).toString("base64url");
 }
@@ -176,7 +189,11 @@ export async function assertDocker(): Promise<void> {
 
 export async function assertProjectOwned(project: string, home: string): Promise<void> {
   const filter = ["--filter", `label=com.docker.compose.project=${project}`, "--format", `{{.Label "${HOME_LABEL}"}}`];
-  const homes = [...(await listed(["ps", "-a", ...filter])), ...(await listed(["volume", "ls", ...filter]))];
+  const homes = [
+    ...(await listed(["ps", "-a", ...filter])),
+    ...(await listed(["volume", "ls", ...filter])),
+    ...(await listed(["network", "ls", ...filter])),
+  ];
   const foreign = homes.filter((owner) => owner !== home);
   if (foreign.length > 0) {
     throw new NectarError(

@@ -315,6 +315,16 @@ describe("[deps] lifecycle with a fake docker", () => {
     const record = await service.store.readEnv(env);
     expect(Object.keys(record.deps ?? {})).toEqual(["db"]);
     expect((await body(record.urls.local ?? "")).url).toBe((await body((first.urls as { local: string }).local)).url);
+    const spec = path.join(service.paths.work, `${env}.deps`, "compose.json");
+    expect(Object.keys((JSON.parse(await readFile(spec, "utf8")) as { services: object }).services)).toEqual(["db"]);
+    vi.unstubAllEnvs();
+    vi.stubEnv("NECTAR_DOCKER_BIN", docker.binary);
+    vi.stubEnv("NECTAR_HOME", service.paths.root);
+    if (record.serve === undefined) throw new Error("old serve missing");
+    process.kill(-record.serve.pgid, "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await service.revive(env, { expectPid: record.serve.pid, kill: false })).toMatchObject({ revived: true });
+    expect((await docker.read()).volumes.map((item) => item.name)).toEqual(before.volumes.map((item) => item.name));
     await service.remove(env, true);
   });
 

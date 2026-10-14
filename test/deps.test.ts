@@ -53,6 +53,7 @@ async function harness(): Promise<{ service: NectarService; state: string; docke
   vi.stubEnv("NECTAR_TRASH_BIN", trash);
   vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", packServer);
   vi.stubEnv("NECTAR_DOCKER_BIN", docker.binary);
+  vi.stubEnv("NECTAR_PG_BIN", path.join(fakeDir, "no-local-postgres"));
   const service = new NectarService(state);
   services.push({ service, envs: [] });
   return { service, state, docker };
@@ -283,6 +284,7 @@ describe("[deps] lifecycle with a fake docker", () => {
     const repo = await depsRepo(path.join(await tempDir("deps-seeds"), "seeds.log"));
     const failure = service.publish({ repo, ttl: "1h" });
     await expect(failure).rejects.toMatchObject({ code: "E_PLATFORM", details: { hint: expect.stringContaining("docker group") as string } });
+    await expect(failure).rejects.toMatchObject({ details: { hint: expect.stringContaining("Postgres.app") as string } });
     await expect(failure).rejects.toThrow("permission denied");
     expect(await service.store.listEnvs()).toEqual([]);
     vi.stubEnv("NECTAR_DOCKER_BIN", path.join(path.dirname(docker.binary), "missing-docker"));

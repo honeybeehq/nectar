@@ -1,6 +1,6 @@
 import { holdsRuntime } from "./liveness.js";
 import { loopbackProxy, rootMount, type ServeEntry } from "./tailscale.js";
-import type { EnvRecord, MachineConfig } from "./types.js";
+import type { EnvRecord, MachineConfig, PostgresProvider } from "./types.js";
 
 export const PACK_STORE_TAILNET_PORT = 8440;
 
@@ -36,6 +36,7 @@ export interface DoctorCheck {
   localapi?: string | null;
   listener?: "off" | "listening" | "failed";
   address?: string;
+  provider?: PostgresProvider | null;
 }
 
 export interface DoctorAction {

@@ -6,7 +6,7 @@ import { parseDuration } from "./duration.js";
 import { NectarError } from "./errors.js";
 import { detectPython, detectRails, type FallbackHost } from "./fallbacks.js";
 import { appSlug } from "./refs.js";
-import type { DepRecipe, DesktopRecipe, DevRecipe, IosRecipe, Mode, Recipe, ScenarioRecipe, WebRecipe } from "./types.js";
+import type { DepRecipe, DesktopRecipe, DevRecipe, IosRecipe, Mode, PostgresProvider, Recipe, ScenarioRecipe, WebRecipe } from "./types.js";
 
 type TomlTable = Record<string, unknown>;
 
@@ -150,6 +150,12 @@ function optionalMatch(value: unknown, fallback: string, pattern: RegExp, label:
   return text;
 }
 
+function postgresProvider(value: unknown, label: string): PostgresProvider {
+  const text = requiredString(value, label);
+  if (text !== "docker" && text !== "local") throw new NectarError("E_NO_RECIPE", `${label} must be "docker" or "local"; omit it to pick automatically`);
+  return text;
+}
+
 function parseDep(name: string, value: unknown): DepRecipe {
   const label = `[deps.${name}]`;
   const dep = table(value, label);
@@ -166,7 +172,7 @@ function parseDep(name: string, value: unknown): DepRecipe {
     return { kind: "sqlite", path: file, env: optionalMatch(dep.env, "DATABASE_PATH", ENV_VAR, `${label}.env`) };
   }
   if (kind === "postgres" || kind.startsWith("postgres:")) {
-    rejectUnknownKeys(dep, ["kind", "env", "database", "user"], label);
+    rejectUnknownKeys(dep, ["kind", "env", "database", "user", "provider"], label);
     const tag = kind === "postgres" ? DEFAULT_POSTGRES_TAG : kind.slice("postgres:".length);
     if (!IMAGE_TAG.test(tag)) throw new NectarError("E_NO_RECIPE", `${label}.kind has an invalid postgres version '${tag}'`);
     return {
@@ -175,6 +181,7 @@ function parseDep(name: string, value: unknown): DepRecipe {
       env: optionalMatch(dep.env, "DATABASE_URL", ENV_VAR, `${label}.env`),
       database: optionalMatch(dep.database, "app", SQL_NAME, `${label}.database`),
       user: optionalMatch(dep.user, "nectar", SQL_NAME, `${label}.user`),
+      ...(dep.provider === undefined ? {} : { provider: postgresProvider(dep.provider, `${label}.provider`) }),
     };
   }
   throw new NectarError("E_NO_RECIPE", `${label}.kind '${kind}' is not supported yet; use "postgres:<version>" or "sqlite"`);

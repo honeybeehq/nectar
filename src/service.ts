@@ -40,7 +40,6 @@ import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import { appSlug, envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, seedScenario, selectMode } from "./recipe.js";
 import {
-  assertDocker,
   composeFile,
   composeProject,
   composeSpec,
@@ -50,14 +49,29 @@ import {
   DOCKER_HINT,
   newPassword,
   postgresServices,
-  probeDocker,
+  PostgresProviders,
   readSecrets,
   redactedDeps,
   removeLabelled,
   assertProjectOwned,
   stopLabelled,
+  usesDockerPostgres,
+  usesLocalPostgres,
   writePrivateJson,
+  type PostgresChoice,
 } from "./deps.js";
+import {
+  clusterMajors,
+  createDatabaseSql,
+  dropDatabaseSql,
+  ensureCluster,
+  findPgInstalls,
+  LOCAL_PG_HINT,
+  pgIdentifier,
+  stopCluster,
+  superuserSql,
+  type PgInstall,
+} from "./pg-local.js";
 import { assertRuntimes, missingCommands } from "./fallbacks.js";
 import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
@@ -363,7 +377,7 @@ export class NectarService {
     const mode = selectMode(recipe, options.mode);
     if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, slot);
     if (mode === "web") assertRuntimes(recipe);
-    if (mode === "web" && Object.values(recipe.deps ?? {}).some((dep) => dep.kind === "postgres")) await assertDocker();
+    if (mode === "web") await this.checkPostgres(recipe);
     if (options.fresh === true && mode !== "web") {
       throw new NectarError("E_USAGE", "--fresh recreates [deps] of web envs only");
     }
@@ -932,7 +946,7 @@ export class NectarService {
         const loaded = site === undefined ? await loadRecipe(record.worktree) : options.recipe;
         const web = loaded.web;
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
-        const depEnv = site === undefined ? await this.provisionDeps(record, loaded, options.fresh === true) : {};
+        const depEnv = site === undefined ? await this.provisionDeps(record, loaded, options.fresh === true, stageWarnings) : {};
         if (web.build !== undefined) await this.runBuild(record, web.build, depEnv);
         const published = await this.startWeb(record, web, initial.identity, initial.old, depEnv);
         return { ...published, warnings: [...published.warnings, ...stageWarnings] };
@@ -961,7 +975,7 @@ export class NectarService {
         await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist, options.slot?.commit);
         const loaded = await loadRecipe(record.worktree);
         web = loaded.web;
-        if (web !== undefined) depEnv = await this.provisionDeps(record, loaded, options.fresh === true);
+        if (web !== undefined) depEnv = await this.provisionDeps(record, loaded, options.fresh === true, warnings);
       } else {
         const staged = await stageStaticSite(site, record.worktree);
         record.commit = staged.hash;
@@ -1015,10 +1029,14 @@ export class NectarService {
     }
   }
 
-  private async provisionDeps(record: EnvRecord, recipe: Recipe, fresh: boolean): Promise<Record<string, string>> {
+  private async checkPostgres(recipe: Recipe): Promise<void> {
+    const providers = new PostgresProviders();
+    for (const [name, dep] of Object.entries(recipe.deps ?? {})) if (dep.kind === "postgres") await providers.choose(name, dep);
+  }
+
+  private async provisionDeps(record: EnvRecord, recipe: Recipe, fresh: boolean, warnings: string[]): Promise<Record<string, string>> {
     const wanted = Object.entries(recipe.deps ?? {});
     const previous = fresh ? {} : (record.deps ?? {});
-    const hadPostgres = Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres");
     const postgres = wanted.flatMap(([name, dep]) => (dep.kind === "postgres" ? [{ name, recipe: dep }] : []));
     const directory = depsDir(this.paths.work, record.name);
     if (wanted.length === 0) {
@@ -1027,8 +1045,23 @@ export class NectarService {
       await this.persistDeps(record);
       return {};
     }
-    if (postgres.length > 0) await assertDocker();
-    if (hadPostgres && (fresh || postgres.length === 0)) await removeLabelled(record.name, this.paths.root);
+    const providers = new PostgresProviders();
+    const choices = new Map<string, PostgresChoice>();
+    for (const { name, recipe: dep } of postgres) {
+      const choice = await providers.choose(name, dep, previous[name]);
+      if (choice.warning !== undefined) warnings.push(choice.warning);
+      choices.set(name, choice);
+    }
+    const usesDocker = [...choices.values()].some((choice) => choice.provider === "docker");
+    if (Object.values(record.deps ?? {}).some(usesDockerPostgres) && (fresh || !usesDocker)) await removeLabelled(record.name, this.paths.root);
+    const staleLocal = Object.entries(record.deps ?? {}).filter(([name, dep]) => usesLocalPostgres(dep) && (fresh || choices.get(name)?.provider !== "local"));
+    await this.dropLocalDeps(staleLocal, warnings);
+    const clusterPorts = new Map<number, number>();
+    for (const choice of choices.values()) {
+      if (choice.install !== undefined && !clusterPorts.has(choice.install.major)) {
+        clusterPorts.set(choice.install.major, await this.withCluster(choice.install, (port) => Promise.resolve(port)));
+      }
+    }
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const now = new Date().toISOString();
     const next: Record<string, DepRecord> = {};
@@ -1048,7 +1081,8 @@ export class NectarService {
     }
     const secrets = fresh ? {} : await readSecrets(directory);
     const before = record.deps;
-    const newPostgres: string[] = [];
+    const newDocker: string[] = [];
+    const newLocal: Array<[string, DepRecord]> = [];
     await this.store.withLock(PORTS_LOCK, async () => {
       const config = await this.store.readConfig();
       const reserved = loopbackPorts((await this.store.listEnvs()).filter((item) => item.name !== record.name));
@@ -1056,17 +1090,35 @@ export class NectarService {
       for (const port of [record.serve?.upstream_port, record.serve?.proxy_port]) if (port !== undefined) reserved.add(port);
       for (const { name, recipe: dep } of postgres) {
         const prior = previous[name]?.kind === "postgres" ? previous[name] : undefined;
-        if (prior === undefined) newPostgres.push(name);
+        const install = choices.get(name)?.install;
+        const password = secrets[name] ?? newPassword();
+        secrets[name] = password;
+        if (install !== undefined) {
+          const identifier = pgIdentifier(record.name, name);
+          next[name] = {
+            kind: "postgres",
+            env: dep.env,
+            image: dep.image,
+            provider: "local",
+            major: install.major,
+            port: clusterPorts.get(install.major) ?? 0,
+            database: identifier,
+            user: identifier,
+            created_at: prior?.created_at ?? now,
+          };
+          if (prior === undefined) newLocal.push([name, next[name]]);
+          continue;
+        }
+        if (prior === undefined) newDocker.push(name);
         const port =
           prior?.port ??
           (await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved }));
         reserved.add(port);
-        const password = secrets[name] ?? newPassword();
-        secrets[name] = password;
         next[name] = {
           kind: "postgres",
           env: dep.env,
           image: dep.image,
+          provider: "docker",
           project: composeProject(record.name),
           port,
           database: dep.database,
@@ -1080,10 +1132,14 @@ export class NectarService {
     await writePrivateJson(path.join(directory, "secrets.json"), secrets);
     if (postgres.length > 0) {
       try {
-        await assertProjectOwned(composeProject(record.name), this.paths.root);
-        await this.composeUpDeps(record.name, next, secrets);
+        if (usesDocker) {
+          await assertProjectOwned(composeProject(record.name), this.paths.root);
+          await this.composeUpDeps(record.name, next, secrets);
+        }
+        await this.createLocalDeps(next, secrets);
       } catch (error) {
-        if (newPostgres.length > 0) await removeLabelled(record.name, this.paths.root, newPostgres).catch(() => undefined);
+        if (newDocker.length > 0) await removeLabelled(record.name, this.paths.root, newDocker).catch(() => undefined);
+        await this.dropLocalDeps(newLocal).catch(() => undefined);
         if (fresh || before === undefined) delete record.deps;
         else record.deps = before;
         await this.persistDeps(record);
@@ -1093,10 +1149,98 @@ export class NectarService {
         throw error;
       }
     }
+    if (staleLocal.length > 0) await this.stopIdleClusters();
     const depEnv = depEnvironment(next, secrets);
     const seed = seedScenario(recipe);
-    if ((created || newPostgres.length > 0) && seed !== undefined) await this.runSeed(record, seed, depEnv);
+    if ((created || newDocker.length > 0 || newLocal.length > 0) && seed !== undefined) await this.runSeed(record, seed, depEnv);
     return depEnv;
+  }
+
+  private async localInstall(major: number | undefined): Promise<PgInstall> {
+    const install = (await findPgInstalls()).find((item) => item.major === major);
+    if (install !== undefined) return install;
+    throw new NectarError("E_PLATFORM", `No local Postgres ${major ?? "?"} binaries are found on this host for Nectar's cluster at ${path.join(this.paths.root, "pg", String(major))}`, {
+      hint: LOCAL_PG_HINT,
+    });
+  }
+
+  private async clusterReferenced(major: number, exclude?: string): Promise<boolean> {
+    return (await this.store.listEnvs()).some(
+      (record) => record.name !== exclude && Object.values(record.deps ?? {}).some((dep) => usesLocalPostgres(dep) && dep.major === major),
+    );
+  }
+
+  private async withClusterLock<T>(major: number, action: () => Promise<T>): Promise<T> {
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      try {
+        return await this.store.withLock(`machine--pg-${major}`, action);
+      } catch (error) {
+        if (!(error instanceof NectarError && error.code === "E_BUSY" && error.message.includes(`machine--pg-${major}`)) || Date.now() > deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }
+
+  private async withCluster<T>(install: PgInstall, action: (port: number) => Promise<T>): Promise<T> {
+    return this.withClusterLock(install.major, async () => {
+      const port = await ensureCluster(this.paths.root, install, {
+        referenced: await this.clusterReferenced(install.major),
+        lockPorts: async (allocateWith) =>
+          this.store.withLock(PORTS_LOCK, async () =>
+            allocateWith(async () => {
+              const config = await this.store.readConfig();
+              const reserved = loopbackPorts(await this.store.listEnvs());
+              reserved.add(config.pack_server_port);
+              return allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved });
+            }),
+          ),
+      });
+      return action(port);
+    });
+  }
+
+  private async createLocalDeps(deps: Record<string, DepRecord> | undefined, secrets: Record<string, string>): Promise<void> {
+    for (const [name, dep] of Object.entries(deps ?? {})) {
+      if (!usesLocalPostgres(dep) || dep.database === undefined) continue;
+      const install = await this.localInstall(dep.major);
+      const password = secrets[name] ?? "";
+      await this.withCluster(install, async (port) => {
+        if (port !== dep.port) throw new NectarError("E_DEPS", `The local Postgres ${install.major} cluster moved from port ${dep.port ?? "?"} to ${port}; republish with --fresh`);
+        await superuserSql(this.paths.root, install, port, createDatabaseSql(dep.database ?? "", password), [password]);
+      });
+    }
+  }
+
+  private async dropLocalDeps(deps: Array<[string, DepRecord]>, warnings?: string[]): Promise<void> {
+    for (const [name, dep] of deps) {
+      if (!usesLocalPostgres(dep) || dep.database === undefined) continue;
+      const install = await this.localInstall(dep.major).catch((error: unknown) => {
+        if (warnings === undefined) throw error;
+        warnings.push(`[deps.${name}] could not drop ${dep.database}: no local Postgres ${dep.major ?? "?"} binaries; it stays in ${path.join(this.paths.root, "pg", String(dep.major))}`);
+        return undefined;
+      });
+      if (install === undefined) continue;
+      await this.withCluster(install, async (port) => superuserSql(this.paths.root, install, port, dropDatabaseSql(dep.database ?? "")));
+    }
+  }
+
+  private async stopIdleClusters(exclude?: string): Promise<void> {
+    for (const major of await clusterMajors(this.paths.root)) {
+      await this.withClusterLock(major, async () => {
+        if (await this.clusterReferenced(major, exclude)) return;
+        const install = (await findPgInstalls()).find((item) => item.major === major);
+        if (install !== undefined) await stopCluster(this.paths.root, install);
+      }).catch(() => undefined);
+    }
+  }
+
+  private async startDeps(record: EnvRecord): Promise<void> {
+    const deps = Object.values(record.deps ?? {});
+    if (deps.length === 0) return;
+    const secrets = await readSecrets(depsDir(this.paths.work, record.name));
+    if (deps.some(usesDockerPostgres)) await this.composeUpDeps(record.name, record.deps, secrets);
+    await this.createLocalDeps(record.deps, secrets);
   }
 
   private async composeUpDeps(env: string, deps: Record<string, DepRecord> | undefined, secrets: Record<string, string>): Promise<void> {
@@ -1138,14 +1282,17 @@ export class NectarService {
   }
 
   private async stopDeps(record: EnvRecord): Promise<void> {
-    if (Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres")) await stopLabelled(record.name, this.paths.root);
+    if (Object.values(record.deps ?? {}).some(usesDockerPostgres)) await stopLabelled(record.name, this.paths.root);
   }
 
   private async releaseDeps(record: EnvRecord): Promise<void> {
     if (record.deps === undefined) return;
-    if (Object.values(record.deps).some((dep) => dep.kind === "postgres")) await removeLabelled(record.name, this.paths.root);
+    if (Object.values(record.deps).some(usesDockerPostgres)) await removeLabelled(record.name, this.paths.root);
+    const local = Object.entries(record.deps).filter(([, dep]) => usesLocalPostgres(dep));
+    await this.dropLocalDeps(local);
     await trashPaths([depsDir(this.paths.work, record.name)], this.paths.root);
     delete record.deps;
+    if (local.length > 0) await this.stopIdleClusters(record.name);
   }
 
   // Env locks are per-env, so two bees publishing different envs race the port
@@ -1827,9 +1974,9 @@ export class NectarService {
       }
       if (Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres")) {
         try {
-          await this.composeUpDeps(record.name, record.deps, await readSecrets(depsDir(this.paths.work, record.name)));
+          await this.startDeps(record);
         } catch (error) {
-          return fail("E_DEPS", asNectarError(error).message);
+          return fail(asNectarError(error).code, asNectarError(error).message);
         }
       }
       const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
@@ -3047,18 +3194,50 @@ export class NectarService {
         });
       }
     }
-    const depsUsers = (await this.store.listEnvs())
-      .filter((record) => Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres"))
-      .map((record) => record.name);
-    const docker = await probeDocker();
+    const envs = await this.store.listEnvs();
+    const depsUsers = (provider: (dep: DepRecord) => boolean): string[] =>
+      envs.filter((record) => Object.values(record.deps ?? {}).some(provider)).map((record) => record.name);
+    const dockerUsers = depsUsers(usesDockerPostgres);
+    const localUsers = depsUsers(usesLocalPostgres);
+    const providers = new PostgresProviders();
+    const docker = await providers.dockerProbe();
     checks.push({
       name: "docker",
-      status: docker.ok ? "pass" : depsUsers.length > 0 ? "fail" : "warn",
+      status: docker.ok ? "pass" : dockerUsers.length > 0 ? "fail" : "warn",
       message: docker.ok
         ? `${docker.message}; [deps] postgres can run here`
-        : `${docker.message}; ${depsUsers.length > 0 ? `envs with [deps] postgres cannot start: ${depsUsers.join(", ")}` : "publishing an app with [deps] postgres will fail with E_PLATFORM"}`,
+        : `${docker.message}; ${dockerUsers.length > 0 ? `envs with Docker [deps] postgres cannot start: ${dockerUsers.join(", ")}` : "[deps] postgres needs the local provider here"}`,
       binary: docker.binary,
       ...(docker.ok ? {} : { hint: DOCKER_HINT }),
+    });
+    const installs = await providers.localInstalls();
+    const auto = await providers.auto();
+    const missingMajors = [
+      ...new Set(
+        envs.flatMap((record) =>
+          Object.values(record.deps ?? {})
+            .filter(usesLocalPostgres)
+            .map((dep) => dep.major)
+            .filter((major) => !installs.some((install) => install.major === major)),
+        ),
+      ),
+    ];
+    checks.push({
+      name: "postgres-provider",
+      status: missingMajors.length > 0 ? "fail" : auto === undefined ? "warn" : "pass",
+      message: [
+        auto === undefined
+          ? "[deps] postgres has no provider here: no reachable Docker and no local Postgres binaries; publishing it fails with E_PLATFORM"
+          : `[deps] postgres without a provider key uses ${auto === "docker" ? "Docker" : `the local Postgres ${installs[0]?.version ?? ""} cluster`} here`,
+        installs.length > 0 ? `local Postgres: ${installs.map((install) => `${install.major} (${install.bindir})`).join(", ")}` : "no local Postgres binaries",
+        localUsers.length > 0 ? `envs on the local provider: ${localUsers.join(", ")}` : undefined,
+        missingMajors.length > 0 ? `missing local Postgres majors those envs need: ${missingMajors.join(", ")}` : undefined,
+      ]
+        .filter((part) => part !== undefined)
+        .join("; "),
+      provider: auto ?? null,
+      details: installs,
+      ...(auto === undefined || missingMajors.length > 0 ? { hint: `${DOCKER_HINT}. ${LOCAL_PG_HINT}` } : {}),
     });
     checks.push({
       name: "tailnet-acl",

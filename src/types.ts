@@ -55,7 +55,10 @@ export interface PostgresDepRecipe {
   env: string;
   database: string;
   user: string;
+  provider?: PostgresProvider;
 }
+
+export type PostgresProvider = "docker" | "local";
 
 export interface SqliteDepRecipe {
   kind: "sqlite";
@@ -87,6 +90,8 @@ export interface DepRecord {
   env: string;
   created_at: string;
   image?: string;
+  provider?: PostgresProvider;
+  major?: number;
   project?: string;
   port?: number;
   database?: string;

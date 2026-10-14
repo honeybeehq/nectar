@@ -3,7 +3,8 @@ import path from "node:path";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { runCommand, type CommandResult } from "./commands.js";
 import { NectarError } from "./errors.js";
-import type { DepRecord, PostgresDepRecipe } from "./types.js";
+import { chooseInstall, findPgInstalls, LOCAL_PG_HINT, MIN_LOCAL_MAJOR, type PgInstall } from "./pg-local.js";
+import type { DepRecord, PostgresDepRecipe, PostgresProvider } from "./types.js";
 
 export const ENV_LABEL = "dev.nectar.env";
 export const HOME_LABEL = "dev.nectar.home";
@@ -81,7 +82,7 @@ export function composeSpec(env: string, home: string, services: Record<string, 
 export function postgresServices(deps: Record<string, DepRecord> | undefined, secrets: Record<string, string>): Record<string, PostgresService> {
   const services: Record<string, PostgresService> = {};
   for (const [name, dep] of Object.entries(deps ?? {})) {
-    if (dep.kind !== "postgres" || dep.port === undefined) continue;
+    if (dep.kind !== "postgres" || dep.provider === "local" || dep.port === undefined) continue;
     services[name] = {
       recipe: { kind: "postgres", image: dep.image ?? "", env: dep.env, database: dep.database ?? "", user: dep.user ?? "" },
       port: dep.port,
@@ -178,13 +179,85 @@ export async function probeDocker(): Promise<DockerProbe> {
   return { ok: true, binary, version, message: `Docker ${version} with Compose is reachable via ${binary}` };
 }
 
+function dockerUnreachable(probe: DockerProbe): NectarError {
+  return new NectarError("E_PLATFORM", `[deps] postgres needs Docker with Compose: ${probe.message}`, { hint: DOCKER_HINT });
+}
+
 export async function assertDocker(): Promise<void> {
   const probe = await probeDocker();
-  if (probe.ok) return;
-  const mac = process.platform === "darwin" ? "; on macOS start Docker Desktop (a shared-Postgres fallback is not built yet)" : "";
-  throw new NectarError("E_PLATFORM", `[deps] postgres needs Docker with Compose: ${probe.message}`, {
-    hint: `${DOCKER_HINT}${mac}`,
-  });
+  if (!probe.ok) throw dockerUnreachable(probe);
+}
+
+export function usesLocalPostgres(dep: DepRecord): boolean {
+  return dep.kind === "postgres" && dep.provider === "local";
+}
+
+export function usesDockerPostgres(dep: DepRecord): boolean {
+  return dep.kind === "postgres" && dep.provider !== "local";
+}
+
+export interface PostgresChoice {
+  provider: PostgresProvider;
+  install?: PgInstall;
+  warning?: string;
+}
+
+export class PostgresProviders {
+  private docker: Promise<DockerProbe> | undefined;
+  private installs: Promise<PgInstall[]> | undefined;
+
+  dockerProbe(): Promise<DockerProbe> {
+    this.docker ??= probeDocker();
+    return this.docker;
+  }
+
+  localInstalls(): Promise<PgInstall[]> {
+    this.installs ??= findPgInstalls();
+    return this.installs;
+  }
+
+  async auto(): Promise<PostgresProvider | undefined> {
+    if ((await this.dockerProbe()).ok) return "docker";
+    return (await this.localInstalls()).length > 0 ? "local" : undefined;
+  }
+
+  async choose(name: string, recipe: PostgresDepRecipe, prior?: DepRecord): Promise<PostgresChoice> {
+    const label = `[deps.${name}]`;
+    const kept = prior?.kind === "postgres" ? (prior.provider ?? "docker") : undefined;
+    if (recipe.provider !== undefined && kept !== undefined && recipe.provider !== kept) {
+      throw new NectarError(
+        "E_DEPS",
+        `${label} was created with provider "${kept}"; republish with --fresh to move it to "${recipe.provider}", which drops its data`,
+      );
+    }
+    const provider = recipe.provider ?? kept ?? (await this.auto());
+    if (provider === undefined) {
+      const docker = await this.dockerProbe();
+      throw new NectarError(
+        "E_PLATFORM",
+        `[deps] postgres needs Docker with Compose or local Postgres ${MIN_LOCAL_MAJOR}+ binaries, and this host has neither: ${docker.message}; no initdb, pg_ctl, postgres and psql found`,
+        { hint: `${DOCKER_HINT}. ${LOCAL_PG_HINT}` },
+      );
+    }
+    if (provider === "docker") {
+      const docker = await this.dockerProbe();
+      if (!docker.ok) throw dockerUnreachable(docker);
+      return { provider };
+    }
+    const installs = await this.localInstalls();
+    if (prior?.provider === "local" && prior.major !== undefined) {
+      const same = installs.find((install) => install.major === prior.major);
+      if (same === undefined) {
+        throw new NectarError(
+          "E_PLATFORM",
+          `${label} lives in the local Postgres ${prior.major} cluster, but no Postgres ${prior.major} binaries are found on this host now; restore them, or republish with --fresh to recreate it on another major`,
+          { hint: LOCAL_PG_HINT },
+        );
+      }
+      return { provider, install: same };
+    }
+    return { provider, ...chooseInstall(installs, recipe.image, label) };
+  }
 }
 
 export async function assertProjectOwned(project: string, home: string): Promise<void> {

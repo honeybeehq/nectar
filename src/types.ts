@@ -118,6 +118,8 @@ export interface Publisher {
   hive_bee?: string;
   hive_session?: string;
   user: string;
+  cell?: string;
+  via?: "nectard";
 }
 
 export interface TestpackManifest {

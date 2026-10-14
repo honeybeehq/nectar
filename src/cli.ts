@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import path from "node:path";
 import { Command, CommanderError, Option } from "commander";
 import { asNectarError, NectarError } from "./errors.js";
 import { errorEnvelope, successEnvelope } from "./envelope.js";
@@ -6,6 +7,8 @@ import { NectarService } from "./service.js";
 import { claimPidFile, daemonLogger, DEFAULT_GC_INTERVAL_MS, DEFAULT_INTERVAL_MS, Supervisor } from "./daemon.js";
 import { installUnit, uninstallUnit, unitStatus } from "./daemon-unit.js";
 import { parseDuration } from "./duration.js";
+import { callDaemon, callerFromEnv, isControlOp, selectRoute, startControlServer, type ControlOp } from "./control.js";
+import { getPaths } from "./paths.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
@@ -17,9 +20,21 @@ function output(value: unknown, json: boolean): void {
   else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function directRequested(): boolean {
+  return program.opts<{ direct?: boolean }>().direct === true;
+}
+
+async function routed(command: ControlOp, args: Record<string, unknown>, local: () => Promise<unknown>): Promise<unknown> {
+  const paths = getPaths();
+  const route = await selectRoute(command, paths, { direct: directRequested() });
+  if (route.kind === "direct") return local();
+  return callDaemon(route.socket, command, { nectar_home: path.resolve(paths.root), caller: callerFromEnv(), args });
+}
+
 async function execute<T>(command: string, action: () => Promise<T>): Promise<void> {
   const json = program.opts<{ json?: boolean }>().json === true || jsonRequested;
   try {
+    if (command !== "daemon" && !isControlOp(command)) await selectRoute(command, getPaths(), { direct: directRequested() });
     const result = await action();
     output(json ? successEnvelope(command, result) : result, json);
   } catch (error) {
@@ -39,6 +54,7 @@ program
   .version("0.0.0")
   .option("--json", "emit the exact JSON envelope")
   .option("--repo <path>", "repository path", process.cwd())
+  .option("--direct", "use NECTAR_HOME directly, never the local nectard")
   .showSuggestionAfterError()
   .exitOverride()
   .configureOutput({
@@ -69,17 +85,30 @@ program
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
-        return new NectarService().publish({
-          repo: target ?? globals.repo,
+        const source = path.resolve(target ?? globals.repo);
+        const worktree = options.worktree === undefined ? undefined : path.resolve(options.worktree);
+        const args = {
+          path: source,
+          mode: options.mode,
+          branch: options.branch,
+          ttl: options.ttl,
+          worktree,
+          packet: options.packet,
+          verify: options.verify,
+          name: options.name,
+          dry_run: options.dryRun,
+        };
+        return routed("publish", args, async () => new NectarService().publish({
+          repo: source,
           ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
           ...(options.mode === undefined ? {} : { mode: options.mode }),
           ...(options.branch === undefined ? {} : { branch: options.branch }),
-          ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
+          ...(worktree === undefined ? {} : { worktree }),
           ...(options.packet === undefined ? {} : { packet: options.packet }),
           ...(options.verify === undefined ? {} : { verify: options.verify }),
           ...(options.name === undefined ? {} : { name: options.name }),
           ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
-        });
+        }));
       }),
   );
 
@@ -89,13 +118,13 @@ program
   .option("--mode <mode>")
   .option("--status <status>")
   .action(async (options: { mode?: string; status?: string }) =>
-    execute("ls", async () => new NectarService().list(options)),
+    execute("ls", async () => routed("ls", options, async () => new NectarService().list(options))),
   );
 
 program
   .command("show <env-or-ref>")
   .description("show a full environment record")
-  .action(async (input: string) => execute("show", async () => new NectarService().show(input)));
+  .action(async (input: string) => execute("show", async () => routed("show", { target: input }, async () => new NectarService().show(input))));
 
 program
   .command("open <env-or-ref>")
@@ -116,27 +145,27 @@ program
 program
   .command("resolve <env-or-ref>")
   .description("resolve a Nectar ref to concrete consumables")
-  .action(async (input: string) => execute("resolve", async () => new NectarService().resolve(input)));
+  .action(async (input: string) => execute("resolve", async () => routed("resolve", { target: input }, async () => new NectarService().resolve(input))));
 
 program
   .command("touch <env-or-ref>")
   .description("reset an environment's TTL")
   .option("--ttl <duration>", "time to live (default: the env's own TTL)")
   .action(async (input: string, options: { ttl?: string }) =>
-    execute("touch", async () => new NectarService().touch(input, options.ttl)),
+    execute("touch", async () => routed("touch", { target: input, ttl: options.ttl }, async () => new NectarService().touch(input, options.ttl))),
   );
 
 program
   .command("stop <env>")
   .description("stop serving and retain environment files")
-  .action(async (input: string) => execute("stop", async () => new NectarService().stop(input)));
+  .action(async (input: string) => execute("stop", async () => routed("stop", { env: input }, async () => new NectarService().stop(input))));
 
 program
   .command("rm <env>")
   .description("stop and trash an environment")
   .option("--force", "confirm removal of a serving environment")
   .action(async (input: string, options: { force?: boolean }) =>
-    execute("rm", async () => new NectarService().remove(input, options.force ?? false)),
+    execute("rm", async () => routed("rm", { env: input, force: options.force }, async () => new NectarService().remove(input, options.force ?? false))),
   );
 
 program
@@ -204,7 +233,12 @@ daemon
       const release = await claimPidFile(service.paths);
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
       const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
+      const control = await startControlServer(service.paths, { log }).catch((error: unknown) => {
+        log({ event: "control_unavailable", message: asNectarError(error).message });
+        return undefined;
+      });
       const shutdown = async (): Promise<void> => {
+        await control?.close();
         await supervisor.stop();
         await release();
         process.exit(0);

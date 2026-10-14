@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { pidAlive, runCommand } from "./commands.js";
+import { daemonHello, socketPath } from "./control.js";
 import { daemonLogFile, runningDaemonPid } from "./daemon.js";
 import { NectarError } from "./errors.js";
 import type { NectarPaths } from "./paths.js";
@@ -48,7 +49,7 @@ export async function onPath(name: string, searchPath = process.env.PATH ?? ""):
 export function unitSpec(paths: NectarPaths, platform: NodeJS.Platform = process.platform, lookup: TailscaleLookup = {}): UnitSpec {
   unitPlatform(platform);
   const env: Record<string, string> = { NECTAR_HOME: paths.root };
-  for (const key of ["PATH", "HOME", "SHELL", "LANG", "NECTAR_TRASH_BIN"]) {
+  for (const key of ["PATH", "HOME", "SHELL", "LANG", "NECTAR_TRASH_BIN", "NECTAR_SOCKET"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
@@ -366,6 +367,8 @@ export interface UnitStatus {
   nectar_home: string;
   last_gc_at: string | null;
   log: string;
+  socket: string;
+  control: { api: number; pid: number; nectar_home: string; ops: string[] } | null;
 }
 
 export async function unitStatus(
@@ -378,6 +381,8 @@ export async function unitStatus(
   const installed = await exists(file);
   const state = await daemonState(kind, paths, { ms: options.waitMs ?? 3_000, anyState: false });
   const config = JSON.parse(await readFile(paths.config, "utf8").catch(() => "{}")) as { last_gc_at?: string };
+  const socket = socketPath();
+  const hello = await daemonHello(socket);
   return {
     installed,
     platform: kind,
@@ -388,5 +393,7 @@ export async function unitStatus(
     nectar_home: paths.root,
     last_gc_at: config.last_gc_at ?? null,
     log: daemonLogFile(paths),
+    socket,
+    control: hello === undefined ? null : { api: hello.api, pid: hello.pid, nectar_home: hello.nectar_home, ops: hello.ops },
   };
 }

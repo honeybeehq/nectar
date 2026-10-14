@@ -95,6 +95,7 @@ import type {
   Mode,
   MultiResolveResult,
   PacketFields,
+  Publisher,
   Recipe,
   ResolveResult,
   ServeRecord,
@@ -234,9 +235,12 @@ export class NectarService {
   readonly paths: NectarPaths;
   readonly store: StateStore;
 
-  constructor(root?: string) {
+  private readonly publisher: Publisher | undefined;
+
+  constructor(root?: string, options: { publisher?: Publisher } = {}) {
     this.paths = getPaths(root);
     this.store = new StateStore(this.paths);
+    this.publisher = options.publisher;
   }
 
   private async identity(): Promise<MachineIdentity> {
@@ -475,7 +479,7 @@ export class NectarService {
       published_at: now.toISOString(),
       expires_at: expiresAt(now, options.ttlMs),
       last_touched_at: now.toISOString(),
-      publisher: currentPublisher(),
+      publisher: this.publisher ?? currentPublisher(),
       ...(options.packet === undefined ? {} : { packet_hint: options.packet }),
       ttl_ms: options.ttlMs,
       evidence: old?.evidence ?? [],

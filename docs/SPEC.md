@@ -317,9 +317,23 @@ Service units (`nectar daemon install`; `uninstall` is the one removal command; 
 | at boot | at login of the user | needs `loginctl enable-linger <user>` (install warns) |
 
 The unit runs `<node> <nectar>/dist/cli.js daemon run` with the installing shell's `PATH`,
-`HOME`, `SHELL`, `LANG` and `NECTAR_HOME`. On macOS, when `tailscale` is not on `PATH`, it
-pins `NECTAR_TAILSCALE_BIN` to the app's CLI. `uninstall` stops the daemon and deletes the
-unit; envs keep serving and their records stay.
+`HOME`, `SHELL`, `LANG` and `NECTAR_HOME`. When `tailscale` is not on `PATH`, it pins
+`NECTAR_TAILSCALE_BIN` to the CLI the resolver below found (on a Mac usually the app's CLI).
+`uninstall` stops the daemon and deletes the unit; envs keep serving and their records stay.
+`install` and `status` report the daemon's live `pid` and `pid_source`: `launchctl print`'s
+`pid` or systemd's `MainPID`, else `nectard.pid`. While the unit is starting, they wait a few
+seconds for one to appear.
+
+Cost: idle nectard is a Node process with ~60–90 MB RSS on both macOS and Linux (the Node
+baseline, ~55 MB of it shared), and well under 0.1 % of one core at the default intervals.
+systemd's cgroup accounting for the unit shows less (~27 MB, peak ~30 MB) because it counts
+only the pages charged to the unit, not the shared Node mappings. Neither number is per env.
+
+**Finding the tailscale CLI.** Every tailscale call (publish, nectard's re-assertion and proxy
+re-pointing, gc, doctor, expose, the pack store, remote refs) uses one resolver, in this
+order: `NECTAR_TAILSCALE_BIN`; `tailscale` on `PATH`; the Mac app's CLI
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`; `/opt/homebrew/bin/tailscale`;
+`/usr/local/bin/tailscale`. `nectar doctor` names the binary it used and where it came from.
 
 ## 5. Recipes — `nectar.toml`
 
@@ -814,8 +828,10 @@ nectar ls [--json] [--mode <m>] [--status <s>]
     # publisher bee, liveness. Listing does not touch.
 
 nectar show <env|ref> [--json]
-    # Full record (incl. liveness) + last 40 log lines when status is crashed or unhealthy.
-    # Touches the env (TTL reset).
+    # { env: <full record>, name, mode, status, ref, urls, serve, pid, pgid,
+    #   ports: { upstream, tailnet }, liveness, expires_at, expires_in, failure }
+    # (missing values are null) + log_tail (last 40 lines) when status is crashed or
+    # unhealthy. Touches the env (TTL reset).
 
 nectar open <env|ref>
     # web → open urls.local when resolve.is_self, otherwise urls.mesh ·
@@ -852,10 +868,12 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # run is the foreground supervisor the unit starts.
 
 nectar doctor [--fix]
-    # Checks: portless present + proxy up · tailscale up + this host's serve entries ·
-    # port-range availability · pack store served on 8440 · no 443 tailscale serve entry
-    # (portless killer) · dead Nectar-range Serve proxies · quota headroom. --fix repairs
-    # the pack chain and removes dead Nectar-range proxies.
+    # Checks: portless present + proxy up · tailscale up (names the CLI used and its
+    # source, §4.5) + this host's serve entries · port-range availability · pack store
+    # served on 8440 · no 443 tailscale serve entry (portless killer) · dead Nectar-range
+    # Serve proxies · quota headroom. --fix repairs the pack chain and removes dead
+    # Nectar-range proxies. The pack store serves desktop/ios testpacks only; with no packs
+    # stored, a stopped pack chain is a warning, since web previews do not use it.
 ```
 
 ### `publish --json` result (web example)

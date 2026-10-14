@@ -62,10 +62,15 @@ nectar doctor --fix          # check deps, ports, and serve entries
 nectar daemon install        # optional: nectard revives crashed previews, restores them after reboot, runs gc hourly
 ```
 
+Nectar finds the `tailscale` CLI on `PATH`, inside the Mac app
+(`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) or in the Homebrew and standalone
+locations. Set `NECTAR_TAILSCALE_BIN` to choose one; `nectar doctor` shows which it used.
+
 `nectar daemon uninstall` stops and removes nectard again (envs keep running);
 `nectar daemon status` shows whether it is installed and running. On Linux it is a
 `systemd --user` unit: run `loginctl enable-linger $USER` once so it starts at boot without
-a login. On macOS it is a launchd agent in `~/Library/LaunchAgents`. Its log is
+a login. On macOS it is a launchd agent in `~/Library/LaunchAgents`. Idle, it is one Node
+process of ~60–90 MB RSS (systemd's cgroup accounting shows ~27 MB). Its log is
 `~/.nectar/logs/nectard.log`. While it runs, nectard also sits between `tailscale serve`
 and each web preview (a small proxy on one extra loopback port per env), so a person
 opening the mesh URL in a browser extends the preview's lifetime the same way `nectar open`

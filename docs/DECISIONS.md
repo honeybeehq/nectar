@@ -404,3 +404,20 @@ code for what `E_PLATFORM` already means: this host cannot run it, route elsewhe
 (e) pulls in a large dependency or a container runtime for a handful of patterns. Serve
 commands `exec` the server and carry relative paths so the recorded `serve.cmd` restarts
 the same process from the worktree, as nectard expects.
+
+## D24 — `nectard`: a light, optional supervisor for Nectar's own web envs
+
+**Chose:** `nectar daemon run`, installed per user (launchd agent / systemd `--user` unit
+via `nectar daemon install`, removed with `nectar daemon uninstall`). It revives crashed web
+envs on their recorded ports, restores them after a reboot, re-asserts their `tailscale
+serve` mappings and runs gc hourly. It works only from env records. It caps revives (3 in
+10 min, then `E_CRASH_LOOP`). Amends D1. (SPEC §4.5.)
+**Alternatives:** (a) stay CLI-only and let agents republish; (b) a pollinate schedule
+that runs `nectar gc` and a revive verb; (c) hand serves to launchd/systemd one unit per env.
+**Why:** previews died with a crashed dev server or a reboot, and gc never ran on the Studio
+because nothing scheduled it. Humans click mesh URLs days later, so D1's "crashed + log tail
+is honest" left them with dead links. (b) means a minute-scale schedule per machine plus a
+pollinate dependency for a core property. (c) writes and deletes a unit per publish and
+puts Nectar state in the service manager. One timer, a probe every 30 s and gc hourly keep
+it light. Leaving the CLI fully functional without the daemon keeps D1's "nectar can't wedge
+itself" property: uninstalling it loses only the revival.

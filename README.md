@@ -56,7 +56,14 @@ See [relay/](relay/) to run your own `<domain>.site` relay.
 ```bash
 pnpm install && pnpm build && pnpm link --global
 nectar doctor --fix          # check deps, ports, and serve entries
+nectar daemon install        # optional: nectard revives crashed previews, restores them after reboot, runs gc hourly
 ```
+
+`nectar daemon uninstall` stops and removes nectard again (envs keep running);
+`nectar daemon status` shows whether it is installed and running. On Linux it is a
+`systemd --user` unit: run `loginctl enable-linger $USER` once so it starts at boot without
+a login. On macOS it is a launchd agent in `~/Library/LaunchAgents`. Its log is
+`~/.nectar/logs/nectard.log`.
 
 Then, in any repo with a `dev` script (or a `nectar.toml`):
 
@@ -85,7 +92,7 @@ Order: `nectar.toml` > `package.json` dev script > Python > Rails > static HTML
 ## The CLI
 
 `publish` · `ls` · `show` · `open` · `resolve` · `touch` · `stop` · `rm` · `gc` ·
-`doctor` · `expose` / `unexpose`.
+`doctor` · `expose` / `unexpose` · `daemon install` / `uninstall` / `status` / `run`.
 
 Everything speaks `--json` with one envelope — `{ ok, command, result | error }`, exit
 non-zero iff `ok:false` — so any harness already knows how to read it. Nectar is

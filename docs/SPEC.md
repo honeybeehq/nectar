@@ -80,27 +80,24 @@ bee finishes work on branch
        └─ emit { urls, ref, evidence } → agent puts strings on the Forum packet
 reviewer (desk or human, any machine)
   └─ preview_url in an iframe / nectar open <ref> / nectar shell <ref>
-gc (hourly, pollinate-scheduled)
+gc (hourly, run by nectard)
   └─ expire → stop → cold → reap
 ```
 
 ## 4. Architecture
 
-### 4.1 CLI-first; the daemon is deferred
+### 4.1 CLI-first; `nectard` supervises behind it
 
-`nectar` is a single CLI. There is **no daemon in v0/v1**. Long-running serve processes are
-spawned detached (own process group, stdio to log files); their PIDs live in the env record;
-liveness is checked lazily: every read (`ls`, `show`, `resolve`, `expose`, dev `open`) re-derives
-it from PID/process group + port (§4.4 "Liveness"). Periodic work (TTL
-enforcement, reaping) is `nectar gc`, scheduled externally via pollinate (§10.3).
+`nectar` is a single CLI. Long-running serve processes are spawned detached (`setsid`: own
+session and process group, stdio to log files), so they outlive the CLI and the agent that
+published them; their PIDs live in the env record; liveness is re-derived on every read
+(`ls`, `show`, `resolve`, `expose`, dev `open`) from PID/process group + port (§4.4
+"Liveness").
 
-A supervisor daemon (`nectard`: restart crashed servers, push state, watch TTLs in real
-time) is a known later step — see DECISIONS D1. The CLI surface is designed so the daemon
-can slide in behind it without changing any command.
-
-Rationale: every capability the daemon would add (restart-on-crash, instant reaping) is a
-nice-to-have; every day without a daemon is a day nectar can't wedge itself. Crashed dev
-servers surface honestly as `status: crashed` with a log tail.
+**Amendment 2026-10-14 (DECISIONS D24):** the optional supervisor `nectard` now exists. It is
+`nectar daemon run`, installed as a user-level service with `nectar daemon install`
+(launchd agent on macOS, systemd `--user` unit on Linux; §4.5). Every command still works
+without it; the daemon only calls the same code the CLI calls.
 
 ### 4.2 On-disk layout (per machine)
 
@@ -221,6 +218,59 @@ Nectar never sees them (a supervisor-owned proxy is the planned hook). Active re
 gets reaped mid-session: `gc` skips envs touched in the last 6 h. Dev envs keep their
 separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view moves only the record's
 expiry, never the process clock.
+
+### 4.5 `nectard`
+
+One process per machine (per `NECTAR_HOME`, guarded by `~/.nectar/nectard.pid`). It manages
+**only Nectar's own envs**: it reads `envs/*.json` and acts only on PIDs, process groups and
+`tailscale serve` ports that a record names. It never scans the process table or the serve
+table for other work.
+
+- **Which envs.** `mode: web` envs (recipe and static, §6.1.1) whose status is `serving`,
+  `unhealthy` or `crashed`, that still hold a `serve` block, are not past `expires_at`, and
+  are not marked `failure.code: E_CRASH_LOOP`. `stopped`, `expired`, `cold`, `warm` dev envs,
+  desktop and ios envs are left alone.
+- **Liveness, every 30 s** (`--interval`). It calls `probeLiveness`. `crashed`
+  (`process_exited`) → revive. `unhealthy` → restart (SIGTERM/SIGKILL the recorded process
+  group, then revive) after 3 consecutive unhealthy probes. One timer, no overlap: the next
+  cycle is scheduled after the previous one finishes.
+- **Revive** (under the env lock, only if the record's PID is still the one probed): re-run
+  `serve.cmd` in the env's work dir with the recipe's env plus `PORT=<upstream_port>`,
+  `NECTAR_ENV`, `NECTAR_ENV_DIR`, detached like publish. Static envs get the static-server
+  command re-derived from the running install, so a reinstall or node upgrade that moved the
+  recorded absolute paths does not break revival. It waits for HTTP 200 at `ready_path`,
+  then re-asserts `tailscale serve --https=<tailnet_port>` so the mesh URL stays the same,
+  stamps `serve.started_at`, and sets `serving`. If the upstream port is held by a process
+  Nectar did not start, it does not spawn and records `failure.code: E_PORTS`.
+- **Backoff and crash-loop cap.** Revives of one env are spaced at least 10 s × 2^(n−1)
+  apart. After 3 revives within 10 minutes the next death marks the env `crashed` with
+  `failure.code: E_CRASH_LOOP`, removes its `tailscale serve` entry, and stops trying. The
+  record keeps its `serve` block so a republish gets the same ports and URL; republish
+  clears the failure.
+- **Restore on start (after a reboot).** At start it sweeps every supervised env. An env whose
+  serve was started before the machine booted (`serve.started_at`, else `published_at`) is
+  revived without signalling its recorded PID, which after a reboot may belong to an
+  unrelated process. Envs that are still alive get their `tailscale serve` mapping
+  re-asserted. If Tailscale is not up yet, re-assertion is retried every cycle until it is.
+- **gc hourly** (`--gc-interval`): the same `nectar gc` (§10.2), run once at start and then
+  after the liveness cycle once an hour has passed.
+- **Logs.** Events (start, revive, crash_loop, mesh, gc, error), one JSON line each, go to
+  `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
+  Quiet cycles write nothing.
+
+Service units (`nectar daemon install`; `uninstall` is the one removal command; `status`):
+
+| | macOS | Linux |
+| --- | --- | --- |
+| unit | `~/Library/LaunchAgents/com.honeybeehq.nectard.plist` | `~/.config/systemd/user/nectard.service` |
+| keeps running | `RunAtLoad`, `KeepAlive` | `Restart=always`, `WantedBy=default.target` |
+| serves survive a daemon stop | `AbandonProcessGroup` (serves also have their own session) | `KillMode=process` |
+| at boot | at login of the user | needs `loginctl enable-linger <user>` (install warns) |
+
+The unit runs `<node> <nectar>/dist/cli.js daemon run` with the installing shell's `PATH`,
+`HOME`, `SHELL`, `LANG` and `NECTAR_HOME`. On macOS, when `tailscale` is not on `PATH`, it
+pins `NECTAR_TAILSCALE_BIN` to the app's CLI. `uninstall` stops the daemon and deletes the
+unit; envs keep serving and their records stay.
 
 ## 5. Recipes — `nectar.toml`
 
@@ -729,6 +779,12 @@ nectar gc [--dry-run] [--json]
 nectar evidence add <env> <file...>   # copy files into evidence/, print refs
 nectar evidence ls <env> [--json]
 
+nectar daemon install | uninstall | status [--json]
+nectar daemon run [--interval 30s] [--gc-interval 1h]
+    # nectard (§4.5). install writes and starts the launchd agent / systemd --user unit;
+    # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
+    # run is the foreground supervisor the unit starts.
+
 nectar doctor [--fix]
     # Checks: portless present + proxy up · tailscale up + this host's serve entries ·
     # port-range availability · pack store served on 8440 · no 443 tailscale serve entry
@@ -866,9 +922,9 @@ applies the same cleanup.
 
 ### 10.3 Scheduling
 
-Hourly `nectar gc --json` per machine via a pollinate schedule (action: shell). That is
-pollinate's entire involvement. Machines without pollinate: cron/launchd line; `nectar
-doctor` warns if `gc` hasn't run in 24 h.
+`nectard` (§4.5) runs gc at start and hourly. Machines without it can still schedule hourly
+`nectar gc --json` externally (a pollinate schedule, cron or a launchd line). `nectar doctor`
+warns if `gc` hasn't run in 24 h.
 
 ### 10.4 Failure modes (contract, not aspiration)
 

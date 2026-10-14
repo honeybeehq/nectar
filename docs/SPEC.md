@@ -248,7 +248,12 @@ tailnet port range whose loopback target is dead, §10.2.)
   port, or the port is held when it wants to revive, nectard spawns nothing and signals
   nothing. It removes the env's own `tailscale serve` entry (so the mesh URL never fronts an
   unrelated process), marks `crashed` with `failure.code: E_PORTS`, and stops supervising the
-  env. A republish allocates a free upstream port and keeps the tailnet URL.
+  env. A republish allocates a free upstream port and keeps the tailnet URL. The same rule
+  means nectard cannot supervise a serve command that forks its server out of the recorded
+  process group and exits (`setsid -f …`, `docker compose up -d`): the answering port looks
+  foreign and the env is given up. Such recipes are already outside Nectar's lifecycle
+  (`stop`/`rm` cannot reach the orphan), so serve commands should run the server in the
+  foreground, ideally with `exec`.
 - **Backoff and crash-loop cap.** Revives of one env are spaced at least 10 s × 2^(n−1)
   apart. After 3 revives within 10 minutes the next death marks the env `crashed` with
   `failure.code: E_CRASH_LOOP`, removes its `tailscale serve` entry, and stops trying. The

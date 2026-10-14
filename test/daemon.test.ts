@@ -2,7 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { pidAlive, spawnDetached, stopProcessGroup } from "../src/commands.js";
+import { pidAlive, processBelongsToEnv, spawnDetached, stopProcessGroup } from "../src/commands.js";
+import { portOpen } from "../src/ports.js";
 import { claimPidFile, Supervisor, supervised } from "../src/daemon.js";
 import { installUnit, launchdPlist, systemdUnit, uninstallUnit, unitPath, unitStatus } from "../src/daemon-unit.js";
 import { getPaths } from "../src/paths.js";
@@ -30,22 +31,22 @@ function webRecord(overrides: Partial<EnvRecord> = {}): EnvRecord {
 function fakeService(records: EnvRecord[]): {
   service: NectarService;
   revive: ReturnType<typeof vi.fn>;
-  markCrashLoop: ReturnType<typeof vi.fn>;
+  giveUp: ReturnType<typeof vi.fn>;
   reassertMesh: ReturnType<typeof vi.fn>;
   gc: ReturnType<typeof vi.fn>;
 } {
   const revive = vi.fn((): Promise<ReviveResult> => Promise.resolve({ revived: true, reason: "spawned", pid: 5000, mesh: true }));
-  const markCrashLoop = vi.fn(() => Promise.resolve(true));
+  const giveUp = vi.fn(() => Promise.resolve(true));
   const reassertMesh = vi.fn(() => Promise.resolve(true));
   const gc = vi.fn(() => Promise.resolve({ transitions: [], serve_orphans: [], skipped: [] }));
   const service = {
     store: { listEnvs: () => Promise.resolve(records) },
     revive,
-    markCrashLoop,
+    giveUp,
     reassertMesh,
     gc,
   } as unknown as NectarService;
-  return { service, revive, markCrashLoop, reassertMesh, gc };
+  return { service, revive, giveUp, reassertMesh, gc };
 }
 
 afterEach(() => {
@@ -109,7 +110,7 @@ describe("supervisor decisions", () => {
     await vi.advanceTimersByTimeAsync(120_000);
     await supervisor.sweep(false);
     expect(fake.revive).toHaveBeenCalledTimes(3);
-    expect(fake.markCrashLoop).toHaveBeenCalledWith("demo--main--web", 4242, expect.stringContaining("Revived 3 times"));
+    expect(fake.giveUp).toHaveBeenCalledWith("demo--main--web", 4242, "E_CRASH_LOOP", expect.stringContaining("Revived 3 times"));
   });
 
   it("forgets old revives, so a rare crash is always revived", async () => {
@@ -120,7 +121,7 @@ describe("supervisor decisions", () => {
     await vi.advanceTimersByTimeAsync(11 * 60_000);
     await supervisor.sweep(false);
     expect(fake.revive).toHaveBeenCalledTimes(2);
-    expect(fake.markCrashLoop).not.toHaveBeenCalled();
+    expect(fake.giveUp).not.toHaveBeenCalled();
   });
 
   it("does not count a revive that lost a race with a publish", async () => {
@@ -131,7 +132,18 @@ describe("supervisor decisions", () => {
     await supervisor.sweep(false);
     await supervisor.sweep(false);
     expect(fake.revive).toHaveBeenCalledTimes(2);
-    expect(fake.markCrashLoop).not.toHaveBeenCalled();
+    expect(fake.giveUp).not.toHaveBeenCalled();
+  });
+
+  it("gives up with E_PORTS instead of re-pointing the mesh when a stranger answers on a dead env's port", async () => {
+    const fake = fakeService([webRecord()]);
+    const stranger: Liveness = { ...liveness("serving"), pid_alive: false };
+    const supervisor = new Supervisor(fake.service, { bootTimeMs: BOOT, probe: () => Promise.resolve(stranger) });
+    await supervisor.sweep(true);
+    expect(fake.giveUp).toHaveBeenCalledWith("demo--main--web", 4242, "E_PORTS", expect.stringContaining("another process holds it"));
+    expect(fake.reassertMesh).not.toHaveBeenCalled();
+    expect(fake.revive).not.toHaveBeenCalled();
+    expect(supervised(webRecord({ status: "crashed", failure: { code: "E_PORTS", message: "", failed_at: "", log_tail: [] } }), Date.now())).toBe(false);
   });
 
   it("restarts an unhealthy env only after N consecutive unhealthy probes", async () => {
@@ -205,6 +217,14 @@ import http from "node:http";
 http.createServer((_q, r) => { r.writeHead(200); r.end("ok"); }).listen(Number(process.env.PORT), "127.0.0.1");
 `;
 
+async function startStranger(port: number): Promise<{ pid: number; pgid: number }> {
+  const dir = await tempDir("daemon-stranger");
+  await writeFile(path.join(dir, "server.mjs"), fixtureServer);
+  const stranger = spawnDetached("exec node server.mjs", dir, { ...process.env, PORT: String(port) }, path.join(dir, "log"));
+  for (let attempt = 0; attempt < 50 && !(await portOpen(port)); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  return stranger;
+}
+
 async function liveHarness(): Promise<{ service: NectarService; tailscaleLog: string; repo: string }> {
   const state = await tempDir("daemon-state");
   const fakeDir = await tempDir("daemon-bin");
@@ -274,29 +294,63 @@ describe("supervisor against the real service", () => {
     expect(body).toContain("proto");
   });
 
-  it("restores after a simulated reboot and refuses to touch a stranger holding the port", async () => {
-    const { service, repo } = await liveHarness();
+  it("after a reboot, never signals a stranger on the port: drops only its own mesh entry and waits for a republish", async () => {
+    const { service, tailscaleLog, repo } = await liveHarness();
     const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };
     cleanups.push(async () => void (await service.stop(published.env)));
     const before = await service.store.readEnv(published.env);
     await stopProcessGroup(before.serve?.pgid ?? 0);
-    const strangerDir = await tempDir("daemon-stranger");
-    await writeFile(path.join(strangerDir, "server.mjs"), fixtureServer);
-    const stranger = spawnDetached("node server.mjs", strangerDir, { ...process.env, PORT: String(before.serve?.upstream_port) }, path.join(strangerDir, "log"));
+    const stranger = await startStranger(before.serve?.upstream_port ?? 0);
     cleanups.push(async () => stopProcessGroup(stranger.pgid));
-    await new Promise((resolve) => setTimeout(resolve, 500));
     const afterBoot = new Supervisor(service, { bootTimeMs: Date.now() + 1_000, backoffBaseMs: 0 });
     await afterBoot.sweep(true);
     const blocked = await service.store.readEnv(published.env);
     expect(blocked.status).toBe("crashed");
     expect(blocked.failure?.code).toBe("E_PORTS");
+    expect(blocked.urls.mesh).toBeNull();
     expect(pidAlive(stranger.pid)).toBe(true);
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`serve --https=${before.serve?.tailnet_port} off`);
     await stopProcessGroup(stranger.pgid);
     await afterBoot.sweep(true);
-    const restored = await service.store.readEnv(published.env);
-    expect(restored.status).toBe("serving");
-    expect(restored.failure).toBeUndefined();
-    expect(restored.serve?.upstream_port).toBe(before.serve?.upstream_port);
+    expect((await service.store.readEnv(published.env)).failure?.code).toBe("E_PORTS");
+    await service.publish({ repo, ttl: "1h" });
+    const republished = await service.store.readEnv(published.env);
+    expect(republished.status).toBe("serving");
+    expect(republished.urls.mesh).toBe(before.urls.mesh);
+  });
+
+  it("does not re-point the mesh at a stranger answering on a dead env's port", async () => {
+    const { service, tailscaleLog, repo } = await liveHarness();
+    const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };
+    const before = await service.store.readEnv(published.env);
+    await stopProcessGroup(before.serve?.pgid ?? 0);
+    const stranger = await startStranger(before.serve?.upstream_port ?? 0);
+    cleanups.push(async () => stopProcessGroup(stranger.pgid));
+    await new Supervisor(service).sweep(true);
+    const after = await service.store.readEnv(published.env);
+    expect(after.failure?.code).toBe("E_PORTS");
+    expect(pidAlive(stranger.pid)).toBe(true);
+    const pointed = (await readFile(tailscaleLog, "utf8")).split("\n").filter((line) => line.includes(`--https=${before.serve?.tailnet_port} http`));
+    expect(pointed).toHaveLength(1);
+  });
+
+  it("restarting an unhealthy env never signals a recorded pid that is not the env's own process", async () => {
+    const { service, repo } = await liveHarness();
+    const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };
+    cleanups.push(async () => void (await service.stop(published.env)));
+    const before = await service.store.readEnv(published.env);
+    await stopProcessGroup(before.serve?.pgid ?? 0);
+    const sleeperDir = await tempDir("daemon-sleeper");
+    const sleeper = spawnDetached("exec sleep 60", sleeperDir, { ...process.env }, path.join(sleeperDir, "log"));
+    cleanups.push(async () => stopProcessGroup(sleeper.pgid));
+    await service.store.updateEnv(published.env, (current) => {
+      if (current.serve !== undefined) Object.assign(current.serve, { pid: sleeper.pid, pgid: sleeper.pgid });
+    });
+    await new Supervisor(service, { unhealthyRestartAfter: 1, probe: () => Promise.resolve(liveness("unhealthy")) }).sweep(false);
+    const after = await service.store.readEnv(published.env);
+    expect(pidAlive(sleeper.pid)).toBe(true);
+    expect(after.status).toBe("serving");
+    expect(after.serve?.pid).not.toBe(sleeper.pid);
   });
 
   it("gives up on a crash loop: marks the env, removes its tailscale entry, keeps the record", async () => {
@@ -333,6 +387,22 @@ describe("supervisor against the real service", () => {
     expect(await readFile(tailscaleLog, "utf8")).toContain(`serve --https=${before.serve?.tailnet_port} off`);
     await supervisor.sweep(false);
     expect((await service.store.readEnv(published.env)).status).toBe("expired");
+  });
+});
+
+describe("process ownership", () => {
+  it("recognises a process by the NECTAR_ENV it was started with", async () => {
+    const dir = await tempDir("daemon-owner");
+    const child = spawnDetached("exec sleep 30", dir, { ...process.env, NECTAR_ENV: "demo--main--web" }, path.join(dir, "log"));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await processBelongsToEnv(child.pid, "demo--main--web")).toBe(true);
+      expect(await processBelongsToEnv(child.pid, "other--main--web")).toBe(false);
+      expect(await processBelongsToEnv(process.pid, "demo--main--web")).toBe(false);
+      expect(await processBelongsToEnv(999_999_999, "demo--main--web")).toBe(false);
+    } finally {
+      await stopProcessGroup(child.pgid);
+    }
   });
 });
 

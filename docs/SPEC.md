@@ -223,16 +223,19 @@ expiry, never the process clock.
 
 One process per machine (per `NECTAR_HOME`, guarded by `~/.nectar/nectard.pid`). It manages
 **only Nectar's own envs**: it reads `envs/*.json` and acts only on PIDs, process groups and
-`tailscale serve` ports that a record names. It never scans the process table or the serve
-table for other work.
+`tailscale serve` ports that a record names. It never scans the process table for other
+work. (The hourly gc it runs keeps gc's existing rule: it turns off Serve entries in Nectar's
+tailnet port range whose loopback target is dead, §10.2.)
 
 - **Which envs.** `mode: web` envs (recipe and static, §6.1.1) whose status is `serving`,
   `unhealthy` or `crashed`, that still hold a `serve` block, are not past `expires_at`, and
-  are not marked `failure.code: E_CRASH_LOOP`. `stopped`, `expired`, `cold`, `warm` dev envs,
+  are not given up (`failure.code` `E_CRASH_LOOP` or `E_PORTS`). `stopped`, `expired`, `cold`, `warm` dev envs,
   desktop and ios envs are left alone.
 - **Liveness, every 30 s** (`--interval`). It calls `probeLiveness`. `crashed`
-  (`process_exited`) → revive. `unhealthy` → restart (SIGTERM/SIGKILL the recorded process
-  group, then revive) after 3 consecutive unhealthy probes. One timer, no overlap: the next
+  (`process_exited`) → revive. `unhealthy` → restart after 3 consecutive unhealthy probes:
+  SIGTERM/SIGKILL the recorded process group, but only when that process still carries the
+  env's `NECTAR_ENV` (read from `/proc/<pid>/environ` on Linux, `ps eww` on macOS), so a
+  recycled PID is never signalled; then revive. One timer, no overlap: the next
   cycle is scheduled after the previous one finishes.
 - **Revive** (under the env lock, only if the record's PID is still the one probed): re-run
   `serve.cmd` in the env's work dir with the recipe's env plus `PORT=<upstream_port>`,
@@ -240,8 +243,12 @@ table for other work.
   command re-derived from the running install, so a reinstall or node upgrade that moved the
   recorded absolute paths does not break revival. It waits for HTTP 200 at `ready_path`,
   then re-asserts `tailscale serve --https=<tailnet_port>` so the mesh URL stays the same,
-  stamps `serve.started_at`, and sets `serving`. If the upstream port is held by a process
-  Nectar did not start, it does not spawn and records `failure.code: E_PORTS`.
+  stamps `serve.started_at`, and sets `serving`.
+- **Port taken.** If the env's process is gone but something else answers on its upstream
+  port, or the port is held when it wants to revive, nectard spawns nothing and signals
+  nothing. It removes the env's own `tailscale serve` entry (so the mesh URL never fronts an
+  unrelated process), marks `crashed` with `failure.code: E_PORTS`, and stops supervising the
+  env. A republish allocates a free upstream port and keeps the tailnet URL.
 - **Backoff and crash-loop cap.** Revives of one env are spaced at least 10 s × 2^(n−1)
   apart. After 3 revives within 10 minutes the next death marks the env `crashed` with
   `failure.code: E_CRASH_LOOP`, removes its `tailscale serve` entry, and stops trying. The

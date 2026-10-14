@@ -9,6 +9,7 @@ import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.j
 import {
   currentPublisher,
   pidAlive,
+  processBelongsToEnv,
   runCommand,
   runShell,
   scrubbedEnvironment,
@@ -1211,7 +1212,7 @@ export class NectarService {
       const serve = record.serve;
       if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
       const identity = await this.identity();
-      if (options.kill) await stopProcessGroup(serve.pgid);
+      if (options.kill && (await processBelongsToEnv(serve.pid, record.name))) await stopProcessGroup(serve.pgid);
       const isStatic = serve.cmd.includes("static-server.js");
       const recipe = isStatic
         ? staticWebRecipe()
@@ -1228,7 +1229,9 @@ export class NectarService {
         return { revived: false, reason: code };
       };
       if (!(await portAvailable(serve.upstream_port))) {
-        return fail("E_PORTS", `Upstream port ${serve.upstream_port} is held by a process Nectar did not start`);
+        await this.abandon(record, "E_PORTS", `Upstream port ${serve.upstream_port} is held by a process Nectar did not start`);
+        await this.store.writeEnv(record);
+        return { revived: false, reason: "E_PORTS" };
       }
       const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
       const childEnv = scrubbedEnvironment({
@@ -1283,15 +1286,18 @@ export class NectarService {
     return true;
   }
 
-  async markCrashLoop(name: string, expectPid: number, message: string): Promise<boolean> {
+  async giveUp(name: string, expectPid: number, code: string, message: string): Promise<boolean> {
     const updated = await this.store.updateEnv(name, async (record) => {
-      if (record.serve?.pid !== expectPid) return;
-      if (record.serve.tailnet_port !== undefined) await stopServe(record.serve.tailnet_port);
-      record.status = "crashed";
-      record.urls.mesh = null;
-      record.failure = { code: "E_CRASH_LOOP", message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
+      if (record.serve?.pid === expectPid) await this.abandon(record, code, message);
     });
-    return updated?.failure?.code === "E_CRASH_LOOP";
+    return updated?.failure?.code === code;
+  }
+
+  private async abandon(record: EnvRecord, code: string, message: string): Promise<void> {
+    if (record.serve?.tailnet_port !== undefined) await stopServe(record.serve.tailnet_port);
+    record.status = "crashed";
+    record.urls.mesh = null;
+    record.failure = { code, message, failed_at: new Date().toISOString(), log_tail: await logTail(this.paths, record.name) };
   }
 
   async list(options: { mode?: string; status?: string } = {}): Promise<Record<string, unknown>> {

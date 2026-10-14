@@ -29,13 +29,15 @@ interface Watch {
   unhealthyStreak: number;
 }
 
+const GIVEN_UP: ReadonlySet<string> = new Set(["E_CRASH_LOOP", "E_PORTS"]);
+
 type SupervisedRecord = EnvRecord & { serve: ServeRecord };
 
 export function supervised(record: EnvRecord, nowMs: number): record is SupervisedRecord {
   return (
     record.mode === "web" &&
     hasProbeableServe(record) &&
-    record.failure?.code !== "E_CRASH_LOOP" &&
+    !GIVEN_UP.has(record.failure?.code ?? "") &&
     Date.parse(record.expires_at) > nowMs
   );
 }
@@ -134,8 +136,7 @@ export class Supervisor {
 
   private async inspect(record: EnvRecord, restore: boolean, nowMs: number): Promise<void> {
     if (!supervised(record, nowMs)) {
-      this.watches.delete(record.name);
-      this.pendingMesh.delete(record.name);
+      this.forget(record.name);
       return;
     }
     if (Date.parse(record.serve.started_at ?? record.published_at) < this.bootTimeMs) {
@@ -144,6 +145,14 @@ export class Supervisor {
     }
     const liveness = await this.probe(record.serve);
     const watch = this.watchFor(record.name);
+    if (liveness.state === "serving" && !liveness.pid_alive) {
+      const message = `Upstream port ${record.serve.upstream_port} answers but the process Nectar started is gone; another process holds it`;
+      if (await this.service.giveUp(record.name, record.serve.pid, "E_PORTS", message)) {
+        this.log({ event: "port_taken", env: record.name, port: record.serve.upstream_port ?? null });
+      }
+      this.forget(record.name);
+      return;
+    }
     if (liveness.state === "serving") {
       watch.unhealthyStreak = 0;
       if (restore || this.pendingMesh.has(record.name)) await this.reassertMesh(record);
@@ -155,6 +164,11 @@ export class Supervisor {
       return;
     }
     await this.revive(record, false, liveness.reason);
+  }
+
+  private forget(name: string): void {
+    this.watches.delete(name);
+    this.pendingMesh.delete(name);
   }
 
   private async reassertMesh(record: SupervisedRecord): Promise<void> {
@@ -173,9 +187,8 @@ export class Supervisor {
     watch.revives = watch.revives.filter((at) => nowMs - at < this.reviveWindowMs);
     if (watch.revives.length >= this.maxRevives) {
       const message = `Revived ${watch.revives.length} times within ${Math.round(this.reviveWindowMs / 1_000)}s and it still dies; republish to retry`;
-      const marked = await this.service.markCrashLoop(record.name, record.serve.pid, message);
-      this.watches.delete(record.name);
-      this.pendingMesh.delete(record.name);
+      const marked = await this.service.giveUp(record.name, record.serve.pid, "E_CRASH_LOOP", message);
+      this.forget(record.name);
       if (marked) this.log({ event: "crash_loop", env: record.name, revives: watch.revives.length, cause });
       return;
     }
@@ -188,6 +201,11 @@ export class Supervisor {
       .catch((error: unknown) => ({ revived: false, reason: asNectarError(error).code }));
     if (result.reason === "record_changed" || result.reason === "E_BUSY") {
       watch.revives.pop();
+      return;
+    }
+    if (result.reason === "E_PORTS") {
+      this.forget(record.name);
+      this.log({ event: "port_taken", env: record.name, cause, port: record.serve.upstream_port ?? null });
       return;
     }
     if (result.revived && result.mesh !== true && record.urls.mesh !== null && record.serve.tailnet_port !== undefined) {

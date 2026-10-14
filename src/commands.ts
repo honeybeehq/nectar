@@ -1,5 +1,6 @@
 import os from "node:os";
 import { openSync, closeSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
 import { NectarError } from "./errors.js";
@@ -120,6 +121,17 @@ export function pidAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+export async function processBelongsToEnv(pid: number, env: string): Promise<boolean> {
+  if (!pidAlive(pid)) return false;
+  const marker = `NECTAR_ENV=${env}`;
+  if (process.platform === "linux") {
+    const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+    return environ.split("\0").includes(marker);
+  }
+  const listed = await runCommand("ps", ["eww", "-o", "command=", "-p", String(pid)]).catch(() => undefined);
+  return listed?.stdout.split(/\s+/).includes(marker) ?? false;
 }
 
 export function groupAlive(pgid: number): boolean {

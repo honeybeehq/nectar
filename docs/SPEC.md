@@ -339,15 +339,20 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   or a repo with no `nectar.toml` and no `dev` script). Existing recipe behaviour is
   unchanged. The site root is the first of `.`, `dist`, `build`, `out`, `public`, `_site`
   holding an `index.html`.
-- **Copy, not checkout.** Nectar copies the site root's regular files (skipping `.git`,
-  `node_modules` and symlinks, capped at 20 000 files / 512 MiB) into
-  `~/.nectar/work/<name>/` through a staging directory and an atomic swap. The preview
+- **Copy, not checkout.** Nectar copies the site root's regular files into
+  `~/.nectar/work/<name>/` through a staging directory and an atomic swap. It skips
+  symlinks (with a warning), `node_modules`, and every dotfile and dot-directory except
+  `.well-known`, so `.env`, `.npmrc` and `.git` are never served. The copy is capped at
+  20 000 files / 512 MiB. A single `.html` file is copied alone, so sibling assets it
+  references are not included; publish the directory instead. The preview
   serves that copy, so it survives the source directory or Cell being deleted. Uncommitted
   files are included. `commit` is an 8-hex content hash of the copy.
 - **Name.** `<app>--<branch>--web`. `<app>` is `--name`, or else the directory name (file
   name without `.html`). `<branch>` is `--branch`, or else the enclosing git branch, or else
   `static`. Re-publishing the same name is the usual idempotent upsert: same ports, same
-  URL, fresh copy.
+  URL, fresh copy. If the name already belongs to a git-checkout env (or a static env when
+  publishing a recipe), publish refuses with `E_USAGE` and leaves that env running:
+  `nectar rm <env> --force` first, or pick another `--name`.
 - **Serve.** The serve command is Nectar's own static server
   (`exec <node> <nectar>/dist/static-server.js`, cwd = the copy, `PORT` from the
   allocator). It is recorded in `serve.cmd` like any recipe's command, so anything that

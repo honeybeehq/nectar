@@ -280,6 +280,19 @@ describe("static sites", () => {
     expect(file.env).toBe("coupons-report--static--web");
     expect(await fetch((file.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>coupons</h1>");
 
+    await expect(service.publish({ repo: app, mode: "static", name: "fixture-app", ttl: "1h" })).rejects.toMatchObject({
+      code: "E_USAGE",
+      message: expect.stringContaining("git checkout") as string,
+    });
+    expect(await fetch((web.urls as { local: string }).local).then(async (response) => response.text())).toBe("scrubbed");
+    expect((await runCommand("git", ["worktree", "list"], { cwd: app })).stdout).not.toContain("prunable");
+    await writeFile(path.join(repo, "package.json"), JSON.stringify({ name: path.basename(repo).toLowerCase(), scripts: { dev: "node server.mjs" } }));
+    await writeFile(path.join(repo, "server.mjs"), server);
+    await runCommand("git", ["add", "."], { cwd: repo });
+    await runCommand("git", ["commit", "-m", "gain a dev script"], { cwd: repo });
+    await expect(service.publish({ repo, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE", message: expect.stringContaining("static copy") as string });
+    expect(await fetch((built.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>built</h1>");
+
     const empty = await tempDir("static-empty");
     await expect(service.publish({ repo: empty, mode: "static" })).rejects.toMatchObject({ code: "E_NO_RECIPE" });
     await expect(service.publish({ repo: app, name: "x" })).rejects.toMatchObject({ code: "E_USAGE" });

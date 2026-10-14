@@ -58,12 +58,15 @@ describe("static site detection", () => {
 });
 
 describe("static site staging", () => {
-  it("copies regular files, skips .git/node_modules/symlinks, and swaps the previous copy", async () => {
+  it("copies regular files, skips dotfiles/node_modules/symlinks, and swaps the previous copy", async () => {
     const source = await tempDir("static-source");
     await writeTree(source, {
       "index.html": "<h1>v1</h1>",
       "assets/app.css": "body{}",
+      "assets/.secret": "x",
       ".git/HEAD": "ref",
+      ".env": "TOKEN=1",
+      ".well-known/security.txt": "contact",
       "node_modules/x/index.js": "",
     });
     await symlink("/etc/hostname", path.join(source, "linked.txt"));
@@ -73,8 +76,9 @@ describe("static site staging", () => {
     const destination = path.join(work, "site--static--web");
 
     const first = await stageStaticSite(site, destination);
-    expect(first).toMatchObject({ files: 2, skippedLinks: 1 });
-    expect(await readdir(destination)).toEqual(["assets", "index.html"]);
+    expect(first).toMatchObject({ files: 3, skippedLinks: 1 });
+    expect(await readdir(destination)).toEqual([".well-known", "assets", "index.html"]);
+    expect(await readdir(path.join(destination, "assets"))).toEqual(["app.css"]);
     expect((await stageStaticSite(site, destination)).hash).toBe(first.hash);
 
     await writeFile(path.join(source, "index.html"), "<h1>v2</h1>");

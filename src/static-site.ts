@@ -4,7 +4,8 @@ import { copyFile, lstat, mkdir, readdir, readFile, rename, rm } from "node:fs/p
 import { NectarError } from "./errors.js";
 
 export const STATIC_ROOTS = [".", "dist", "build", "out", "public", "_site"];
-const SKIPPED = new Set([".git", "node_modules"]);
+const SKIPPED = new Set(["node_modules"]);
+const ALLOWED_DOTFILES = new Set([".well-known"]);
 const MAX_BYTES = 512 * 1024 * 1024;
 const MAX_FILES = 20_000;
 
@@ -51,7 +52,7 @@ async function collect(root: string): Promise<{ files: Array<{ relative: string;
   const walk = async (relative: string): Promise<void> => {
     const entries = await readdir(path.join(root, relative), { withFileTypes: true });
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (SKIPPED.has(entry.name)) continue;
+      if (SKIPPED.has(entry.name) || (entry.name.startsWith(".") && !ALLOWED_DOTFILES.has(entry.name))) continue;
       const child = path.join(relative, entry.name);
       if (entry.isSymbolicLink()) skippedLinks += 1;
       else if (entry.isDirectory()) await walk(child);

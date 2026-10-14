@@ -449,6 +449,16 @@ export class NectarService {
     if (options.recipe.web === undefined) throw new NectarError("E_NO_RECIPE", "Recipe does not declare [web]");
     const name = envName(options.recipe.name, options.branch, "web");
     return this.store.withLock(name, async () => {
+      const old = await this.store.maybeEnv(name);
+      if (old !== undefined && !old.borrowed_worktree && existsSync(old.worktree)) {
+        const wasStatic = !existsSync(path.join(old.worktree, ".git"));
+        if (wasStatic !== (options.site !== undefined)) {
+          throw new NectarError(
+            "E_USAGE",
+            `Env '${name}' already holds a ${wasStatic ? "static copy" : "git checkout"} of ${old.repo}; run nectar rm ${name} --force first${options.site === undefined ? "" : ", or pass --name to publish the static site under another name"}`,
+          );
+        }
+      }
       const records = await this.store.listEnvs();
       // The quota counts live web envs only — not ios streams, not silently-dead
       // servers a bee could never free by "running gc".

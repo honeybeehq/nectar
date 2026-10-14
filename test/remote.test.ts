@@ -316,7 +316,7 @@ describe.each<Transport>(["socket", "token port"])("tailnet listener over the Lo
     const check = await listenerCheck(getPaths(b), { remote: { listen: true } } as never, { hello: () => Promise.resolve(undefined) });
     expect(check).toMatchObject({ status: "fail", listener: "failed", last_event: { event: "remote_unavailable" } });
     expect(check.message).toContain(`nothing answers on 127.0.0.3:${process.env.NECTAR_REMOTE_PORT}`);
-    expect(check.message).toContain("nectard does not answer on its control socket either");
+    expect(check.message).toContain("nectard does not answer on its control socket");
     expect(check.message).toContain("nectard logged: bind failed");
     const older = { api: 1, ops: [], nectar_home: b, pid: 4242, program: "/opt/old/dist/cli.js" };
     const stale = await listenerCheck(getPaths(b), { remote: { listen: true } } as never, { hello: () => Promise.resolve(older) });
@@ -706,7 +706,7 @@ describe("tailnet listener startup", () => {
     const on = { remote: { listen: true } } as never;
     const state = { listen: true, listening: true, address: "100.64.0.1", port: 8441, last_error: null, whois: null, since: null };
     expect(remoteStatus(on, { pid: 1, nectar_home: "/h", remote: state })).toEqual({ listen: true, port: 8441, listening: true, address: "100.64.0.1", last_error: null });
-    expect(remoteStatus(on, null)).toMatchObject({ listening: false, address: null, last_error: "nectard does not answer on its control socket either" });
+    expect(remoteStatus(on, null)).toMatchObject({ listening: false, address: null, last_error: "nectard does not answer on its control socket" });
     expect(remoteStatus(on, { pid: 9, nectar_home: "/h", program: null, remote: null }).last_error).toContain("runs an older nectar build");
     expect(remoteStatus({ remote: { listen: false } } as never, null)).toMatchObject({ listen: false, listening: false, last_error: null });
   });

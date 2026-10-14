@@ -736,6 +736,7 @@ export function startRemoteListener(paths: NectarPaths, log: (event: Record<stri
     lastFailure = "";
     repeats = 0;
     const whois = await readiness(started.address);
+    if (closed || server !== started) return;
     Object.assign(state, {
       listening: true,
       address: started.address,
@@ -918,7 +919,7 @@ function refusals(events: Record<string, unknown>[], nowMs = Date.now()): Refusa
 type DaemonView = Pick<Hello, "pid" | "nectar_home"> & { program?: string | null; remote?: ListenerState | null };
 
 export function daemonListenerProblem(daemon: DaemonView | null | undefined): string | undefined {
-  if (daemon === undefined || daemon === null) return "nectard does not answer on its control socket either";
+  if (daemon === undefined || daemon === null) return "nectard does not answer on its control socket";
   const remote = daemon.remote;
   if (remote === undefined || remote === null) {
     return `nectard (pid ${daemon.pid}${daemon.program === undefined || daemon.program === null ? "" : `, ${daemon.program}`}) does not report a tailnet listener, so it runs an older nectar build than this one; restart it from this build with \`${REMOTE_INSTALL_HINT}\``;

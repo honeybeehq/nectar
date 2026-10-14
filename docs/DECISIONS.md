@@ -502,3 +502,82 @@ the check to `warn`.
 **Why:** the Studio gets gc and orphan cleanup but no supervisor. (a) duplicates doctor's
 plan and its `--dry-run`. (b) makes a one-off run change the machine. (c) keeps nagging on a
 machine where no daemon is the intended state.
+
+
+## D29 — Publishing from sandboxed Cells: a local control socket on nectard
+
+**Chose:** nectard (D24) serves a small HTTP/1.1 API on a Unix socket,
+`~/.config/nectar/nectard.sock` (`NECTAR_SOCKET` overrides it). nectard creates the
+directory itself with mode 0700 and refuses one that is not owned by the user or is
+writable by group or others. The socket is 0600. It takes over a stale socket only when
+nothing answers on it, and it never steals a live one. The API is `GET /v1/hello` plus
+`POST /v1/{publish,ls,show,resolve,touch,stop,rm}`. Each request carries `nectar_home`,
+the caller (`cell`, `hive_bee`, `hive_session`) and arguments checked against a
+per-operation allowlist of names and types. Replies are the CLI's own `--json` envelope.
+The CLI picks the route on each call. `--direct` means local. A nectard that answers
+for the same `NECTAR_HOME` and supports the operation is used. Otherwise a writable
+`NECTAR_HOME` means local. Anything else is `E_DAEMON` with
+`hint: "nectar daemon install"`. Publish through nectard takes a host path. nectard
+resolves it with realpath and accepts it only inside the user's home or the caller's
+Cell (an existing directory the user owns, not `/`). It refuses anything inside
+`NECTAR_HOME`, the socket directory, `~/.ssh`, `~/.gnupg` and `~/.aws`. Then it copies or
+checks out the source into `~/.nectar/work` exactly as a local publish would. Records
+get `publisher.via: "nectard"` and the caller's `cell` and bee ids. (SPEC §4.5, §7, §9.)
+Queen ruled on the transport, the stamp, the path rule and the error (2026-10-14).
+
+**Alternatives:** (a) a loopback HTTP port with a per-user secret file under
+`~/.config/nectar/`; (b) a socket under `$XDG_RUNTIME_DIR` or `/tmp`; (c) ask Honeybee
+to bind `~/.nectar` read-write into every Cell; (d) a raw JSON-lines protocol on the
+socket instead of HTTP.
+
+**Why:** Cells cannot write `~/.nectar`. On Linux `/` and `$HOME` are read-only and only
+`~/.config`, `~/.cache` and a few tool directories are bound read-write. On macOS a
+Seatbelt profile allows writes only to an allowlist. Previews must outlive the Cell, so
+the server has to run outside it anyway, and nectard already does. A Unix socket is
+reachable only by processes that can open the file. With a 0600 socket in a 0700
+directory that means the same user on the same host, and the tailnet never sees it.
+(a) puts a bearer secret in a file every Cell can read and opens a TCP port that every
+local user and every local process can try. It is strictly weaker for the same work.
+`~/.config` is the same directory inside a Linux Cell (a read-write bind of the real
+one), so the path works there. The macOS probe (mini04, macOS 26.4, findings
+p2-cell-publish) read Honeybee's Cell profile and found `allowAllUnixSockets: true` and
+`needsNetworkRestriction: false` (`(allow network*)`). Reads are denied only under
+`~/Library/Keychains`. A Cell process connected to sockets the user owns outside the
+Cell, and `~/.config/nectar/nectard.sock` failed with `ENOENT`, not `EPERM`. (b) private
+`/tmp` per Cell rules out `/tmp`. `$XDG_RUNTIME_DIR` does not exist on macOS and is not
+guaranteed inside Linux Cells. Socket paths deep in a Cell also hit the 104-byte
+`sun_path` limit on macOS. `~/.config/nectar/nectard.sock` is about 40 bytes. (c) Queen ruled that the
+Cell sandbox stays as it is. HTTP (d) costs nothing in Node, and it is what the later
+tailnet listener needs, so one handler serves both. The `nectar_home` check stops a CLI
+that points at another home from acting through the wrong daemon, and the route stays
+local when the home is writable and no matching daemon answers. That is why the
+existing tests and machines without nectard behave exactly as before.
+
+**What this does not protect against:** a recipe's build and serve commands run as the
+user under nectard, outside the Cell's sandbox. That was already true of revival (D24).
+A local `nectar publish` from inside a Cell now cannot run at all, so routing through
+nectard is the only way an agent can publish a recipe. The commands it runs are the ones
+a local publish of that source would run, and nothing else: the API has no command,
+environment or recipe field, only Nectar's own options. Static sites run no recipe code.
+Running a Cell's serves under the same sandbox profile is the hardening step if Cells
+ever hold less-trusted code (SPEC §9.3).
+
+**Later: `nectar publish --host <node>` (phase 2, not built).** The same handler gets a
+second listener on the node's tailnet address, port 8441 (outside the 8443–8542 preview
+range). It never binds a public interface, and the ACL limits who can reach it to pool
+hosts and operator devices. For each request it asks the local tailscaled
+`WhoIs(remote addr)` (LocalAPI `/localapi/v0/whois`) and gets the caller's stable node ID
+and login. It accepts only callers on an allowlist in machine config
+(`control.allow: [{node_id}]` or the operator's login), keyed by stable node ID, not by
+name, as relayd does (design/public-and-cloud.md). A caller's host path means nothing on
+another node, so remote publish swaps `args.path` for a source the target can fetch
+itself. `{git: {url, commit}}` comes first: the target fetches the commit into its own
+work dir, from a remote it can reach or from a bundle the CLI streams in the request
+body under a size cap. An archive upload of a static directory is the second option.
+The path rule, `nectar_home` and Cell stamp apply only on the Unix socket. Remote
+records get `publisher.node` from WhoIs, not from the request. `rm`, `stop` and `touch`
+over the tailnet act only on envs whose `publisher.node` is the caller, unless the
+caller is the operator. The Unix socket stays the local route, so a Cell on the target
+node keeps working when the tailnet listener is off. The client side is the same
+`callDaemon` with an `http://<node>:8441` base URL. WireGuard already encrypts the hop.
+Putting `tailscale serve` in front would hide the peer address that WhoIs needs.

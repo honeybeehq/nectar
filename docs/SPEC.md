@@ -306,6 +306,30 @@ tailnet port range whose loopback target is dead, §10.2.)
     with `direct`) instead of tearing the env down.
   - If a proxy port is taken when nectard tries to listen, it drops that `proxy_port` and
     allocates a fresh one on the next sweep. The env is served directly in the meantime.
+- **Control socket (publishing from Cells, D29).** Agents in Honeybee Cells cannot write
+  `~/.nectar`, so nectard does the writing for them. It listens on
+  `~/.config/nectar/nectard.sock` (`NECTAR_SOCKET` overrides it): HTTP/1.1 on a 0600 Unix
+  socket in a directory that nectard creates with mode 0700 and refuses if it is not owned
+  by the user or is writable by group or others. A stale socket is replaced only when
+  nothing answers on it. If it cannot listen (another nectard holds the socket), nectard
+  logs `control_unavailable` and keeps supervising.
+  - `GET /v1/hello` → `{api: 1, ops, nectar_home, pid}`.
+  - `POST /v1/<op>` with `op` one of `publish`, `ls`, `show`, `resolve`, `touch`, `stop`
+    and `rm`. The body is `{nectar_home, caller: {cell?, hive_bee?, hive_session?}, args}`.
+    `args` uses the CLI's option names (`publish`: `path` (absolute, required), `mode`,
+    `branch`, `ttl`, `worktree`, `packet`, `verify`, `name`, `dry_run`; `ls`: `mode`,
+    `status`; `show`/`resolve`: `target`; `touch`: `target`, `ttl`; `stop`: `env`; `rm`:
+    `env`, `force`). Unknown names or wrong types are `E_USAGE`. A different
+    `nectar_home` is `E_DAEMON`. The reply is always the CLI's envelope for that command.
+  - Publish paths (`path`, `worktree`) are resolved with realpath. They must be inside the
+    user's home or the caller's Cell (an existing directory owned by the user, not `/`),
+    and not inside `NECTAR_HOME`, the socket directory, `~/.ssh`, `~/.gnupg` or `~/.aws`.
+    A path nectard cannot see (a Cell's private `/tmp`) is `E_USAGE`, with that reason.
+    The source is then copied (static) or checked out (git) into `work/<env>`, the same
+    as a local publish. The preview survives deleting the source or evicting the Cell.
+  - The record's `publisher` is `{user, via: "nectard", cell?, hive_bee?, hive_session?}`
+    from the request. The daemon's own environment does not leak into it.
+  - Logs: one `control` event per `publish`/`rm`/`stop`/`touch` and per failed request.
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
   touch, gc, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
@@ -321,7 +345,7 @@ Service units (`nectar daemon install`; `uninstall` is the one removal command; 
 | at boot | at login of the user | needs `loginctl enable-linger <user>` (install warns) |
 
 The unit runs `<node> <nectar>/dist/cli.js daemon run` with the installing shell's `PATH`,
-`HOME`, `SHELL`, `LANG` and `NECTAR_HOME`. When `tailscale` is not on `PATH`, it pins
+`HOME`, `SHELL`, `LANG`, `NECTAR_HOME` and, if set, `NECTAR_SOCKET`. When `tailscale` is not on `PATH`, it pins
 `NECTAR_TAILSCALE_BIN` to the CLI the resolver below found (on a Mac usually the app's CLI).
 `uninstall` stops the daemon and deletes the unit; envs keep serving and their records stay.
 `install` and `status` report the daemon's live `pid` and `pid_source`: `launchctl print`'s
@@ -795,7 +819,15 @@ stream embeds), but the kind glyph and "open the simpack" affordance want the re
 ## 7. CLI surface
 
 Global flags: `--json` (envelope output, exact shape below), `--repo <path>` (default: cwd's
-repo). Everything an agent needs is a flag — no interactive prompts on any command an agent
+repo), `--direct` (never use nectard, act on `NECTAR_HOME` in this process).
+
+Route (D29): `publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` go through the
+local nectard (§4.5 control socket) when it answers for the same `NECTAR_HOME`.
+Otherwise they run in-process if `NECTAR_HOME` is writable (or can be created), and fail
+with `E_DAEMON` if it is not. Every other command runs in-process. On a read-only
+`NECTAR_HOME` it fails with `E_DAEMON`. Through nectard, publish runs with nectard's
+environment (the unit's frozen `PATH`), not the calling shell's. Use `--direct` from a
+normal shell to publish with the shell's own toolchain. Everything an agent needs is a flag — no interactive prompts on any command an agent
 runs. Envelope matches Forum's shape so every harness already knows how to read it:
 
 ```json
@@ -820,6 +852,11 @@ plus (added post-v0 review, 2026-07-19):
   recipe needs (§6.1.2).
 - `E_INTERNAL` — an unexpected internal failure (bug, fs error); `details.unexpected`
   is set when it was not a typed nectar error. Report it, don't remediate.
+- `E_DAEMON` (2026-10-14, D29) — `NECTAR_HOME` is read-only here (a Honeybee Cell) and
+  no nectard for that home answers on the control socket, or the command is not one
+  nectard serves (`publish`, `ls`, `show`, `resolve`, `touch`, `stop`, `rm`).
+  `error.hint` is `nectar daemon install`. The user runs it from a shell outside any
+  Cell. An agent reports it as a blocker and does not install anything itself.
 
 ### Commands
 
@@ -889,7 +926,9 @@ nectar daemon install | uninstall | status [--json]
 nectar daemon run [--interval 30s] [--gc-interval 1h]
     # nectard (§4.5). install writes and starts the launchd agent / systemd --user unit;
     # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
-    # run is the foreground supervisor the unit starts.
+    # run is the foreground supervisor the unit starts. status adds socket (the control
+    # socket path) and control (nectard's hello: api, pid, nectar_home, ops; null when
+    # nothing answers there).
 
 nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # Checks (§10.5): portless on PATH + proxy up · tailscale up (names the CLI
@@ -1015,6 +1054,16 @@ boundary equals the existing agent-execution trust boundary; the scrubbed env (9
 the *casual* exfiltration surface (inherited tokens), nothing more. If agent code ever runs
 with less trust, publishes belong in that same jail — a dedicated runner user/VM is the
 noted future step, out of scope here.
+
+**Cells (D29).** An agent in a Honeybee Cell publishes through nectard's control socket.
+nectard runs the build and serve commands outside the Cell's sandbox, as the user. These
+are the same commands a local publish of that source would run, and the socket accepts
+no others: it has no command, environment or recipe field. The socket is reachable only
+by the same user on the same host (0600 socket in a 0700 directory). Publish paths are
+limited to the home directory and the caller's Cell, and Nectar's own state and the
+usual key directories are excluded, so a Cell cannot ask nectard to serve files its
+sandbox hides from it elsewhere. Running a Cell's serves under the Cell's own sandbox
+profile is the hardening step if Cells ever hold less-trusted code.
 
 ## 10. Resource limits, GC, failure modes
 

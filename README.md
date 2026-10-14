@@ -82,6 +82,15 @@ and each web preview (a small proxy on one extra loopback port per env), so a pe
 opening the mesh URL in a browser extends the preview's lifetime the same way `nectar open`
 does. Uninstalling it points the mesh URLs straight back at the apps.
 
+Agents in Honeybee Cells can't write `~/.nectar`, so with nectard running the CLI hands
+`publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` to it over a Unix socket at
+`~/.config/nectar/nectard.sock` (owner-only). The CLI uses nectard whenever it answers for
+the same `NECTAR_HOME`, and acts on `NECTAR_HOME` itself otherwise. `--direct` forces the
+local path. If the home is read-only and nectard isn't running, commands fail with
+`E_DAEMON` and the hint `nectar daemon install`, which the user runs outside any Cell.
+nectard copies or checks out the Cell's source into its own work dir, so the preview
+outlives the Cell.
+
 Then, in any repo with a `dev` script (or a `nectar.toml`):
 
 ```bash

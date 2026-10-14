@@ -63,7 +63,10 @@ nectar daemon install        # optional: nectard revives crashed previews, resto
 `nectar daemon status` shows whether it is installed and running. On Linux it is a
 `systemd --user` unit: run `loginctl enable-linger $USER` once so it starts at boot without
 a login. On macOS it is a launchd agent in `~/Library/LaunchAgents`. Its log is
-`~/.nectar/logs/nectard.log`.
+`~/.nectar/logs/nectard.log`. While it runs, nectard also sits between `tailscale serve`
+and each web preview (a small proxy on one extra loopback port per env), so a person
+opening the mesh URL in a browser extends the preview's lifetime the same way `nectar open`
+does. Uninstalling it points the mesh URLs straight back at the apps.
 
 Then, in any repo with a `dev` script (or a `nectar.toml`):
 

@@ -141,7 +141,8 @@ lifecycle, and composes the publish envelope's packet fields from both.
     "pgid": 48213,
     "upstream_port": 4117,
     "portless_name": "agent-coupons-stack.acme",
-    "tailnet_port": 8444
+    "tailnet_port": 8444,
+    "proxy_port": 4118
   },
   "urls": {
     "local": "https://agent-coupons-stack.acme.localhost",
@@ -212,9 +213,12 @@ records from a failed publish or orphan cleanup have no `serve` block and stay `
 TTL default **7 d** for every mode, per-publish `--ttl 12h|30d`. Viewing an env is
 touch-on-view: `nectar open`, `nectar resolve` and `nectar show <env>` (and desk render, which
 calls `nectar touch` or `resolve` on view) set `expires_at` to now + the env's own TTL, so a
-preview under review never runs out. `nectar ls` does not touch. HTTP requests to the
-preview URL do not touch yet: `tailscale serve` proxies straight to the upstream port, so
-Nectar never sees them (a supervisor-owned proxy is the planned hook). Active review never
+preview under review never runs out. `nectar ls` does not touch. While `nectard` runs, a
+browser opening the mesh URL touches too: nectard's per-env proxy (§4.5) sees each page
+navigation (`GET` with `Sec-Fetch-Dest: document`/`iframe`, or without fetch metadata an
+`Accept` that includes `text/html`; assets, fetches and HMR never count) and touches the env
+the same way, at most once per env per 5 min, after forwarding and without waiting for it.
+Without nectard the mesh URL points straight at the app and only the verbs touch. Active review never
 gets reaped mid-session: `gc` skips envs touched in the last 6 h. Dev envs keep their
 separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view moves only the record's
 expiry, never the process clock.
@@ -266,7 +270,35 @@ tailnet port range whose loopback target is dead, §10.2.)
   re-asserted. If Tailscale is not up yet, re-assertion is retried every cycle until it is.
 - **gc hourly** (`--gc-interval`): the same `nectar gc` (§10.2), run once at start and then
   after the liveness cycle once an hour has passed.
-- **Logs.** Events (start, revive, crash_loop, mesh, gc, error), one JSON line each, go to
+- **Fronting proxy (touch on HTTP view, D25).** Inside the nectard process, one small
+  `node:http` reverse proxy per web env listens on `127.0.0.1:<serve.proxy_port>` and
+  forwards to the app's own loopback origin (`urls.local`). The chain becomes
+  `tailscale serve --https=<tailnet_port>` → `127.0.0.1:<proxy_port>` → `127.0.0.1:<upstream_port>`.
+  It fronts every `mode: web` env that holds a `serve` block with both ports, is
+  `serving`/`unhealthy`/`crashed`, and is not given up. `proxy_port` is a third per-env port
+  from the upstream range, allocated under the ports lock the first time nectard fronts the
+  env and kept across republish and revive. The tailnet port and mesh URL never change.
+  Requests, response streams (SSE), request bodies of any size and WebSocket/HMR upgrades
+  pass through unchanged, `Host` included. While the app is down the proxy answers 502.
+  The proxy only touches the env (§4.4). Liveness still probes `upstream_port`, so
+  `ls`/`show`/`resolve` report the app's own health, not the proxy's.
+  - Mapping. Nectar points the Serve entry at the proxy only after the proxy has answered
+    a probe naming its env and the env's current upstream port (`x-nectar-proxy` header).
+    Otherwise it points the entry at the app directly. Publish, revive and mesh
+    re-assertion all apply this rule. A new or older env is adopted on nectard's next
+    sweep, at most one interval later.
+  - Dead proxy. A clean nectard stop (`systemctl --user stop`, `launchctl bootout`,
+    `nectar daemon uninstall`, SIGTERM/SIGINT) first points every fronted env back at its
+    app, then closes the listeners. If nectard is killed outright, the service manager
+    restarts it (5 s on systemd, launchd's KeepAlive throttle on macOS) and it re-opens
+    every listener on its recorded port at start. Meanwhile `nectar gc` (any caller)
+    treats a Serve entry whose target is an env's dead `proxy_port` while the app still
+    answers as a fallback case. It points the entry back at the app (orphan report row
+    with `direct`) instead of tearing the env down.
+  - If a proxy port is taken when nectard tries to listen, it drops that `proxy_port` and
+    allocates a fresh one on the next sweep. The env is served directly in the meantime.
+- **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
+  touch, gc, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
   Quiet cycles write nothing.
 
@@ -927,7 +959,9 @@ the last 6 h are never transitioned, so an open review can't be reaped underneat
 reviewer (open/resolve/show/touch all bump `last_touched_at`). The publish stamp itself does not
 count as a touch — otherwise `--ttl 1m` would silently mean six hours. A busy env (lock
 held by a live publish) is skipped and reported, never an abort of the sweep. Every non-dry
-run also removes Nectar-range Serve entries whose loopback proxy target is dead; if an env
+run also removes Nectar-range Serve entries whose loopback proxy target is dead. An entry
+whose dead target is the owning env's nectard `proxy_port` while the app still answers is
+pointed back at the app instead (§4.5). Otherwise, if an env
 record owns the entry, GC kills its process group, clears its runtime claims, and marks it
 `crashed` with failure details. `doctor` reports the same orphan class and `doctor --fix`
 applies the same cleanup.

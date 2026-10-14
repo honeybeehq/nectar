@@ -42,6 +42,7 @@ import {
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
 import { hasProbeableServe, holdsRuntime, portAnswers, probeLiveness } from "./liveness.js";
+import { probeProxy } from "./proxy.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, type StaticSite } from "./static-site.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
@@ -116,12 +117,17 @@ export interface ReviveResult {
 
 interface ServeOrphan extends ServeProxyEntry {
   env?: string;
+  direct?: string;
 }
 
 function staticWebRecipe(): WebRecipe {
   const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
   const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
   return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
+}
+
+function loopbackPorts(records: EnvRecord[]): Set<number> {
+  return new Set(records.flatMap((record) => [record.serve?.upstream_port, record.serve?.proxy_port]).filter((port): port is number => port !== undefined));
 }
 
 function hostAliases(value: string | undefined): Set<string> {
@@ -454,7 +460,14 @@ export class NectarService {
             : await portOpenOnHost(entry.upstreamPort, entry.upstreamHost);
         if (open) return undefined;
         const owner = records.find((record) => record.serve?.tailnet_port === entry.tailnetPort);
-        return { ...entry, ...(owner === undefined ? {} : { env: owner.name }) };
+        const direct =
+          owner?.serve?.proxy_port === entry.upstreamPort &&
+          owner.serve.upstream_port !== undefined &&
+          owner.urls.local !== null &&
+          (await portAnswers(owner.serve.upstream_port))
+            ? owner.urls.local
+            : undefined;
+        return { ...entry, ...(owner === undefined ? {} : { env: owner.name }), ...(direct === undefined ? {} : { direct }) };
       }),
     );
     return inspected.filter((entry): entry is ServeOrphan => entry !== undefined);
@@ -462,6 +475,7 @@ export class NectarService {
 
   private async cleanupServeOrphan(orphan: ServeOrphan): Promise<boolean> {
     if (orphan.env === undefined) return stopServe(orphan.tailnetPort);
+    if (orphan.direct !== undefined) return serveWeb(orphan.tailnetPort, orphan.direct);
     const env = orphan.env;
     try {
       return await this.store.withLock(env, async () => {
@@ -581,10 +595,10 @@ export class NectarService {
     return this.store.withLock(PORTS_LOCK, async () => {
       const live = await this.store.listEnvs();
       const others = live.filter((item) => item.name !== record.name);
-      const reservedUpstream = new Set(
-        others.map((item) => item.serve?.upstream_port).filter((port): port is number => port !== undefined),
-      );
+      const reservedUpstream = loopbackPorts(others);
       reservedUpstream.add(identity.config.pack_server_port);
+      const proxyPort = old?.serve?.proxy_port;
+      if (proxyPort !== undefined) reservedUpstream.add(proxyPort);
       const reservedTailnet = new Set(
         others.map((item) => item.serve?.tailnet_port).filter((port): port is number => port !== undefined),
       );
@@ -614,6 +628,7 @@ export class NectarService {
         pgid: spawned.pgid,
         upstream_port: upstreamPort,
         tailnet_port: tailnetPort,
+        ...(proxyPort === undefined ? {} : { proxy_port: proxyPort }),
       };
       record.urls.local = `http://127.0.0.1:${upstreamPort}`;
       await this.store.writeEnv(record);
@@ -649,7 +664,7 @@ export class NectarService {
     record.urls.local = readyUrl.origin;
     warnings[0] = `portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`;
     let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
+    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, await this.meshTarget(record));
     if (meshReady && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
@@ -1281,9 +1296,62 @@ export class NectarService {
     if (tailnetPort === undefined || record.urls.local === null || !identity.online || identity.dnsName === undefined) {
       return false;
     }
-    if (!(await serveWeb(tailnetPort, record.urls.local))) return false;
+    if (!(await serveWeb(tailnetPort, await this.meshTarget(record)))) return false;
     record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     return true;
+  }
+
+  private async meshTarget(record: EnvRecord): Promise<string> {
+    const direct = record.urls.local ?? `http://127.0.0.1:${record.serve?.upstream_port}`;
+    const proxyPort = record.serve?.proxy_port;
+    if (proxyPort === undefined || record.serve?.upstream_port === undefined) return direct;
+    const upstream = await probeProxy(proxyPort, record.name);
+    return upstream === record.serve.upstream_port ? `http://127.0.0.1:${proxyPort}` : direct;
+  }
+
+  async assignProxyPort(name: string): Promise<number | undefined> {
+    return this.store.withLock(PORTS_LOCK, async () => {
+      const config = await this.store.readConfig();
+      const reserved = loopbackPorts(await this.store.listEnvs());
+      reserved.add(config.pack_server_port);
+      const port = await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved });
+      const updated = await this.store.updateEnv(
+        name,
+        (record) => {
+          if (record.serve !== undefined && record.serve.proxy_port === undefined) record.serve.proxy_port = port;
+        },
+        { bestEffort: true },
+      );
+      return updated?.serve?.proxy_port;
+    });
+  }
+
+  async releaseProxyPort(name: string, port: number): Promise<void> {
+    await this.store.updateEnv(
+      name,
+      (record) => {
+        if (record.serve?.proxy_port === port) delete record.serve.proxy_port;
+      },
+      { bestEffort: true },
+    );
+  }
+
+  async unfront(name: string): Promise<boolean> {
+    let restored = false;
+    await this.store.updateEnv(
+      name,
+      async (record) => {
+        const tailnetPort = record.serve?.tailnet_port;
+        if (record.mode !== "web" || record.urls.mesh === null || record.urls.local === null || tailnetPort === undefined) return;
+        restored = await serveWeb(tailnetPort, record.urls.local);
+      },
+      { bestEffort: true },
+    );
+    return restored;
+  }
+
+  async touchView(name: string): Promise<string | undefined> {
+    return (await this.touchRecord(name, new Date()))?.expires_at;
   }
 
   async giveUp(name: string, expectPid: number, code: string, message: string): Promise<boolean> {
@@ -1357,20 +1425,26 @@ export class NectarService {
   // means a publish is mid-flight — skip, the env is active anyway.
   private async touchOnView(record: EnvRecord): Promise<void> {
     if (record.status === "expired" || record.status === "cold") return;
-    const now = new Date();
-    const touched = await this.store.updateEnv(
-      record.name,
-      (current) => {
-        if (current.status === "expired" || current.status === "cold") return;
-        current.last_touched_at = now.toISOString();
-        current.expires_at = expiresAt(now, current.ttl_ms ?? parseDuration(DEFAULT_TTL));
-      },
-      { bestEffort: true },
-    );
+    const touched = await this.touchRecord(record.name, new Date());
     if (touched !== undefined) {
       record.last_touched_at = touched.last_touched_at;
       record.expires_at = touched.expires_at;
     }
+  }
+
+  private async touchRecord(name: string, now: Date): Promise<EnvRecord | undefined> {
+    let touched = false;
+    const updated = await this.store.updateEnv(
+      name,
+      (current) => {
+        if (current.status === "expired" || current.status === "cold") return;
+        current.last_touched_at = now.toISOString();
+        current.expires_at = expiresAt(now, current.ttl_ms ?? parseDuration(DEFAULT_TTL));
+        touched = true;
+      },
+      { bestEffort: true },
+    );
+    return touched ? updated : undefined;
   }
 
   private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
@@ -1691,11 +1765,7 @@ export class NectarService {
       if (pid === undefined) return { ax_warning: "could not find a running app process for the AX bridge" };
       const helper = await ensureAxHelper(this.paths);
       const config = await this.store.readConfig();
-      const reserved = new Set(
-        (await this.store.listEnvs())
-          .map((record) => record.serve?.upstream_port)
-          .filter((value): value is number => value !== undefined),
-      );
+      const reserved = loopbackPorts(await this.store.listEnvs());
       reserved.add(config.pack_server_port);
       const port = await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved });
       const log = await prepareLog(this.paths, "ax-bridge", config.log_max_bytes);
@@ -1901,7 +1971,7 @@ export class NectarService {
     const now = new Date();
     const config = await this.store.readConfig();
     const serveOrphans = await this.deadServeProxies(await serveStatus(), config);
-    const orphanReport = [] as Array<{ tailnet_port: number; target: string; env: string | null; fixed: boolean }>;
+    const orphanReport = [] as Array<{ tailnet_port: number; target: string; env: string | null; fixed: boolean; direct?: string }>;
     for (const orphan of serveOrphans) {
       const fixed = options.dryRun ? false : await this.cleanupServeOrphan(orphan);
       orphanReport.push({
@@ -1909,6 +1979,7 @@ export class NectarService {
         target: orphan.target,
         env: orphan.env ?? null,
         fixed,
+        ...(orphan.direct === undefined ? {} : { direct: orphan.direct }),
       });
     }
     const report: Array<{ env: string; action: GcTransition }> = [];
@@ -2011,11 +2082,7 @@ export class NectarService {
     if (await this.packServerAlive(config)) return { config, started: false };
     let port = config.pack_server_port;
     if (!(await portAvailable(port))) {
-      const reserved = new Set(
-        (await this.store.listEnvs())
-          .map((record) => record.serve?.upstream_port)
-          .filter((value): value is number => value !== undefined),
-      );
+      const reserved = loopbackPorts(await this.store.listEnvs());
       port = await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved });
     }
     const log = await prepareLog(this.paths, "pack-store", config.log_max_bytes);

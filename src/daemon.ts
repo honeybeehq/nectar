@@ -6,6 +6,7 @@ import { asNectarError, NectarError } from "./errors.js";
 import { hasProbeableServe, probeLiveness } from "./liveness.js";
 import { rotateLog } from "./logs.js";
 import type { NectarPaths } from "./paths.js";
+import { DEFAULT_TOUCH_EVERY_MS, EnvProxy, upstreamOf } from "./proxy.js";
 import type { NectarService, ReviveResult } from "./service.js";
 import type { EnvRecord, Liveness, ServeRecord } from "./types.js";
 
@@ -19,6 +20,8 @@ export interface SupervisorOptions {
   bootTimeMs?: number;
   probe?: (serve: ServeRecord) => Promise<Liveness>;
   log?: (event: Record<string, unknown>) => void;
+  front?: boolean;
+  touchEveryMs?: number;
 }
 
 export const DEFAULT_INTERVAL_MS = 30_000;
@@ -32,6 +35,104 @@ interface Watch {
 const GIVEN_UP: ReadonlySet<string> = new Set(["E_CRASH_LOOP", "E_PORTS"]);
 
 type SupervisedRecord = EnvRecord & { serve: ServeRecord };
+type FrontedRecord = SupervisedRecord & { serve: { upstream_port: number; tailnet_port: number } };
+
+export function fronted(record: EnvRecord): record is FrontedRecord {
+  return (
+    record.mode === "web" &&
+    hasProbeableServe(record) &&
+    !GIVEN_UP.has(record.failure?.code ?? "") &&
+    record.serve.upstream_port !== undefined &&
+    record.serve.tailnet_port !== undefined
+  );
+}
+
+type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView">;
+
+export class ProxyHub {
+  private readonly proxies = new Map<string, EnvProxy>();
+  private readonly touchedAt = new Map<string, number>();
+
+  constructor(
+    private readonly service: FrontingService,
+    private readonly touchEveryMs: number,
+    private readonly log: (event: Record<string, unknown>) => void,
+  ) {}
+
+  ports(): Map<string, number> {
+    return new Map([...this.proxies].map(([name, proxy]) => [name, proxy.port]));
+  }
+
+  async sync(records: EnvRecord[]): Promise<string[]> {
+    const wanted = new Map(records.filter(fronted).map((record) => [record.name, record]));
+    for (const [name, proxy] of this.proxies) {
+      if (wanted.has(name)) continue;
+      this.proxies.delete(name);
+      this.touchedAt.delete(name);
+      await proxy.close();
+      this.log({ event: "proxy_closed", env: name, port: proxy.port });
+    }
+    const opened: string[] = [];
+    await Promise.all(
+      [...wanted.values()].map(async (record) => {
+        try {
+          if (await this.ensure(record)) opened.push(record.name);
+        } catch (error) {
+          this.log({ event: "error", phase: "proxy", env: record.name, message: asNectarError(error).message });
+        }
+      }),
+    );
+    return opened;
+  }
+
+  private async ensure(record: FrontedRecord): Promise<boolean> {
+    const upstream = upstreamOf(record.urls.local, record.serve.upstream_port);
+    const existing = this.proxies.get(record.name);
+    if (existing !== undefined && (record.serve.proxy_port === undefined || existing.port === record.serve.proxy_port)) {
+      existing.upstream = upstream;
+      return false;
+    }
+    const port = record.serve.proxy_port ?? (await this.service.assignProxyPort(record.name));
+    if (port === undefined) return false;
+    if (existing !== undefined) {
+      this.proxies.delete(record.name);
+      await existing.close();
+    }
+    const proxy = new EnvProxy(record.name, port, upstream, () => this.viewed(record.name));
+    try {
+      await proxy.listen();
+    } catch (error) {
+      this.log({ event: "proxy_port_taken", env: record.name, port, message: asNectarError(error).message });
+      await this.service.releaseProxyPort(record.name, port);
+      return false;
+    }
+    this.proxies.set(record.name, proxy);
+    this.log({ event: "proxy", env: record.name, port, upstream: upstream.port });
+    return true;
+  }
+
+  private viewed(name: string): void {
+    const nowMs = Date.now();
+    const last = this.touchedAt.get(name);
+    if (last !== undefined && nowMs - last < this.touchEveryMs) return;
+    this.touchedAt.set(name, nowMs);
+    this.service
+      .touchView(name)
+      .then((expiresAt) => {
+        if (expiresAt !== undefined) this.log({ event: "touch", env: name, expires_at: expiresAt });
+      })
+      .catch(() => undefined);
+  }
+
+  async close(): Promise<void> {
+    for (const proxy of this.proxies.values()) {
+      const restored = await this.service.unfront(proxy.env).catch(() => false);
+      await proxy.close();
+      this.log({ event: "proxy_closed", env: proxy.env, port: proxy.port, direct: restored });
+    }
+    this.proxies.clear();
+  }
+}
 
 export function supervised(record: EnvRecord, nowMs: number): record is SupervisedRecord {
   return (
@@ -54,6 +155,7 @@ export class Supervisor {
   private readonly log: (event: Record<string, unknown>) => void;
   private readonly watches = new Map<string, Watch>();
   private readonly pendingMesh = new Set<string>();
+  readonly hub: ProxyHub | undefined;
   private timer: NodeJS.Timeout | undefined;
   private cycling: Promise<void> | undefined;
   private lastGcAt = 0;
@@ -72,6 +174,7 @@ export class Supervisor {
     this.bootTimeMs = options.bootTimeMs ?? Date.now() - os.uptime() * 1_000;
     this.probe = options.probe ?? (async (serve) => probeLiveness(serve));
     this.log = options.log ?? (() => undefined);
+    this.hub = options.front === true ? new ProxyHub(service, options.touchEveryMs ?? DEFAULT_TOUCH_EVERY_MS, this.log) : undefined;
   }
 
   async start(): Promise<void> {
@@ -85,6 +188,7 @@ export class Supervisor {
     this.stopped = true;
     if (this.timer !== undefined) clearTimeout(this.timer);
     await this.cycling;
+    await this.hub?.close();
     this.log({ event: "stop" });
   }
 
@@ -114,6 +218,7 @@ export class Supervisor {
     const nowMs = Date.now();
     const names = new Set(records.map((record) => record.name));
     for (const name of this.watches.keys()) if (!names.has(name)) this.watches.delete(name);
+    if (this.hub !== undefined) for (const name of await this.hub.sync(records)) this.pendingMesh.add(name);
     await Promise.all(
       records.map(async (record) => {
         try {

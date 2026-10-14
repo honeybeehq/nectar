@@ -1,0 +1,6 @@
+name = "ws-fixture"
+
+[web]
+serve = "exec node server.mjs"
+ready_path = "/"
+ready_timeout = "10s"

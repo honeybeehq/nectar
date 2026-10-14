@@ -198,7 +198,7 @@ daemon
       const config = await service.store.readConfig();
       const release = await claimPidFile(service.paths);
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
-      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log });
+      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
       const shutdown = async (): Promise<void> => {
         await supervisor.stop();
         await release();

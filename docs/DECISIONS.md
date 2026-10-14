@@ -421,3 +421,28 @@ pollinate dependency for a core property. (c) writes and deletes a unit per publ
 puts Nectar state in the service manager. One timer, a probe every 30 s and gc hourly keep
 it light. Leaving the CLI fully functional without the daemon keeps D1's "nectar can't wedge
 itself" property: uninstalling it loses only the revival.
+
+## D25 — Touch on HTTP view: per-env proxies inside nectard
+
+**Chose:** nectard (D24) hosts one `node:http` reverse proxy listener per fronted web env,
+on a third per-env loopback port (`serve.proxy_port`, from the upstream range). The Serve
+entry points at the proxy and the proxy forwards to the app. A page navigation touches the
+env like `open`/`resolve`/`show` do, at most once per env per 5 min, fire-and-forget. Envs
+published before this are adopted on nectard's next sweep with the same tailnet URL. Without
+nectard nothing changes: the Serve entry points at the app. (SPEC §4.4, §4.5.)
+**Alternatives:** (a) one multiplexing listener for all envs; (b) a detached proxy process
+per env, spawned and revived like a serve; (c) give the proxy the env's `upstream_port`
+and move the app to a private port; (d) listen on `127.0.0.1:<tailnet_port>`.
+**Why:** `tailscale serve` gives each env its own HTTPS port and forwards the same `Host`
+for all of them, so (a) cannot tell envs apart without rewriting paths or hosts that apps
+see. Separate listeners in one process cost nothing when idle, and no new process is
+spawned per env. (b) adds a ~40 MB Node process per env and a second thing to supervise.
+(c) changes the port recipes were published on and breaks every older record's
+liveness. (d) relies on how tailscaled binds Serve ports, which differs between Linux
+tun, macOS's App Store build and userspace netstack. A third port is cheap: 12 serving envs
+use 24 of the 100 upstream ports. Living inside nectard keeps Kal's conditions. It acts only
+on records, adds no timer, and `nectar daemon uninstall` stops it after pointing every
+entry back at its app. A proxy that dies with nectard costs one restart interval. gc also
+falls back to the direct mapping when it finds a dead proxy in front of a live app, so the
+preview never stays down for long. The probe-before-map rule (the proxy must name its env
+and current upstream) means a stale or foreign listener is never fronted.

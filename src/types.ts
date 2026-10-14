@@ -65,6 +65,7 @@ export interface ServeRecord {
   pgid: number;
   upstream_port?: number;
   tailnet_port?: number;
+  proxy_port?: number;
   started_at?: string;
 }
 

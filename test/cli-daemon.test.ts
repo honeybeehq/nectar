@@ -48,7 +48,7 @@ beforeAll(async () => {
   await mkdir(site, { recursive: true });
   await writeFile(path.join(site, "index.html"), "<h1>cell</h1>");
   const run = await tempDir("cli-daemon-run");
-  env = baseEnv({ NECTAR_HOME: home, NECTAR_SOCKET: path.join(run, "nectard.sock"), NECTAR_CELL: cell, HIVE_BEE_ID: "bee-cli" });
+  env = baseEnv({ NECTAR_HOME: home, NECTAR_SOCKET: path.join(run, "nectard.sock"), NECTAR_CELL: cell, HIVE_BEE: "cli-bee", HIVE_BEE_ID: "bee-cli-id" });
 }, 120_000);
 
 afterAll(async () => {
@@ -85,7 +85,7 @@ describe("CLI with a read-only NECTAR_HOME", () => {
     const published = await cli(env, "publish", "site", "--name", "routed");
     expect(published.envelope).toMatchObject({ ok: true, command: "publish", result: { env: "routed--static--web", source: site } });
     const shown = await cli(env, "show", "routed--static--web");
-    expect(shown.envelope).toMatchObject({ ok: true, result: { env: { publisher: { via: "nectard", cell, hive_bee: "bee-cli" } } } });
+    expect(shown.envelope).toMatchObject({ ok: true, result: { env: { publisher: { via: "nectard", cell, hive_bee: "cli-bee", hive_session: "bee-cli-id" } } } });
 
     const direct = await cli(env, "publish", "site", "--name", "routed", "--direct");
     expect(direct.envelope).toMatchObject({ ok: true });

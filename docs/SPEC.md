@@ -328,7 +328,11 @@ tailnet port range whose loopback target is dead, §10.2.)
     The source is then copied (static) or checked out (git) into `work/<env>`, the same
     as a local publish. The preview survives deleting the source or evicting the Cell.
   - The record's `publisher` is `{user, via: "nectard", cell?, hive_bee?, hive_session?}`
-    from the request. The daemon's own environment does not leak into it.
+    from the request. The daemon's own environment does not leak into it. The CLI sends
+    `hive_bee` from `HIVE_BEE` (else `HIVE_BEE_ID`), `hive_session` from `HIVE_SESSION`
+    (else `HIVE_BEE_ID` when `HIVE_BEE` names the bee) and `cell` from `NECTAR_CELL`, or,
+    when `HIVE_CELL` is set, the parent of the working directory's `HIVE_CELL_SPACE`
+    ancestor (the Cell root, e.g. `~/.hive/v2/cells/<cell>`).
   - Logs: one `control` event per `publish`/`rm`/`stop`/`touch` and per failed request.
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
   touch, gc, error), one JSON line each, go to

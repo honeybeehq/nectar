@@ -198,7 +198,7 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<vo
 
 export function currentPublisher(): { hive_bee?: string; hive_session?: string; user: string } {
   const hiveBee = process.env.HIVE_BEE ?? process.env.HIVE_BEE_ID;
-  const hiveSession = process.env.HIVE_SESSION ?? process.env.HIVE_SESSION_ID;
+  const hiveSession = process.env.HIVE_SESSION ?? process.env.HIVE_SESSION_ID ?? (process.env.HIVE_BEE === undefined ? undefined : process.env.HIVE_BEE_ID);
   return {
     ...(hiveBee === undefined ? {} : { hive_bee: hiveBee }),
     ...(hiveSession === undefined ? {} : { hive_session: hiveSession }),

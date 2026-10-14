@@ -7,7 +7,7 @@ import { NectarService } from "./service.js";
 import { claimPidFile, daemonLogger, DEFAULT_GC_INTERVAL_MS, DEFAULT_INTERVAL_MS, Supervisor } from "./daemon.js";
 import { installUnit, uninstallUnit, unitStatus } from "./daemon-unit.js";
 import { parseDuration } from "./duration.js";
-import { callDaemon, callerFromEnv, isControlOp, selectRoute, startControlServer, type ControlOp } from "./control.js";
+import { callDaemon, callerFromEnv, homeWritable, isControlOp, selectRoute, startControlServer, type ControlOp } from "./control.js";
 import { getPaths } from "./paths.js";
 
 const argv = process.argv.slice(2);
@@ -28,7 +28,12 @@ async function routed(command: ControlOp, args: Record<string, unknown>, local: 
   const paths = getPaths();
   const route = await selectRoute(command, paths, { direct: directRequested() });
   if (route.kind === "direct") return local();
-  return callDaemon(route.socket, command, { nectar_home: path.resolve(paths.root), caller: callerFromEnv(), args });
+  try {
+    return await callDaemon(route.socket, command, { nectar_home: path.resolve(paths.root), caller: callerFromEnv(), args });
+  } catch (error) {
+    if (error instanceof NectarError && error.details.refused === "path" && (await homeWritable(paths.root))) return local();
+    throw error;
+  }
 }
 
 async function execute<T>(command: string, action: () => Promise<T>): Promise<void> {

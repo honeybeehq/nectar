@@ -49,7 +49,7 @@ export async function onPath(name: string, searchPath = process.env.PATH ?? ""):
 export function unitSpec(paths: NectarPaths, platform: NodeJS.Platform = process.platform, lookup: TailscaleLookup = {}): UnitSpec {
   unitPlatform(platform);
   const env: Record<string, string> = { NECTAR_HOME: paths.root };
-  for (const key of ["PATH", "HOME", "SHELL", "LANG", "NECTAR_TRASH_BIN", "NECTAR_SOCKET"]) {
+  for (const key of ["PATH", "HOME", "SHELL", "LANG", "NECTAR_TRASH_BIN", "NECTAR_SOCKET", "NECTAR_CELLS_ROOT"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }

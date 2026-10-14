@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { chmod, lstat, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  authorizePath,
   callDaemon,
   cellFromCwd,
   CONTROL_API,
@@ -36,7 +37,9 @@ async function setup(): Promise<{ home: string; socket: string; cell: string; si
   vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
   const home = await tempDir("control-home");
   const run = await tempDir("control-run");
-  const cell = await tempDir("control-cell");
+  const cells = await tempDir("control-cells");
+  vi.stubEnv("NECTAR_CELLS_ROOT", cells);
+  const cell = path.join(cells, "job-1");
   const site = path.join(cell, "site");
   await mkdir(site, { recursive: true });
   await writeFile(path.join(site, "index.html"), "<h1>from the cell</h1>");
@@ -145,9 +148,23 @@ describe("nectard control socket", () => {
       await expect(publish({ path: path.join(cell, "escape") })).rejects.toMatchObject({ code: "E_USAGE" });
       await expect(publish({ path: path.join(cell, "site") }, { cell: "/" })).rejects.toMatchObject({ code: "E_USAGE" });
     }
-    await expect(publish({ path: path.join(home, "work", "x") }, { cell: home })).rejects.toMatchObject({
+    if (!inHome) {
+      const mine = await tempDir("control-mine");
+      await writeFile(path.join(mine, "index.html"), "x");
+      await expect(publish({ path: mine }, { cell: mine })).rejects.toMatchObject({ code: "E_USAGE", details: { refused: "path" } });
+    }
+    const nested = getPaths(path.join(cell, "state"));
+    await mkdir(path.join(nested.work, "x"), { recursive: true });
+    await writeFile(path.join(nested.work, "x", "index.html"), "x");
+    await expect(authorizePath(path.join(nested.work, "x"), "Source path", { cell }, nested, socket)).rejects.toMatchObject({
       code: "E_USAGE",
       message: expect.stringContaining("refuses") as string,
+    });
+    await expect(authorizePath(path.join(cell, "site"), "Source path", { cell }, nested, socket)).resolves.toBe(path.join(cell, "site"));
+    await writeFile(path.join(cell, "page.html"), "x");
+    await expect(authorizePath(path.join(cell, "page.html"), "Source path", { cell }, nested, socket)).rejects.toMatchObject({
+      code: "E_USAGE",
+      message: expect.stringContaining("contains") as string,
     });
     await expect(publish({ path: path.join(cell, "missing") })).rejects.toMatchObject({ code: "E_USAGE", message: expect.stringContaining("private /tmp") as string });
     await expect(publish({ path: "relative/site" })).rejects.toMatchObject({ code: "E_USAGE" });
@@ -158,6 +175,10 @@ describe("nectard control socket", () => {
     const { home, socket } = await setup();
     expect(await handleRequest("doctor", { nectar_home: home, args: {} }, getPaths(home), socket)).toMatchObject({ ok: false, error: { code: "E_USAGE" } });
     expect(await handleRequest("ls", { nectar_home: home, args: { cmd: "id" } }, getPaths(home), socket)).toMatchObject({ ok: false, error: { code: "E_USAGE" } });
+    expect(await handleRequest("ls", { nectar_home: home, args: JSON.parse('{"__proto__":{}}') as unknown }, getPaths(home), socket)).toMatchObject({
+      ok: false,
+      error: { code: "E_USAGE", message: "nectar ls through nectard does not take '__proto__'" },
+    });
     expect(await handleRequest("rm", { nectar_home: home, args: { env: "x--y--web", force: "yes" } }, getPaths(home), socket)).toMatchObject({
       ok: false,
       error: { code: "E_USAGE" },
@@ -194,13 +215,13 @@ describe("route selection", () => {
 
   it("fails with E_DAEMON and the install hint when the home is read-only and nectard cannot help", async () => {
     const failures = [
-      selectRoute("publish", paths, { socket: "/s", hello: none, writable: readOnly }),
-      selectRoute("ls", paths, { socket: "/s", hello: hello("/other"), writable: readOnly }),
-      selectRoute("rm", paths, { socket: "/s", hello: hello("/srv/nectar", ["ls"]), writable: readOnly }),
-      selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly }),
+      () => selectRoute("publish", paths, { socket: "/s", hello: none, writable: readOnly }),
+      () => selectRoute("ls", paths, { socket: "/s", hello: hello("/other"), writable: readOnly }),
+      () => selectRoute("rm", paths, { socket: "/s", hello: hello("/srv/nectar", ["ls"]), writable: readOnly }),
+      () => selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly }),
     ];
     for (const failure of failures) {
-      await expect(failure).rejects.toMatchObject({ code: "E_DAEMON", details: { hint: "nectar daemon install" } });
+      await expect(failure()).rejects.toMatchObject({ code: "E_DAEMON", details: { hint: "nectar daemon install" } });
     }
     expect(await codeOf(selectRoute("expose", paths, { writable }))).toBe("ok");
   });

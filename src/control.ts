@@ -17,7 +17,8 @@ export type ControlOp = (typeof CONTROL_OPS)[number];
 export const DAEMON_HINT = "nectar daemon install";
 const MAX_BODY_BYTES = 64 * 1024;
 const HELLO_TIMEOUT_MS = 2_000;
-const SECRET_DIRS = [".ssh", ".gnupg", ".aws"];
+const SECRET_DIRS = [".ssh", ".gnupg", ".aws", path.join("Library", "Keychains")];
+const DRAIN_MS = 20_000;
 
 export interface Caller {
   cell?: string;
@@ -74,7 +75,7 @@ function checkArgs(op: ControlOp, args: unknown): Record<string, string | boolea
   const checked: Record<string, string | boolean> = {};
   for (const [key, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
-    const type = spec[key];
+    const type = Object.hasOwn(spec, key) ? spec[key] : undefined;
     if (type === undefined) throw new NectarError("E_USAGE", `nectar ${op} through nectard does not take '${key}'`);
     if (typeof value !== type) throw new NectarError("E_USAGE", `'${key}' must be a ${type}`);
     checked[key] = value as string | boolean;
@@ -98,10 +99,15 @@ function checkCaller(caller: unknown): Caller {
   return checked;
 }
 
+export function cellsRoot(): string {
+  return process.env.NECTAR_CELLS_ROOT ?? path.join(process.env.HIVE_V2_DATA_DIR ?? path.join(os.homedir(), ".hive", "v2"), "cells");
+}
+
 async function cellRoot(cell: string | undefined): Promise<string | undefined> {
   if (cell === undefined || !path.isAbsolute(cell)) return undefined;
   const real = await realpath(cell).catch(() => undefined);
-  if (real === undefined || path.dirname(real) === real) return undefined;
+  const anchor = await realpath(cellsRoot()).catch(() => undefined);
+  if (real === undefined || anchor === undefined || real === anchor || !isInside(real, anchor)) return undefined;
   const info = await stat(real).catch(() => undefined);
   if (info === undefined || !info.isDirectory() || info.uid !== process.getuid?.()) return undefined;
   return real;
@@ -114,22 +120,24 @@ export async function authorizePath(input: string, label: string, caller: Caller
     throw new NectarError(
       "E_USAGE",
       `${label} ${input} does not exist on this host as nectard sees it; Cells have a private /tmp, so publish from your Cell checkout or your home directory`,
+      { refused: "path" },
     );
   }
   const home = await realpath(os.homedir());
   const cell = await cellRoot(caller.cell);
   const roots = cell === undefined ? [home] : [home, cell];
   if (!roots.some((root) => isInside(real, root))) {
-    throw new NectarError("E_USAGE", `${label} ${real} is outside your home directory${cell === undefined ? "" : ` and your Cell (${cell})`}; nectard publishes only from there`);
+    throw new NectarError("E_USAGE", `${label} ${real} is outside your home directory${cell === undefined ? "" : ` and your Cell (${cell})`}; nectard publishes only from there`, {
+      refused: "path",
+    });
   }
-  const denied = [
-    paths.root,
-    path.dirname(socket),
-    ...SECRET_DIRS.map((entry) => path.join(home, entry)),
-  ];
+  const scope = (await stat(real)).isDirectory() ? real : path.dirname(real);
+  const denied = [paths.root, path.dirname(socket), ...SECRET_DIRS.map((entry) => path.join(home, entry))];
   for (const entry of denied) {
     const resolved = await realpath(entry).catch(() => path.resolve(entry));
-    if (isInside(real, resolved)) throw new NectarError("E_USAGE", `nectard refuses to publish from ${resolved}`);
+    if (isInside(real, resolved) || isInside(resolved, scope)) {
+      throw new NectarError("E_USAGE", `nectard refuses to publish ${scope}: it is or contains ${resolved}`, { refused: "path" });
+    }
   }
   return real;
 }
@@ -188,13 +196,18 @@ async function readBody(request: http.IncomingMessage): Promise<unknown> {
   }
 }
 
+async function sameHome(a: string, b: string): Promise<boolean> {
+  const real = async (value: string): Promise<string> => realpath(value).catch(() => path.resolve(value));
+  return (await real(a)) === (await real(b));
+}
+
 export async function handleRequest(op: string, body: unknown, paths: NectarPaths, socket: string): Promise<Envelope> {
   const command = isControlOp(op) ? op : "nectar";
   try {
     if (!isControlOp(op)) throw new NectarError("E_USAGE", `nectard does not serve '${op}'`);
     if (typeof body !== "object" || body === null || Array.isArray(body)) throw new NectarError("E_USAGE", "Request body must be a JSON object");
     const request = body as Partial<ControlRequest>;
-    if (typeof request.nectar_home !== "string" || path.resolve(request.nectar_home) !== path.resolve(paths.root)) {
+    if (typeof request.nectar_home !== "string" || !(await sameHome(request.nectar_home, paths.root))) {
       throw new NectarError("E_DAEMON", `nectard serves NECTAR_HOME ${paths.root}, not ${String(request.nectar_home)}`, { hint: DAEMON_HINT });
     }
     const caller = checkCaller(request.caller);
@@ -292,8 +305,11 @@ export async function startControlServer(
     socket,
     close: async () => {
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeIdleConnections();
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([closed, new Promise<void>((resolve) => (timer = setTimeout(resolve, DRAIN_MS)))]);
+      clearTimeout(timer);
       server.closeAllConnections();
-      await closed;
       const current = await lstat(socket).catch(() => undefined);
       if (current?.ino === inode) await unlink(socket).catch(() => undefined);
     },
@@ -404,13 +420,13 @@ export async function selectRoute(
     );
   }
   const hello = await (options.hello ?? daemonHello)(socket);
-  const sameHome = hello !== undefined && path.resolve(hello.nectar_home) === path.resolve(paths.root);
-  if (sameHome && hello.api === CONTROL_API && hello.ops.includes(command)) return { kind: "daemon", socket };
+  const matches = hello !== undefined && (await sameHome(hello.nectar_home, paths.root));
+  if (matches && hello.api === CONTROL_API && hello.ops.includes(command)) return { kind: "daemon", socket };
   if (await writable(paths.root)) return { kind: "direct" };
   const reason =
     hello === undefined
-      ? `nectard is not running or not installed (no answer on ${socket})`
-      : !sameHome
+      ? `nectard is not installed, not running, or older than this CLI (no answer on ${socket})`
+      : !matches
         ? `nectard on ${socket} serves NECTAR_HOME ${hello.nectar_home}`
         : `nectard on ${socket} is older than this CLI and cannot run nectar ${command}; re-run nectar daemon install`;
   throw new NectarError("E_DAEMON", `NECTAR_HOME ${paths.root} is read-only here and ${reason}. Ask the user to run \`${DAEMON_HINT}\` outside the Cell`, {

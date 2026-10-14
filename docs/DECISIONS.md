@@ -519,8 +519,12 @@ for the same `NECTAR_HOME` and supports the operation is used. Otherwise a writa
 `NECTAR_HOME` means local. Anything else is `E_DAEMON` with
 `hint: "nectar daemon install"`. Publish through nectard takes a host path. nectard
 resolves it with realpath and accepts it only inside the user's home or the caller's
-Cell (an existing directory the user owns, not `/`). It refuses anything inside
-`NECTAR_HOME`, the socket directory, `~/.ssh`, `~/.gnupg` and `~/.aws`. Then it copies or
+Cell. The Cell is self-reported, so it counts only as a directory the user owns below
+the Cells root (`~/.hive/v2/cells` by default). It refuses a scope that lies inside or
+contains `NECTAR_HOME`, the socket directory, `~/.ssh`, `~/.gnupg`, `~/.aws` or
+`~/Library/Keychains`. A host shell whose home is writable falls back to an in-process
+publish when nectard refuses a path, so publishing `/srv/app` from the host still works.
+Then it copies or
 checks out the source into `~/.nectar/work` exactly as a local publish would. Records
 get `publisher.via: "nectard"` and the caller's `cell` and bee ids. (SPEC §4.5, §7, §9.)
 Queen ruled on the transport, the stamp, the path rule and the error (2026-10-14).
@@ -577,7 +581,14 @@ body under a size cap. An archive upload of a static directory is the second opt
 The path rule, `nectar_home` and Cell stamp apply only on the Unix socket. Remote
 records get `publisher.node` from WhoIs, not from the request. `rm`, `stop` and `touch`
 over the tailnet act only on envs whose `publisher.node` is the caller, unless the
-caller is the operator. The Unix socket stays the local route, so a Cell on the target
+caller is the operator. Before it is built, these need settling. A git URL must be limited to `https:` and
+`ssh:` (no `file:`, `ext::`, local paths or option-like values), or a caller could
+publish any repository on the target. An allowlisted node gets code execution on the
+target as the user, because recipes run. So list node IDs, not a login, which can own
+shared or tagged devices. An archive upload needs zip-slip, symlink and size defences,
+and its own body cap instead of 64 KiB. A failed WhoIs refuses the request. Remote
+`ls`/`show` reveal Cell paths and bee ids, so decide whether peers may see them or
+redact them. The Unix socket stays the local route, so a Cell on the target
 node keeps working when the tailnet listener is off. The client side is the same
 `callDaemon` with an `http://<node>:8441` base URL. WireGuard already encrypts the hop.
 Putting `tailscale serve` in front would hide the peer address that WhoIs needs.

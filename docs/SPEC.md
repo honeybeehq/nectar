@@ -322,9 +322,14 @@ tailnet port range whose loopback target is dead, §10.2.)
     `env`, `force`). Unknown names or wrong types are `E_USAGE`. A different
     `nectar_home` is `E_DAEMON`. The reply is always the CLI's envelope for that command.
   - Publish paths (`path`, `worktree`) are resolved with realpath. They must be inside the
-    user's home or the caller's Cell (an existing directory owned by the user, not `/`),
-    and not inside `NECTAR_HOME`, the socket directory, `~/.ssh`, `~/.gnupg` or `~/.aws`.
-    A path nectard cannot see (a Cell's private `/tmp`) is `E_USAGE`, with that reason.
+    user's home or the caller's Cell. A Cell counts only if it is a directory the user owns
+    below the Cells root (`NECTAR_CELLS_ROOT`, else `$HIVE_V2_DATA_DIR/cells`, else
+    `~/.hive/v2/cells`). The published scope (the directory, or a file's directory, which
+    is what a static copy takes) must neither lie inside nor contain `NECTAR_HOME`, the
+    socket directory, `~/.ssh`, `~/.gnupg`, `~/.aws` or `~/Library/Keychains`. A path
+    nectard cannot see (a Cell's private `/tmp`) is `E_USAGE`, with that reason. These
+    refusals carry `refused: "path"`. When `NECTAR_HOME` is writable, the CLI then
+    publishes in-process instead, so a host shell can still publish `/srv/app`.
     The source is then copied (static) or checked out (git) into `work/<env>`, the same
     as a local publish. The preview survives deleting the source or evicting the Cell.
   - The record's `publisher` is `{user, via: "nectard", cell?, hive_bee?, hive_session?}`
@@ -334,6 +339,9 @@ tailnet port range whose loopback target is dead, §10.2.)
     when `HIVE_CELL` is set, the parent of the working directory's `HIVE_CELL_SPACE`
     ancestor (the Cell root, e.g. `~/.hive/v2/cells/<cell>`).
   - Logs: one `control` event per `publish`/`rm`/`stop`/`touch` and per failed request.
+  - On SIGTERM nectard stops accepting connections and waits up to 20 s for requests in
+    flight before closing them. A publish cut off after that is left as an interrupted
+    local publish would be (`rm --force` cleans it up).
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
   touch, gc, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.

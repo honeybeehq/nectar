@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -43,12 +44,13 @@ beforeAll(async () => {
   const built = await runCommand("pnpm", ["build"], { cwd: repoRoot, timeoutMs: 120_000 });
   if (built.exitCode !== 0) throw new Error(`build failed: ${built.stderr}`);
   home = await tempDir("cli-daemon-home");
-  cell = await tempDir("cli-daemon-cell");
+  const cells = await tempDir("cli-daemon-cells");
+  cell = path.join(cells, "job-1");
   site = path.join(cell, "site");
   await mkdir(site, { recursive: true });
   await writeFile(path.join(site, "index.html"), "<h1>cell</h1>");
   const run = await tempDir("cli-daemon-run");
-  env = baseEnv({ NECTAR_HOME: home, NECTAR_SOCKET: path.join(run, "nectard.sock"), NECTAR_CELL: cell, HIVE_BEE: "cli-bee", HIVE_BEE_ID: "bee-cli-id" });
+  env = baseEnv({ NECTAR_HOME: home, NECTAR_SOCKET: path.join(run, "nectard.sock"), NECTAR_CELL: cell, NECTAR_CELLS_ROOT: cells, HIVE_BEE: "cli-bee", HIVE_BEE_ID: "bee-cli-id" });
 }, 120_000);
 
 afterAll(async () => {
@@ -86,6 +88,13 @@ describe("CLI with a read-only NECTAR_HOME", () => {
     expect(published.envelope).toMatchObject({ ok: true, command: "publish", result: { env: "routed--static--web", source: site } });
     const shown = await cli(env, "show", "routed--static--web");
     expect(shown.envelope).toMatchObject({ ok: true, result: { env: { publisher: { via: "nectard", cell, hive_bee: "cli-bee", hive_session: "bee-cli-id" } } } });
+
+    const outside = await tempDir("cli-daemon-outside");
+    if (!outside.startsWith(os.homedir())) {
+      await writeFile(path.join(outside, "index.html"), "<h1>outside</h1>");
+      const fallback = await cli(env, "publish", outside, "--name", "outside", "--dry-run");
+      expect(fallback.envelope).toMatchObject({ ok: true, result: { dry_run: true, repo: outside } });
+    }
 
     const direct = await cli(env, "publish", "site", "--name", "routed", "--direct");
     expect(direct.envelope).toMatchObject({ ok: true });

@@ -563,6 +563,17 @@ A local `nectar publish` from inside a Cell now cannot run at all, so routing th
 nectard is the only way an agent can publish a recipe. The commands it runs are the ones
 a local publish of that source would run, and nothing else: the API has no command,
 environment or recipe field, only Nectar's own options. Static sites run no recipe code.
+Queen's rule is that a Cell's git config must not run anything on the host. So every git
+call Nectar makes ignores global and system config (a Linux Cell can write
+`~/.config/git/config`). It refuses every transport and lazy fetch, sends hooks to
+`/dev/null`, turns off fsmonitor, auto-gc and submodule recursion, and neutralizes
+every filter driver and config hook in the repo's config. The overrides go through
+`GIT_CONFIG_COUNT`, because a `-c filter.a=b.smudge=` argument is split at the first
+`=`. Partial clones are refused, and reading the repo's config fails closed. Static
+sources are copied without running git in them, except a read-only `rev-parse`/`branch`
+for the branch name. Cloning instead of `git worktree add`
+would avoid reading the source's config at all. But it changes how D26 matches sources
+and alternates slots, so it is a follow-up and not part of this slice.
 Running a Cell's serves under the same sandbox profile is the hardening step if Cells
 ever hold less-trusted code (SPEC §9.3).
 

@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
-import { currentBranch, installDependencies, prepareWorktree, removeWorktree, resolveCommit, resolveRepo, sameRepository, shortCommit } from "./git.js";
+import { currentBranch, installDependencies, prepareWorktree, removeWorktree, resolveCommit, resolveRepo, runGit, sameRepository, shortCommit } from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
@@ -2104,7 +2104,7 @@ export class NectarService {
       if (!record.borrowed_worktree) targets.push(record.worktree);
       await this.tearDownExposure(record).catch(() => undefined);
       await trashPaths(targets, this.paths.root);
-      await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+      await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
       return { env: record.name, removed: true, forced: force, borrowed_worktree_preserved: record.borrowed_worktree };
     });
   }
@@ -2264,7 +2264,7 @@ export class NectarService {
             delete record.liveness;
             record.status = "cold";
             await this.store.writeEnv(record);
-            await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+            await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
           } else {
             // Reap removes everything the env ever owned, exactly like `rm`.
             await this.stopRuntime(record);
@@ -2278,7 +2278,7 @@ export class NectarService {
             ];
             if (!record.borrowed_worktree) targets.push(record.worktree);
             await trashPaths(targets, this.paths.root);
-            await runCommand("git", ["worktree", "prune"], { cwd: record.repo }).catch(() => undefined);
+            await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
           }
         });
       } catch (error) {

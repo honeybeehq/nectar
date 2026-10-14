@@ -1,11 +1,70 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { access, readFile, stat } from "node:fs/promises";
-import { runCommand, scrubbedEnvironment } from "./commands.js";
+import { runCommand, scrubbedEnvironment, type CommandResult } from "./commands.js";
 import { NectarError } from "./errors.js";
 
+const PINNED: Array<[string, string]> = [
+  ["core.hooksPath", "/dev/null"],
+  ["core.fsmonitor", "false"],
+  ["gc.auto", "0"],
+  ["maintenance.auto", "false"],
+  ["submodule.recurse", "false"],
+  ["diff.ignoreSubmodules", "all"],
+  ["protocol.allow", "never"],
+  ...["ext", "file", "ssh", "git", "http", "https"].map((name): [string, string] => [`protocol.${name}.allow`, "never"]),
+];
+
+function isolatedEnvironment(settings: Array<[string, string]>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_ALLOW_PROTOCOL = "none";
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_CONFIG_COUNT = String(settings.length);
+  settings.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  });
+  return env;
+}
+
+async function repoOverrides(cwd: string): Promise<Array<[string, string]>> {
+  const listed = await runCommand("git", ["config", "-z", "--show-scope", "--list"], { cwd, env: isolatedEnvironment(PINNED) });
+  if (listed.exitCode !== 0) {
+    if (/not in a git directory|not a git repository/i.test(listed.stderr)) return [];
+    throw new NectarError("E_CHECKOUT", `Could not read git config in ${cwd}: ${listed.stderr.trim()}`);
+  }
+  const fields = listed.stdout.split("\0");
+  const overrides: Array<[string, string]> = [];
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const entry = fields[index + 1] ?? "";
+    const newline = entry.indexOf("\n");
+    const key = newline === -1 ? entry : entry.slice(0, newline);
+    const value = newline === -1 ? "true" : entry.slice(newline + 1);
+    const lower = key.toLowerCase();
+    if (lower === "extensions.partialclone" || (/^remote\..+\.promisor$/.test(lower) && value.toLowerCase() !== "false")) {
+      throw new NectarError("E_CHECKOUT", `${cwd} is a partial clone; publish a full clone, since Nectar never fetches missing objects`);
+    }
+    const filter = /^filter\.(.+)\.[^.]+$/s.exec(key);
+    if (filter?.[1] !== undefined) {
+      for (const setting of ["smudge", "clean", "process"]) overrides.push([`filter.${filter[1]}.${setting}`, ""]);
+      overrides.push([`filter.${filter[1]}.required`, "false"]);
+    }
+    const hook = /^hook\.(.+)\.[^.]+$/s.exec(key);
+    if (hook?.[1] !== undefined) overrides.push([`hook.${hook[1]}.command`, "true"]);
+  }
+  return overrides;
+}
+
+export async function runGit(args: string[], cwd: string): Promise<CommandResult> {
+  const env = isolatedEnvironment([...PINNED, ...(await repoOverrides(cwd))]);
+  return runCommand("git", ["--no-pager", ...args], { cwd, env });
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
-  const result = await runCommand("git", args, { cwd });
+  const result = await runGit(args, cwd);
   if (result.exitCode !== 0) {
     throw new NectarError("E_CHECKOUT", result.stderr.trim() || `git ${args.join(" ")} failed`);
   }
@@ -29,7 +88,7 @@ export async function sameRepository(a: string, b: string): Promise<boolean> {
 }
 
 export async function removeWorktree(repo: string, worktree: string): Promise<boolean> {
-  const result = await runCommand("git", ["worktree", "remove", "--force", worktree], { cwd: repo });
+  const result = await runGit(["worktree", "remove", "--force", worktree], repo);
   return result.exitCode === 0;
 }
 
@@ -62,7 +121,7 @@ export async function prepareWorktree(options: {
     const worktree = path.resolve(options.borrowed);
     const root = await resolveRepo(worktree);
     if (root !== worktree) throw new NectarError("E_CHECKOUT", `Borrowed worktree must be its git root: ${worktree}`);
-    const dirty = await git(["status", "--porcelain"], worktree);
+    const dirty = await git(["status", "--porcelain", "--ignore-submodules=all"], worktree);
     if (dirty) throw new NectarError("E_CHECKOUT", "Borrowed worktree is dirty; Nectar will never reset it");
     return { worktree, borrowed: true, commit: await shortCommit(worktree) };
   }

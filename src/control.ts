@@ -18,7 +18,7 @@ export const DAEMON_HINT = "nectar daemon install";
 const MAX_BODY_BYTES = 64 * 1024;
 const HELLO_TIMEOUT_MS = 2_000;
 const SECRET_DIRS = [".ssh", ".gnupg", ".aws", path.join("Library", "Keychains")];
-const DRAIN_MS = 20_000;
+const DRAIN_MS = 15_000;
 
 export interface Caller {
   cell?: string;

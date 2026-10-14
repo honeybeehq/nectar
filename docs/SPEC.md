@@ -339,8 +339,8 @@ tailnet port range whose loopback target is dead, §10.2.)
     when `HIVE_CELL` is set, the parent of the working directory's `HIVE_CELL_SPACE`
     ancestor (the Cell root, e.g. `~/.hive/v2/cells/<cell>`).
   - Logs: one `control` event per `publish`/`rm`/`stop`/`touch` and per failed request.
-  - On SIGTERM nectard stops accepting connections and waits up to 20 s for requests in
-    flight before closing them. A publish cut off after that is left as an interrupted
+  - On SIGTERM nectard stops accepting connections and waits up to 15 s for requests in
+    flight before closing them, inside launchd's default 20 s exit timeout and systemd's 90 s. A publish cut off after that is left as an interrupted
     local publish would be (`rm --force` cleans it up).
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
   touch, gc, error), one JSON line each, go to
@@ -1074,8 +1074,25 @@ no others: it has no command, environment or recipe field. The socket is reachab
 by the same user on the same host (0600 socket in a 0700 directory). Publish paths are
 limited to the home directory and the caller's Cell, and Nectar's own state and the
 usual key directories are excluded, so a Cell cannot ask nectard to serve files its
-sandbox hides from it elsewhere. Running a Cell's serves under the Cell's own sandbox
-profile is the hardening step if Cells ever hold less-trusted code.
+sandbox hides from it elsewhere. Git is the other way a repo can make nectard run something,
+through its own config and hooks. So every git command Nectar runs (rev-parse, branch,
+status, worktree add/remove/prune, reset) runs with global and system config ignored
+(`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`; a Linux Cell can write
+`~/.config/git/config`). It runs with every transport refused (`GIT_ALLOW_PROTOCOL=none`,
+`protocol.*.allow=never`) and lazy fetch off (`GIT_NO_LAZY_FETCH=1`), so a planted
+promisor or `ext::` remote never runs. It pins `core.hooksPath=/dev/null`,
+`core.fsmonitor=false`, `gc.auto=0`, `maintenance.auto=false` and submodule recursion off.
+Every filter driver and `hook.*` entry in the repo's config (including `include.path`,
+`includeIf` and worktree config) is neutralized. The filter's `smudge`, `clean` and
+`process` become empty with `required=false`, and the hook command becomes `true`.
+These overrides go through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`, so a key such as
+`filter.a=b.smudge` cannot escape them. If nectard cannot read the repo's config, the
+command fails. A partial clone (`extensions.partialClone` or a promisor remote) is
+refused with `E_CHECKOUT`. Files check out unfiltered, so Git LFS files arrive as
+pointers. A test plants all of
+these in a repo and publishes, republishes and borrows it through nectard. Running a
+Cell's serves under the Cell's own sandbox profile is the hardening step if Cells ever
+hold less-trusted code.
 
 ## 10. Resource limits, GC, failure modes
 

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { chmod, lstat, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   authorizePath,
@@ -20,7 +20,7 @@ import {
 } from "../src/control.js";
 import { NectarError } from "../src/errors.js";
 import { getPaths } from "../src/paths.js";
-import { stopProcessGroup } from "../src/commands.js";
+import { runCommand, stopProcessGroup } from "../src/commands.js";
 import { tempDir } from "./helpers.js";
 
 const servers: ControlServer[] = [];
@@ -196,6 +196,98 @@ describe("nectard control socket", () => {
       }).on("error", reject).end();
     });
     expect(notFound).toBe(404);
+  });
+  it("never runs hooks, fsmonitor or filter drivers planted in a Cell repo's git config", async () => {
+    const { home, socket, cell } = await setup();
+    const repo = path.join(cell, "planted");
+    const markers = path.join(cell, "markers");
+    await mkdir(markers, { recursive: true });
+    const git = async (...args: string[]): Promise<void> => {
+      const result = await runCommand("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: repo });
+      if (result.exitCode !== 0) throw new Error(result.stderr);
+    };
+    await mkdir(repo, { recursive: true });
+    await git("init", "-q", "-b", "main");
+    await writeFile(path.join(repo, "nectar.toml"), 'name = "planted"\n\n[web]\nserve = "exec node server.mjs"\nready_path = "/"\n');
+    await writeFile(
+      path.join(repo, "server.mjs"),
+      'import http from "node:http";\nimport { readFileSync } from "node:fs";\nhttp.createServer((q, r) => r.end(readFileSync("page.txt", "utf8"))).listen(Number(process.env.PORT), "127.0.0.1");\n',
+    );
+    await writeFile(path.join(repo, "page.txt"), "plain page\n");
+    await writeFile(path.join(repo, "equals.txt"), "e\n");
+    await writeFile(path.join(repo, "global.txt"), "g\n");
+    await writeFile(path.join(repo, ".gitattributes"), "page.txt filter=evil\nserver.mjs filter=inc\nequals.txt filter=a=b\nglobal.txt filter=glob\n");
+    await git("add", "-A");
+    await git("commit", "-qm", "planted");
+    const plant = (name: string): string => `sh -c 'touch ${path.join(markers, name)}; cat'`;
+    await git("config", "filter.evil.smudge", plant("smudge"));
+    await git("config", "filter.evil.clean", plant("clean"));
+    await git("config", "filter.evil.process", `sh -c 'touch ${path.join(markers, "process")}'`);
+    await git("config", "filter.evil.required", "true");
+    await writeFile(path.join(cell, "included.cfg"), `[filter "inc"]\n\tsmudge = ${plant("included")}\n`);
+    await git("config", "include.path", path.join(cell, "included.cfg"));
+    await git("config", "filter.a=b.smudge", plant("equals"));
+    const xdg = path.join(cell, "xdg");
+    await mkdir(path.join(xdg, "git"), { recursive: true });
+    await writeFile(path.join(xdg, "git", "config"), `[filter "glob"]\n\tsmudge = ${plant("global")}\n`);
+    vi.stubEnv("XDG_CONFIG_HOME", xdg);
+    const script = async (file: string, name: string): Promise<void> => {
+      await writeFile(file, `#!/bin/sh\ntouch ${path.join(markers, name)}\n`);
+      await chmod(file, 0o755);
+    };
+    await script(path.join(cell, "fsmonitor.sh"), "fsmonitor");
+    await git("config", "core.fsmonitor", path.join(cell, "fsmonitor.sh"));
+    for (const hook of ["post-checkout", "reference-transaction", "pre-auto-gc", "post-index-change"]) {
+      await script(path.join(repo, ".git", "hooks", hook), hook);
+    }
+
+    const publish = async (args: Record<string, unknown>): Promise<{ env: string; urls: { local: string } }> =>
+      (await callDaemon(socket, "publish", { nectar_home: home, caller: { cell }, args })) as { env: string; urls: { local: string } };
+    const first = await publish({ path: repo });
+    const record = (): Promise<{ serve: { pgid: number } }> =>
+      readFile(path.join(home, "envs", `${first.env}.json`), "utf8").then((text) => JSON.parse(text) as { serve: { pgid: number } });
+    pgids.push((await record()).serve.pgid);
+    expect(await get(first.urls.local)).toEqual({ status: 200, body: "plain page\n" });
+    const again = await publish({ path: repo });
+    pgids.push((await record()).serve.pgid);
+    expect(await get(again.urls.local)).toEqual({ status: 200, body: "plain page\n" });
+    await callDaemon(socket, "rm", { nectar_home: home, caller: {}, args: { env: first.env, force: true } });
+    const borrowed = await publish({ path: repo, worktree: repo, name: undefined });
+    pgids.push((await record()).serve.pgid);
+    expect(borrowed.env).toBe(first.env);
+    await callDaemon(socket, "rm", { nectar_home: home, caller: {}, args: { env: first.env, force: true } });
+    expect(await readdir(markers)).toEqual([]);
+  });
+
+  it("refuses a partial clone so a planted promisor remote is never fetched from", async () => {
+    const { home, socket, cell } = await setup();
+    const source = path.join(cell, "source");
+    const clone = path.join(cell, "partial");
+    const marker = path.join(cell, "lazy-fetch");
+    await mkdir(source, { recursive: true });
+    const run = async (cwd: string, ...args: string[]): Promise<void> => {
+      const result = await runCommand("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd });
+      if (result.exitCode !== 0) throw new Error(result.stderr);
+    };
+    await run(source, "init", "-q", "-b", "main");
+    await writeFile(path.join(source, "nectar.toml"), 'name = "partial"\n\n[web]\nserve = "exec node server.mjs"\n');
+    await writeFile(path.join(source, "server.mjs"), "export {};\n");
+    await run(source, "add", "-A");
+    await run(source, "commit", "-qm", "source");
+    await run(source, "config", "uploadpack.allowFilter", "true");
+    await run(source, "config", "uploadpack.allowAnySHA1InWant", "true");
+    await run(cell, "clone", "-q", "--no-local", "--filter=blob:none", "--no-checkout", `file://${source}`, clone);
+    const missing = await runCommand("git", ["rev-list", "--objects", "--missing=print", "HEAD"], { cwd: clone });
+    expect(missing.stdout).toMatch(/^\?/m);
+    await run(clone, "config", "remote.origin.url", `ext::sh -c touch% ${marker}`);
+    await run(clone, "config", "protocol.ext.allow", "always");
+    await writeFile(path.join(clone, "nectar.toml"), 'name = "partial"\n\n[web]\nserve = "exec node server.mjs"\n');
+    await writeFile(path.join(clone, "server.mjs"), "");
+    await expect(callDaemon(socket, "publish", { nectar_home: home, caller: { cell }, args: { path: clone } })).rejects.toMatchObject({
+      code: "E_CHECKOUT",
+      message: expect.stringContaining("partial clone") as string,
+    });
+    expect(await stat(marker).then(() => true, () => false)).toBe(false);
   });
 });
 

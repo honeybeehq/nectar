@@ -362,8 +362,11 @@ tailnet port range whose loopback target is dead, §10.2.)
   touch, gc, tailscale, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
   Quiet cycles write nothing. A `tailscale` event is written for every failed tailscale
-  call nectard makes (status, serve, serve status): `{ok, binary, source, argv, exit_code,
-  signal, stderr, duration_ms, cause}`, with `stderr` cut to 500 characters. With
+  call nectard makes (status, serve, serve status). A LocalAPI call logs `{api: "localapi",
+  ok, endpoint, method, path, status, duration_ms, cause}`, where `endpoint` is the socket
+  path or the loopback port and never the token. A CLI call logs `{api: "cli", ok, binary,
+  source, argv, exit_code, signal, stderr, duration_ms, cause, localapi}`, where `stderr` is cut
+  to 500 characters and `localapi` says why the LocalAPI was not reachable. With
   `NECTAR_DEBUG=1` (in the unit's environment or the CLI's) every call is logged, including
   the CLI's own direct calls, which add `by: "cli"` and `pid`.
 
@@ -403,6 +406,29 @@ re-pointing, gc, doctor, expose, the pack store, remote refs) uses one resolver,
 order: `NECTAR_TAILSCALE_BIN`; `tailscale` on `PATH`; the Mac app's CLI
 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`; `/opt/homebrew/bin/tailscale`;
 `/usr/local/bin/tailscale`. `nectar doctor` names the binary it used and where it came from.
+
+**Talking to tailscaled.** Status, the serve config and WhoIs go to tailscaled's LocalAPI
+first (`src/localapi.ts`, plain `node:http`). The CLI is used only when no LocalAPI endpoint
+answers. Nectar tries endpoints in the order Tailscale's own CLI uses (`safesocket`):
+`NECTAR_TAILSCALE_SOCKET` alone when it is set. On macOS: the App Store app's loopback port and
+token, read from the name of the `sameuserproof-<port>-<token>` file that `lsof -c IPNExtension`
+shows the extension holding open; failing that, a listing of
+`~/Library/Group Containers/*.io.tailscale.ipn.macos/`; the standalone app's
+`/Library/Tailscale/ipnport` link and `sameuserproof-<port>`; then `/var/run/tailscaled.socket`.
+On Linux: `/var/run/tailscale/tailscaled.sock`, then `/run/tailscale/tailscaled.sock`. The token
+goes in an HTTP basic-auth header and is never logged, shown or stored. A port that answers 401
+counts as stale and the next endpoint is tried. Serve changes read `serve-config` with its
+ETag, change only the one entry and POST the whole config back with `If-Match`. On 412 they
+read and try again, up to 4 attempts. Adding `:N` sets `TCP[N] = {HTTPS: true}` and
+`Web["<host>:N"].Handlers["/"]`, and drops that port's Funnel, like `tailscale serve --bg
+--https=N <target>`. Removing it deletes every mount on `<host>:N`, `TCP[N]` and its Funnel, like
+`tailscale serve --https=N off`. Both refuse a port that forwards raw TCP. Every other key is
+written back exactly as read. An answer from a reachable LocalAPI is final: a 403 "serve config
+denied" or a `BackendState` other than `Running` is reported, not retried through the CLI.
+doctor's `tailscale` check carries `api: "localapi" | "cli"` and `localapi` (the endpoint).
+`mesh_error` ends with `(api: localapi)`, or with `(api: cli; <why the LocalAPI was not
+reachable>)`.
+
 Nectar runs the CLI with its own environment minus launchd's job identity (`XPC_SERVICE_NAME`,
 `XPC_FLAGS`), so a CLI started from nectard's launchd agent sees what it sees in a login
 shell. `tailscale status --json` and `serve status --json` get 15 s, `serve` changes 20 s.
@@ -1094,9 +1120,10 @@ output when it refused the mesh entry, else null. The warning quotes it. When ta
 denied the change ("Access denied: serve config denied"), the warning says this user is not a
 Tailscale operator and to run `sudo tailscale set --operator=$USER` once. Nectar never runs
 sudo. When Nectar could not get a tailnet name at all, the warning is "tailscale unavailable:
-<cause>" and `mesh_error` is that cause: the binary and its source, and why the call failed
-(exit code and stderr, a signal, a timeout, output that is not status JSON, or a
-`BackendState` other than `Running`).
+<cause>" and `mesh_error` is that cause: the LocalAPI endpoint, or the binary and its source,
+and why the call failed (exit code and stderr, a signal, a timeout, output that is not status
+JSON, or a `BackendState` other than `Running`). Every `mesh_error` ends with the API that was
+used (§4.5 "Talking to tailscaled").
 
 `result.packet_fields` is the ergonomic core: **the exact strings to copy onto the Forum
 packet**, keyed with Forum's snake_case names. Desktop publish fills `testpack_ref`
@@ -1315,8 +1342,7 @@ upstream is reported by `env-resources` along with pending gc transitions.
 
 **Serve rights.** On Linux, `tailscale-serve` asks tailscaled whether this user may change
 the serve config without changing it: it POSTs a body that is not JSON to the LocalAPI
-`/localapi/v0/serve-config` on tailscaled's socket (`/var/run/tailscale/tailscaled.sock` or
-`/run/tailscale/tailscaled.sock`; `NECTAR_TAILSCALE_SOCKET` overrides). tailscaled checks
+`/localapi/v0/serve-config` on the endpoint found as in §4.5 "Talking to tailscaled". tailscaled checks
 write permission before it parses the body, so a 403 "serve config denied" means the user is
 not a Tailscale operator (fail, hint `sudo tailscale set --operator=$USER`), and any other
 answer means it may. Without a socket it warns; on macOS it is not probed. `--fix` never

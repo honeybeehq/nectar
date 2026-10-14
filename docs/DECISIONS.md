@@ -702,3 +702,21 @@ it did. 443 there belongs to portless's own Serve entry by design, and no Nectar
 443 through Serve, so a failure kept doctor unhealthy forever over something Nectar must not
 touch; (c) adds config for a check that has no failure case. (d) hands consumers a URL that
 answers nothing, or answers for whoever takes the port next.
+
+## D32 — Talk to tailscaled through the LocalAPI, keep the CLI as the fallback
+
+**Chose:** status, the serve config and WhoIs use tailscaled's LocalAPI over its Unix
+socket, or over the macOS app's loopback port with the `sameuserproof` token. Endpoints are
+found the way Tailscale's own CLI finds them. Serve changes are an ETag read-modify-write
+that touches only Nectar's one `<host>:N` entry, with the same semantics as `tailscale serve
+--bg --https=N` and `--https=N off`. The CLI stays as the fallback when no endpoint answers.
+Which API answered is in the log line, doctor and `mesh_error`. (SPEC §4.5.)
+**Alternatives:** (a) keep the CLI and fix its environment further; (b) LocalAPI only;
+(c) let the LocalAPI fail over to the CLI on any error.
+**Why:** on mini03, the app-bundle CLI started from nectard's LaunchAgent tries to start the
+GUI ("Tailscale.CLIError error 3"). It prints no status JSON, and `serve status --json` exits 0
+with empty output, so every Mac's nectard hands out no mesh URL. (a) cannot fix an app binary
+that decides it is the GUI. (b) breaks hosts where only the CLI works. (c) would turn a
+deliberate refusal (403 for a non-operator, `BackendState` Stopped) into a second, slower
+refusal with a less precise message. Reading the token from `lsof` rather than from the group
+container avoids macOS's prompt for other apps' data, which a LaunchAgent cannot answer.

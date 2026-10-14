@@ -292,7 +292,7 @@ export interface FakeLocalApiOptions {
   token?: string;
   status?: unknown;
   config?: unknown;
-  whois?: Record<string, unknown>;
+  whois?: Record<string, unknown> | ((addr: string) => unknown);
   postStatus?: number;
   postBody?: string;
   conflicts?: number;
@@ -334,8 +334,10 @@ export async function fakeLocalApi(listen: { socket: string } | { tcp: true }, o
       if (url.pathname === "/localapi/v0/status") {
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(options.status ?? { BackendState: "Running", Self: { DNSName: "fixture.tailtest.ts.net." } }));
       } else if (url.pathname === "/localapi/v0/whois") {
-        const found = options.whois?.[url.searchParams.get("addr") ?? ""];
+        const addr = url.searchParams.get("addr") ?? "";
+        const found = typeof options.whois === "function" ? options.whois(addr) : options.whois?.[addr];
         if (found === undefined) response.writeHead(404).end("no match for IP:port\n");
+        else if (typeof found === "number") response.writeHead(found).end("whois failed\n");
         else response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(found));
       } else if (url.pathname === "/localapi/v0/serve-config" && request.method === "GET") {
         response.writeHead(200, { "Content-Type": "application/json", Etag: etag() }).end(JSON.stringify(config));

@@ -688,8 +688,8 @@ Tailscale IPs, or a WhoIs node equal to the node itself, is `E_FORBIDDEN`. A non
 within 10 minutes and at most 32 connections are open.
 As planned: the listener is off unless `remote.listen` (`nectar daemon install --remote`),
 binds only the node's Tailscale IPv4 on 8441, never a wildcard, and WhoIs runs on the raw
-peer through the LocalAPI (`tailscale whois --json` where there is no tailscaled socket)
-before the body is read; a failed WhoIs is `E_FORBIDDEN`. `publisher.node`,
+peer through the shared LocalAPI client (src/localapi.ts, D32, so the macOS app's
+sameuserproof port works under launchd; there is no CLI fallback) before the body is read; a failed WhoIs is `E_FORBIDDEN`. `publisher.node`,
 `node_name` and `login` come from WhoIs. A non-owner may `touch`, `stop` and `rm` only
 its own envs. A ref passed to the listener is refused, so nothing is relayed onward. The
 client finds the node's address in tailscaled's status and needs no MagicDNS, which

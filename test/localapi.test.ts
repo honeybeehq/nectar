@@ -194,7 +194,7 @@ describe("LocalAPI whois", () => {
   it("names the tailnet peer behind an address and says when there is none", async () => {
     await tcpApi({ whois: { "100.64.0.7:51234": node } });
     expect(await whoIs("100.64.0.7:51234")).toEqual({
-      peer: { loginName: "q@example.com", displayName: "Q", nodeName: "laptop", dnsName: "laptop.tailtest.ts.net", nodeId: "nX1", userId: 42, tailscaleIPs: ["100.64.0.7", "fd7a::7"], tags: [] },
+      peer: { loginName: "q@example.com", displayName: "Q", nodeName: "laptop", dnsName: "laptop.tailtest.ts.net", nodeId: "nX1", userId: 42, nodeUserId: 42, tailscaleIPs: ["100.64.0.7", "fd7a::7"], tags: [] },
     });
     expect(await whoIs("10.1.2.3:80")).toEqual({ reason: "10.1.2.3:80 is not a tailnet peer", notFound: true });
   });

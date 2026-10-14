@@ -3,10 +3,12 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import zlib from "node:zlib";
-import { mkdir, readdir, rename, rm, rmdir } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { extractTar, MAX_ENTRIES, MAX_TREE_BYTES } from "./archive.js";
 import { currentPublisher } from "./commands.js";
+import { daemonLogFile } from "./daemon.js";
+import type { DoctorCheck } from "./doctor.js";
 import { errorEnvelope, successEnvelope, type ErrorEnvelope, type SuccessEnvelope } from "./envelope.js";
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import { commitTree } from "./git.js";
@@ -14,7 +16,7 @@ import type { NectarPaths } from "./paths.js";
 import { validateEnvName } from "./refs.js";
 import { NectarService } from "./service.js";
 import { StateStore } from "./state.js";
-import { localApi } from "./tailscale.js";
+import { describeEndpoint, readStatus, whoIs as askWhoIs, type StatusJson, type StatusNodeJson, type TailnetPeer } from "./localapi.js";
 import type { DepRecord, EnvRecord, MachineConfig, Publisher, RemoteConfig } from "./types.js";
 
 export const REMOTE_API = 1;
@@ -31,25 +33,9 @@ const RETRY_MS = 60_000;
 const RECEIVE_TIMEOUT_MS = 10 * 60_000;
 const HEADERS_TIMEOUT_MS = 30_000;
 const MAX_CONNECTIONS = 32;
+const PROBE_TIMEOUT_MS = 3_000;
 
-interface StatusNode {
-  ID?: string;
-  HostName?: string;
-  DNSName?: string;
-  TailscaleIPs?: string[];
-  UserID?: number;
-}
-
-interface LocalStatus {
-  BackendState?: string;
-  Self?: StatusNode;
-  Peer?: Record<string, StatusNode>;
-}
-
-export interface WhoIs {
-  Node: { StableID: string; Name?: string; ComputedName?: string; User?: number; Tags?: string[] };
-  UserProfile?: { ID?: number; LoginName?: string };
-}
+export type Identity = { peer: TailnetPeer; reason?: undefined } | { peer?: undefined; reason: string };
 
 export interface RemoteCaller {
   node_id: string;
@@ -76,22 +62,25 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function localStatus(): Promise<LocalStatus | undefined> {
-  const status = await localApi("/localapi/v0/status", ["status", "--json"]);
-  return isObject(status) ? status : undefined;
+export async function localStatus(): Promise<StatusJson | undefined> {
+  const read = await readStatus();
+  return read.ok ? read.status : undefined;
 }
 
-export async function whoIs(address: string): Promise<WhoIs | undefined> {
-  const found = await localApi(`/localapi/v0/whois?addr=${encodeURIComponent(address)}`, ["whois", "--json", address]);
-  if (!isObject(found) || !isObject(found.Node) || typeof found.Node.StableID !== "string" || found.Node.StableID === "") return undefined;
-  return found as unknown as WhoIs;
+export async function whoIs(address: string): Promise<Identity> {
+  try {
+    const found = await askWhoIs(address);
+    return found.peer === undefined ? { reason: found.reason } : { peer: found.peer };
+  } catch (error) {
+    return { reason: `Tailscale LocalAPI whois failed: ${asNectarError(error).message}` };
+  }
 }
 
 function nodeName(dnsName: string | undefined, fallback: string | undefined): string {
   return (dnsName?.replace(/\.$/, "").split(".")[0] ?? fallback ?? "").toLowerCase();
 }
 
-function ipv4(node: StatusNode | undefined): string | undefined {
+function ipv4(node: StatusNodeJson | undefined): string | undefined {
   return node?.TailscaleIPs?.find((address) => net.isIPv4(address));
 }
 
@@ -115,11 +104,11 @@ function forbidden(message: string, details: Record<string, unknown> = {}): Nect
   return new NectarError("E_FORBIDDEN", message, details);
 }
 
-export function authorize(who: WhoIs, remote: RemoteConfig | undefined, owner: number | undefined): RemoteCaller {
-  const tagged = (who.Node.Tags ?? []).length > 0;
-  const login = tagged ? null : (who.UserProfile?.LoginName ?? null);
-  const operator = owner !== undefined && !tagged && who.Node.User === owner && who.UserProfile?.ID === owner;
-  const caller: RemoteCaller = { node_id: who.Node.StableID, node_name: nodeName(who.Node.Name, who.Node.ComputedName), login, operator };
+export function authorize(peer: TailnetPeer, remote: RemoteConfig | undefined, owner: number | undefined): RemoteCaller {
+  const tagged = peer.tags.length > 0;
+  const login = tagged || peer.loginName === "" ? null : peer.loginName;
+  const operator = owner !== undefined && owner > 0 && login !== null && peer.userId === owner && peer.nodeUserId === owner;
+  const caller: RemoteCaller = { node_id: peer.nodeId, node_name: nodeName(peer.dnsName, peer.nodeName), login, operator };
   const allow = remote?.allow;
   let allowed: boolean;
   if (allow === undefined) allowed = operator;
@@ -446,32 +435,34 @@ export async function startRemoteServer(
   options: { address?: string; port?: number; log?: (event: Record<string, unknown>) => void } = {},
 ): Promise<RemoteServer> {
   const log = options.log ?? (() => undefined);
-  const status = await localStatus();
-  const owner = status?.Self?.UserID;
-  const address = options.address ?? ipv4(status?.Self);
+  const read = await readStatus();
+  if (!read.ok) throw new NectarError("E_TAILNET_DOWN", `nectard cannot read this node's tailnet status, so it does not listen: ${read.reason}`);
+  const status = read.status;
+  const owner = status.Self?.UserID;
+  const address = options.address ?? ipv4(status.Self);
   if (address === undefined) throw new NectarError("E_TAILNET_DOWN", "tailscale is not running here, so nectard has no tailnet address to listen on");
   if (!net.isIP(address) || address === "0.0.0.0" || address === "::") throw new NectarError("E_USAGE", `nectard listens only on a tailnet address, not ${address}`);
   const port = options.port ?? remotePort();
-  const host = nodeName(status?.Self?.DNSName, status?.Self?.HostName);
-  const selfId = status?.Self?.ID;
-  const selfAddresses = new Set(status?.Self?.TailscaleIPs ?? []);
+  const host = nodeName(status.Self?.DNSName, status.Self?.HostName);
+  const selfId = status.Self?.ID;
+  const selfAddresses = new Set(status.Self?.TailscaleIPs ?? []);
   const server = http.createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://nectard");
     const match = /^\/v1\/([a-z]+)$/.exec(url.pathname);
     const op = match?.[1] ?? "";
     const command = isRemoteOp(op) ? op : "nectar";
     let caller: RemoteCaller | undefined;
-    let who: WhoIs | undefined;
+    let who: Identity | undefined;
     const handle = async (): Promise<unknown> => {
       const peer = request.socket.remoteAddress ?? "";
       who = await whoIs(net.isIPv6(peer) ? `[${peer}]:${request.socket.remotePort}` : `${peer}:${request.socket.remotePort}`);
-      if (who === undefined) throw forbidden(`tailscaled could not identify ${peer}; nectard serves only known tailnet nodes`);
-      if (selfAddresses.has(peer.replace(/^::ffff:/, "")) || (selfId !== undefined && who.Node.StableID === selfId)) {
-        throw forbidden("A caller on this node uses the control socket, not the tailnet listener");
+      if (who.peer === undefined) throw forbidden(`tailscaled could not identify ${peer}; nectard serves only known tailnet nodes`, { refused: "whois" });
+      if (selfAddresses.has(peer.replace(/^::ffff:/, "")) || (selfId !== undefined && who.peer.nodeId === selfId)) {
+        throw forbidden("A caller on this node uses the control socket, not the tailnet listener", { refused: "self" });
       }
       const config = await strictConfig(paths);
       if (config.remote?.listen !== true) throw new NectarError("E_REMOTE", "The tailnet listener is turned off on this node", { hint: REMOTE_INSTALL_HINT });
-      caller = authorize(who, config.remote, owner);
+      caller = authorize(who.peer, config.remote, owner);
       if (request.method === "GET" && url.pathname === "/v1/hello") return { api: REMOTE_API, ops: [...REMOTE_OPS], host, caller: caller.node_name };
       if (request.method !== "POST" || !isRemoteOp(op)) throw new NectarError("E_USAGE", `nectard has no ${request.method ?? ""} ${url.pathname}`);
       const body = op === "publish" ? requestHeader(request) : await readJson(request);
@@ -487,8 +478,9 @@ export async function startRemoteServer(
         log({
           event: "remote",
           op,
-          node: who?.Node.StableID ?? null,
-          login: who?.UserProfile?.LoginName ?? null,
+          node: who?.peer?.nodeId ?? null,
+          login: who?.peer?.loginName || null,
+          ...(who?.reason === undefined ? {} : { whois: who.reason }),
           ok: envelope.ok,
           ...(envelope.ok ? {} : { code: envelope.error.code }),
         });
@@ -510,7 +502,7 @@ export async function startRemoteServer(
   });
   const bound = server.address();
   const actual = typeof bound === "object" && bound !== null ? bound.port : port;
-  log({ event: "remote_listen", address, port: actual });
+  log({ event: "remote_listen", address, port: actual, api: "localapi", endpoint: describeEndpoint(read.endpoint) });
   return {
     address,
     port: actual,
@@ -591,4 +583,81 @@ export async function callRemote(host: string, op: RemoteOp, payload: RemoteRequ
   if (envelope.ok !== false || failure === undefined) throw new NectarError("E_REMOTE", `nectard on ${host} sent an unexpected reply`, { host });
   const { code, message, ...details } = failure;
   throw new NectarError(isErrorCode(code) ? code : "E_REMOTE", typeof message === "string" ? `${host}: ${message}` : `nectard on ${host} failed`, { ...details, host });
+}
+
+function probeHello(address: string, port: number): Promise<{ envelope: unknown } | { reason: string }> {
+  return new Promise((resolve) => {
+    const outgoing = http.get({ host: address, port, path: "/v1/hello" }, (response) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size <= MAX_JSON_BYTES) chunks.push(chunk);
+      });
+      response.on("end", () => {
+        try {
+          resolve({ envelope: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown });
+        } catch {
+          resolve({ envelope: undefined });
+        }
+      });
+      response.on("error", (error) => resolve({ reason: error.message }));
+    });
+    outgoing.setTimeout(PROBE_TIMEOUT_MS, () => outgoing.destroy(new Error(`no answer within ${PROBE_TIMEOUT_MS / 1000}s`)));
+    outgoing.on("error", (error) => resolve({ reason: (error as NodeJS.ErrnoException).code ?? error.message }));
+  });
+}
+
+async function lastLogged(paths: NectarPaths, wanted: (event: Record<string, unknown>) => boolean): Promise<Record<string, unknown> | undefined> {
+  const lines = (await readFile(daemonLogFile(paths), "utf8").catch(() => "")).split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const event = JSON.parse(lines[index] ?? "") as unknown;
+      if (isObject(event) && wanted(event)) return event;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export async function listenerCheck(paths: NectarPaths, config: MachineConfig): Promise<DoctorCheck> {
+  if (config.remote?.listen !== true) {
+    return {
+      name: "remote",
+      status: "info",
+      listener: "off",
+      message: "The tailnet listener is off, so other nodes cannot publish here or resolve this node's refs",
+      hint: REMOTE_INSTALL_HINT,
+    };
+  }
+  const port = remotePort();
+  const read = await readStatus();
+  const api = { api: "localapi" as const, localapi: read.endpoint === undefined ? null : describeEndpoint(read.endpoint) };
+  const failed = (message: string, hint: string): DoctorCheck => ({ name: "remote", status: "fail", listener: "failed", message, hint, ...api });
+  if (!read.ok) return failed(`remote.listen is on, but the Tailscale LocalAPI does not answer here, so nectard cannot listen or identify callers: ${read.reason}`, "Fix the tailscale check first");
+  const address = ipv4(read.status.Self);
+  if (address === undefined) return failed("remote.listen is on, but this node has no Tailscale IPv4 address to listen on", "Fix the tailscale check first");
+  const where = `${address}:${port}`;
+  const probe = await probeHello(address, port);
+  if ("reason" in probe) {
+    const last = await lastLogged(paths, (event) => event.event === "remote_listen" || event.event === "remote_unavailable");
+    const logged = last?.event === "remote_unavailable" && typeof last.message === "string" ? `; nectard logged: ${last.message}` : "";
+    return failed(`remote.listen is on, but nothing answers on ${where} (${probe.reason})${logged}`, `Check that nectard runs (nectar daemon status), then restart it with \`${REMOTE_INSTALL_HINT}\``);
+  }
+  const error = isObject(probe.envelope) && probe.envelope.ok === false && isObject(probe.envelope.error) ? probe.envelope.error : undefined;
+  if (error?.code === "E_FORBIDDEN" && error.refused === "self") {
+    return { name: "remote", status: "pass", listener: "listening", address: where, message: `nectard listens on ${where} and identifies callers through the LocalAPI`, ...api };
+  }
+  if (error?.code === "E_FORBIDDEN" && error.refused === "whois") {
+    const last = await lastLogged(paths, (event) => event.event === "remote" && typeof event.whois === "string");
+    return {
+      ...failed(
+        `nectard listens on ${where}, but tailscaled WhoIs fails inside nectard, so it refuses every caller${typeof last?.whois === "string" ? `: ${last.whois}` : ""}`,
+        "nectard reaches tailscaled through the same LocalAPI as the tailscale check; on macOS see the LocalAPI notes in the SPEC",
+      ),
+      address: where,
+    };
+  }
+  return failed(`Something answers on ${where}, but not as nectard's tailnet listener`, "Find what holds the port; nectard needs it for the tailnet listener");
 }

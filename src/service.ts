@@ -102,7 +102,7 @@ import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, staticFiles, type StaticSite } from "./static-site.js";
 import { MAX_TREE_BYTES, packFiles } from "./archive.js";
-import { callRemote, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
+import { callRemote, listenerCheck, MAX_ARCHIVE_BYTES, sourceDir, type RemoteOp } from "./remote.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
@@ -2982,6 +2982,7 @@ export class NectarService {
     });
     const nectard = await this.nectardState(noDaemon ? "--no-daemon" : config.daemon === "disabled" ? `daemon: "disabled" in ${this.paths.config}` : undefined);
     if (nectard.check !== undefined) checks.push(nectard.check);
+    checks.push(await listenerCheck(this.paths, config));
     checks.push(await this.pathToolsCheck(nectard.unitPath));
     const packServerLive = await this.packServerAlive(config);
     const proxyPresent = statusHasProxyTarget(status, 8440, `http://127.0.0.1:${config.pack_server_port}`);

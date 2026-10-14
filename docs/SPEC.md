@@ -367,15 +367,19 @@ tailnet port range whose loopback target is dead, §10.2.)
   tailscale is down at start it logs `remote_unavailable` and retries every minute.
   - Every request, `GET /v1/hello` included, is authenticated before its body is read:
     nectard asks tailscaled `WhoIs(<peer ip>:<peer port>)` of the raw TCP peer through the
-    LocalAPI (`/localapi/v0/whois` on the tailscaled socket; `tailscale whois --json` where
-    there is no socket, as on the macOS app). No answer is `E_FORBIDDEN` (HTTP 403). So is
+    LocalAPI (`/localapi/v0/whois`, at the endpoint found as in "Talking to tailscaled"
+    below, the macOS app's sameuserproof port included; never the CLI). A WhoIs error, an
+    unknown peer, an answer without a well-formed node (a string StableID, list Addresses and Tags)
+    or an unreachable LocalAPI is `E_FORBIDDEN` (HTTP
+    403, `refused: "whois"`), and the `remote` log event carries the reason as `whois`. So is
     a caller on this node itself (its peer address is one of this node's Tailscale IPs,
-    or its WhoIs node is this node): local processes use the 0600 control socket, and any
+    or its WhoIs node is this node; `refused: "self"`): local processes use the 0600 control socket, and any
     user or container on the host could otherwise borrow the owner's identity here.
     A request must arrive within 10 minutes (headers within 30 s), and at most 32
     connections are open at once.
   - Authorization reads `nectar.json` on every request. `remote.allow` absent: only the
-    node owner's own untagged nodes (WhoIs user = the user that owns this node). Present:
+    node owner's own untagged nodes (WhoIs `Node.User` and `UserProfile.ID` both equal the
+    user that owns this node, and the profile has a login). Present:
     exactly the entries `{node_id: "<stable node ID>"}` or `{login: "<tailnet login>"}`
     (a login never matches a tagged node). An empty list, a list that is not an array, or
     a `nectar.json` that cannot be read refuses everyone (`E_FORBIDDEN`). A caller that is
@@ -1153,6 +1157,11 @@ nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # config (Linux) · a 443 serve entry (warning, left alone) · no funnel · Serve entries in Nectar's tailnet range, classified
     # owned / orphan / foreign / ambiguous · dead or expired envs still holding a process or
     # Serve entry · gc recency · nectard installed, active and pointing at this install ·
+    # remote: the tailnet listener (listener: off | listening, with address <ip>:8441 |
+    # failed, with the reason; api and localapi as in the tailscale check). doctor asks
+    # the listener for /v1/hello from this node: refused as "self" means it listens and
+    # WhoIs works, refused as "whois" means it refuses every caller (reason from
+    # nectard.log), no answer is failed with nectard's last remote_unavailable ·
     # tools env recipes need on PATH and on nectard's PATH · pack store on 8440 · port
     # ranges · pack quota. --fix runs gc, removes orphan entries, releases dead envs,
     # installs or reinstalls nectard and restarts the pack server (testpacks only: with no

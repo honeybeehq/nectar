@@ -5,78 +5,105 @@ import zlib from "node:zlib";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extractTar, tarEntry } from "../src/archive.js";
 import { runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarError } from "../src/errors.js";
 import { getPaths } from "../src/paths.js";
-import { authorize, callRemote, peerView, startRemoteServer, type RemoteServer, type WhoIs } from "../src/remote.js";
+import { pinLocalApi, type TailnetPeer } from "../src/localapi.js";
+import { authorize, callRemote, listenerCheck, peerView, startRemoteServer, type RemoteServer } from "../src/remote.js";
 import { NectarService } from "../src/service.js";
-import { tempDir } from "./helpers.js";
+import { fakeLocalApi, tempDir } from "./helpers.js";
 
 const OWNER = 1001;
+const TOKEN = "0123456789abcdef0123";
 const servers: Array<{ close: () => Promise<void> }> = [];
 const pgids: number[] = [];
 
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.close();
   for (const pgid of pgids.splice(0)) await stopProcessGroup(pgid);
+  pinLocalApi(undefined);
   vi.unstubAllEnvs();
 });
 
-function who(overrides: { id?: string; name?: string; user?: number; login?: string; tags?: string[] } = {}): WhoIs {
+interface Who {
+  id?: string;
+  name?: string;
+  user?: number;
+  login?: string;
+  tags?: string[];
+}
+
+function whois(overrides: Who = {}): Record<string, unknown> {
   return {
     Node: {
       StableID: overrides.id ?? "nCLIENT",
       Name: `${overrides.name ?? "nodea"}.tail.ts.net.`,
       User: overrides.user ?? OWNER,
+      Addresses: ["100.64.0.9/32"],
       ...(overrides.tags === undefined ? {} : { Tags: overrides.tags }),
     },
-    UserProfile: { ID: overrides.user ?? OWNER, LoginName: overrides.login ?? "owner@example.com" },
+    UserProfile: { ID: overrides.user ?? OWNER, LoginName: overrides.login ?? "owner@example.com", DisplayName: "Owner" },
   };
 }
 
-interface FakeTailnet {
-  identity: WhoIs | undefined;
-  asked: string[];
+function who(overrides: Who = {}): TailnetPeer {
+  return {
+    loginName: overrides.login ?? "owner@example.com",
+    displayName: "Owner",
+    nodeName: overrides.name ?? "nodea",
+    dnsName: `${overrides.name ?? "nodea"}.tail.ts.net`,
+    nodeId: overrides.id ?? "nCLIENT",
+    userId: overrides.user ?? OWNER,
+    nodeUserId: overrides.user ?? OWNER,
+    tailscaleIPs: ["100.64.0.9"],
+    tags: overrides.tags ?? [],
+  };
 }
 
-async function fakeLocalApi(selfAddress = "127.0.0.3"): Promise<FakeTailnet> {
-  const directory = await tempDir("localapi");
-  const socket = path.join(directory, "tailscaled.sock");
-  const state: FakeTailnet = { identity: who(), asked: [] };
-  const server = http.createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://local-tailscaled.sock");
-    if (request.headers["sec-tailscale"] !== "localapi") {
-      response.writeHead(403).end();
-      return;
-    }
-    if (url.pathname === "/localapi/v0/status") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          BackendState: "Running",
-          Self: { ID: "nSELF", HostName: "nodeself", DNSName: "nodeself.tail.ts.net.", TailscaleIPs: [selfAddress], UserID: OWNER },
-          Peer: { key: { HostName: "nodeb", DNSName: "nodeb.tail.ts.net.", TailscaleIPs: ["127.0.0.1", "fd7a::1"] } },
-        }),
-      );
-      return;
-    }
-    if (url.pathname === "/localapi/v0/whois") {
-      state.asked.push(url.searchParams.get("addr") ?? "");
-      if (state.identity === undefined) {
-        response.writeHead(404).end("no match for IP:port");
-        return;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(state.identity));
-      return;
-    }
-    response.writeHead(404).end();
-  });
-  await new Promise<void>((resolve) => server.listen(socket, resolve));
-  servers.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) });
-  vi.stubEnv("NECTAR_TAILSCALE_SOCKET", socket);
+type Transport = "socket" | "token port";
+
+interface FakeTailnet {
+  identity: unknown;
+  asked: string[];
+  close: () => Promise<void>;
+}
+
+let transport: Transport = "socket";
+
+async function fakeTailnet(selfAddress = "127.0.0.3"): Promise<FakeTailnet> {
+  const state: FakeTailnet = { identity: whois(), asked: [], close: () => Promise.resolve() };
+  const options = {
+    status: {
+      BackendState: "Running",
+      Self: { ID: "nSELF", HostName: "nodeself", TailscaleIPs: [selfAddress], UserID: OWNER },
+      Peer: { key: { HostName: "nodeb", DNSName: "nodeb.tail.ts.net.", TailscaleIPs: ["127.0.0.1", "fd7a::1"] } },
+    },
+    postStatus: 403,
+    postBody: "serve config denied",
+    whois: (addr: string) => {
+      state.asked.push(addr);
+      return state.identity;
+    },
+  };
+  vi.stubEnv("NECTAR_TAILSCALE_BIN", "/bin/false");
+  const api =
+    transport === "socket"
+      ? await fakeLocalApi({ socket: path.join(await tempDir("localapi"), "tailscaled.sock") }, options)
+      : await fakeLocalApi({ tcp: true }, { ...options, token: TOKEN });
+  if (api.socket !== undefined) vi.stubEnv("NECTAR_TAILSCALE_SOCKET", api.socket);
+  else {
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", path.join(await tempDir("localapi-none"), "missing.sock"));
+    pinLocalApi({ kind: "tcp", port: api.port ?? 0, token: TOKEN, source: "app-store" });
+  }
+  let open = true;
+  state.close = async () => {
+    if (!open) return;
+    open = false;
+    await api.close();
+  };
+  servers.push({ close: () => state.close() });
   return state;
 }
 
@@ -86,7 +113,7 @@ async function homes(
 ): Promise<{ a: string; b: string; server: RemoteServer; tailnet: FakeTailnet }> {
   vi.stubEnv("NECTAR_TAILSCALE_BIN", "/bin/false");
   vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
-  const tailnet = await fakeLocalApi(selfAddress);
+  const tailnet = await fakeTailnet(selfAddress);
   const a = await tempDir("remote-a");
   const b = await tempDir("remote-b");
   await writeFile(path.join(a, "nectar.json"), JSON.stringify({ tailnet_host: "nodea" }));
@@ -159,6 +186,10 @@ describe("tailnet authorization", () => {
     expect(() => authorize(who({ user: 2002, login: "other@example.com" }), undefined, OWNER)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
     expect(() => authorize(who({ tags: ["tag:ci"] }), undefined, OWNER)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
     expect(() => authorize(who(), undefined, undefined)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
+    expect(() => authorize(who({ login: "" }), undefined, OWNER)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
+    expect(() => authorize(who({ user: 0 }), undefined, 0)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
+    expect(() => authorize({ ...who(), nodeUserId: 2002 }, undefined, OWNER)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
+    expect(() => authorize({ ...who(), userId: 0 }, undefined, OWNER)).toThrow(expect.objectContaining({ code: "E_FORBIDDEN" }));
   });
 
   it("fails closed on an empty or malformed allowlist and matches node IDs and logins exactly", () => {
@@ -174,9 +205,13 @@ describe("tailnet authorization", () => {
   });
 });
 
-describe("tailnet listener", () => {
+describe.each<Transport>(["socket", "token port"])("tailnet listener over the LocalAPI %s", (variant) => {
+  beforeEach(() => {
+    transport = variant;
+  });
+
   it("refuses to bind a wildcard address", async () => {
-    await fakeLocalApi();
+    await fakeTailnet();
     const home = await tempDir("remote-wild");
     await expect(startRemoteServer(getPaths(home), { address: "0.0.0.0", port: 0 })).rejects.toMatchObject({ code: "E_USAGE" });
     await expect(startRemoteServer(getPaths(home), { address: "::", port: 0 })).rejects.toMatchObject({ code: "E_USAGE" });
@@ -192,9 +227,9 @@ describe("tailnet listener", () => {
     const unknown = await caught(call());
     expect(unknown.code).toBe("E_FORBIDDEN");
     expect(unknown.message).toContain("could not identify");
-    tailnet.identity = who({ id: "nOTHER", user: 2002, login: "other@example.com" });
+    tailnet.identity = whois({ id: "nOTHER", user: 2002, login: "other@example.com" });
     expect(await caught(call())).toMatchObject({ code: "E_FORBIDDEN", details: { node_id: "nOTHER" } });
-    tailnet.identity = who();
+    tailnet.identity = whois();
 
     await writeFile(path.join(b, "nectar.json"), JSON.stringify({ tailnet_host: "nodeb", remote: { listen: true, allow: [] } }));
     await expect(call()).rejects.toMatchObject({ code: "E_FORBIDDEN" });
@@ -209,12 +244,74 @@ describe("tailnet listener", () => {
     await expect(callRemote("nodeb", "ls", { args: { path: "/etc" }, caller: {} })).rejects.toMatchObject({ code: "E_USAGE" });
   });
 
+  it("refuses every caller when WhoIs fails, names no node or the LocalAPI stops answering", async () => {
+    const { server, tailnet } = await homes();
+    const hello = async (): Promise<{ status: number; code: unknown; refused: unknown }> => {
+      const reply = await get(`http://127.0.0.1:${server.port}/v1/hello`);
+      const envelope = JSON.parse(reply.body) as { error?: { code?: unknown; refused?: unknown } };
+      return { status: reply.status, code: envelope.error?.code, refused: envelope.error?.refused };
+    };
+    expect(await hello()).toMatchObject({ status: 200 });
+    const refused = { status: 403, code: "E_FORBIDDEN", refused: "whois" };
+    const node = whois().Node as Record<string, unknown>;
+    const malformed = [null, [], "text", { Node: null }, { Node: { ...node, StableID: 5 } }, { Node: { ...node, Addresses: "100.64.0.9" } }, { Node: { ...node, Tags: {} } }];
+    for (const identity of [undefined, 500, 401, {}, { Node: { StableID: "" } }, ...malformed]) {
+      tailnet.identity = identity;
+      expect(await hello()).toEqual(refused);
+    }
+    const profile = whois().UserProfile as Record<string, unknown>;
+    for (const identity of [
+      { Node: node, UserProfile: { LoginName: profile.LoginName } },
+      { Node: { ...node, User: 2002 }, UserProfile: profile },
+      { Node: { ...node, User: undefined }, UserProfile: profile },
+    ]) {
+      tailnet.identity = identity;
+      expect(await hello()).toMatchObject({ status: 403, code: "E_FORBIDDEN" });
+    }
+    tailnet.identity = whois();
+    expect(await hello()).toMatchObject({ status: 200 });
+    await tailnet.close();
+    expect(await hello()).toEqual(refused);
+  });
+
+  it("reports the listener in doctor as off, listening, failing WhoIs or not answering", async () => {
+    const off = await homes({ remote: { listen: false } }, "127.0.0.1");
+    expect(await listenerCheck(getPaths(off.b), { remote: { listen: false } } as never)).toMatchObject({ name: "remote", status: "info", listener: "off" });
+    const on = { remote: { listen: true } } as never;
+    await off.server.close();
+    servers.splice(servers.indexOf(off.server), 1);
+
+    const { b, tailnet } = await homes({ remote: { listen: true } }, "127.0.0.1");
+    const listening = await listenerCheck(getPaths(b), on);
+    expect(listening).toMatchObject({ name: "remote", status: "pass", listener: "listening", api: "localapi", address: `127.0.0.1:${process.env.NECTAR_REMOTE_PORT}` });
+    expect(listening.localapi).toEqual(transport === "socket" ? expect.stringMatching(/^unix:/) : expect.stringContaining("(app-store sameuserproof)"));
+    expect(JSON.stringify(listening)).not.toContain(TOKEN);
+    tailnet.identity = 500;
+    const whoisBroken = await listenerCheck(getPaths(b), on);
+    expect(whoisBroken).toMatchObject({ status: "fail", listener: "failed", api: "localapi" });
+    expect(whoisBroken.message).toContain("WhoIs fails inside nectard");
+    await tailnet.close();
+    const down = await listenerCheck(getPaths(b), on);
+    expect(down).toMatchObject({ status: "fail", listener: "failed", api: "localapi", localapi: null });
+    expect(down.message).toContain("LocalAPI does not answer");
+  });
+
+  it("reports a listener that nothing answers for, with nectard's own reason", async () => {
+    const { b } = await homes();
+    await mkdir(path.join(b, "logs"), { recursive: true });
+    await writeFile(path.join(b, "logs", "nectard.log"), `${JSON.stringify({ event: "remote_unavailable", message: "bind failed" })}\n`);
+    const check = await listenerCheck(getPaths(b), { remote: { listen: true } } as never);
+    expect(check).toMatchObject({ status: "fail", listener: "failed" });
+    expect(check.message).toContain(`nothing answers on 127.0.0.3:${process.env.NECTAR_REMOTE_PORT}`);
+    expect(check.message).toContain("nectard logged: bind failed");
+  });
+
   it("refuses callers on its own node, by address or by node ID", async () => {
     const { tailnet } = await homes({ remote: { listen: true } }, "127.0.0.1");
     const local = await caught(callRemote("nodeb", "ls", { args: {}, caller: {} }));
     expect(local.code).toBe("E_FORBIDDEN");
     expect(local.message).toContain("control socket");
-    tailnet.identity = who({ id: "nSELF" });
+    tailnet.identity = whois({ id: "nSELF" });
     expect(await codeOf(callRemote("nodeb", "ls", { args: {}, caller: {} }))).toBe("E_FORBIDDEN");
   });
 
@@ -346,7 +443,7 @@ describe("tailnet listener", () => {
     const published = (await client.publish({ repo: site, host: "nodeb", branch: "main" })) as { env: string; ref: string };
     await track(b, published.env);
     const before = JSON.parse(await readFile(path.join(b, "envs", `${published.env}.json`), "utf8")) as { expires_at: string };
-    tailnet.identity = who({ id: "nFRIEND", name: "friend", user: 2002, login: "friend@example.com" });
+    tailnet.identity = whois({ id: "nFRIEND", name: "friend", user: 2002, login: "friend@example.com" });
     expect(await client.resolve(published.ref)).toMatchObject({ env: published.env, touched: false });
     expect(await client.show(published.ref)).toMatchObject({ name: published.env, touched: false });
     const after = JSON.parse(await readFile(path.join(b, "envs", `${published.env}.json`), "utf8")) as { expires_at: string };
@@ -354,7 +451,7 @@ describe("tailnet listener", () => {
     expect(await codeOf(client.touch(published.ref))).toBe("E_FORBIDDEN");
     expect(await codeOf(client.stop(published.ref))).toBe("E_FORBIDDEN");
     expect(await codeOf(client.remove(published.ref, true))).toBe("E_FORBIDDEN");
-    tailnet.identity = who();
+    tailnet.identity = whois();
     expect(await client.remove(published.ref, true)).toMatchObject({ removed: true });
   });
 

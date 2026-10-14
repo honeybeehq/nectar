@@ -306,56 +306,6 @@ export async function probeServeRights(): Promise<ServeRights> {
   return call.response.status === 403 && serveDenied(body) ? { state: "denied", message: body, api: "localapi" } : { state: "allowed", api: "localapi" };
 }
 
-export function tailscaledSocket(): string | undefined {
-  const pinned = process.env.NECTAR_TAILSCALE_SOCKET;
-  if (pinned !== undefined && pinned !== "") return existsSync(pinned) ? pinned : undefined;
-  return TAILSCALE_SOCKETS.find((file) => existsSync(file));
-}
-
-function localApiSocket(socket: string, route: string): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const request = http.request(
-      { socketPath: socket, path: route, method: "GET", headers: { Host: "local-tailscaled.sock", "Sec-Tailscale": "localapi" }, timeout: 5_000 },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          if (response.statusCode !== 200) {
-            resolve(undefined);
-            return;
-          }
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
-          } catch {
-            resolve(undefined);
-          }
-        });
-      },
-    );
-    request.on("timeout", () => request.destroy(new Error(`tailscaled socket ${socket} did not answer`)));
-    request.on("error", reject);
-    request.end();
-  });
-}
-
-export async function localApi(route: string, cli: string[]): Promise<unknown> {
-  const socket = tailscaledSocket();
-  if (socket !== undefined) {
-    try {
-      return await localApiSocket(socket, route);
-    } catch {
-      return undefined;
-    }
-  }
-  const run = await runTailscale(cli, STATUS_TIMEOUT_MS);
-  if (!run.ok) return undefined;
-  try {
-    return JSON.parse(run.stdout) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function servePackStore(target: string): Promise<ServeOutcome> {
   return changeServe(["serve", "--bg", "--yes", "--https=8440", target], (config, dnsName) => setProxyHandler(config, dnsName, 8440, target));
 }

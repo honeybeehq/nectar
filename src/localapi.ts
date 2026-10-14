@@ -251,15 +251,28 @@ export interface TailnetPeer {
   dnsName: string;
   nodeId: string;
   userId: number;
+  nodeUserId: number;
   tailscaleIPs: string[];
   tags: string[];
 }
 
 export type WhoIsResult = { peer: TailnetPeer; reason?: undefined } | { peer?: undefined; reason: string; notFound: boolean };
 
-interface WhoIsJson {
-  Node?: { StableID?: string; Name?: string; ComputedName?: string; User?: number; Addresses?: string[] | null; Tags?: string[] | null };
-  UserProfile?: { ID?: number; LoginName?: string; DisplayName?: string };
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function userNumber(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function textList(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 export async function whoIs(addr: string): Promise<WhoIsResult> {
@@ -268,28 +281,37 @@ export async function whoIs(addr: string): Promise<WhoIsResult> {
   const { status, body } = call.response;
   if (status === 404) return { reason: `${addr} is not a tailnet peer`, notFound: true };
   if (status !== 200) return { reason: `Tailscale LocalAPI whois answered ${status}: "${bodyExcerpt(body)}"`, notFound: false };
-  let parsed: WhoIsJson;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(body) as WhoIsJson;
+    parsed = JSON.parse(body) as unknown;
   } catch {
     return { reason: `Tailscale LocalAPI whois printed no JSON: "${bodyExcerpt(body)}"`, notFound: false };
   }
-  const dnsName = (parsed.Node?.Name ?? "").replace(/\.$/, "");
+  const node = record(record(parsed)?.Node);
+  const profile = record(record(parsed)?.UserProfile) ?? {};
+  const addresses = textList(node?.Addresses);
+  const tags = textList(node?.Tags);
+  if (node === undefined || text(node.StableID) === "" || addresses === undefined || tags === undefined) {
+    return { reason: `Tailscale LocalAPI whois named no well-formed node: "${bodyExcerpt(body)}"`, notFound: false };
+  }
+  const dnsName = text(node.Name).replace(/\.$/, "");
   return {
     peer: {
-      loginName: parsed.UserProfile?.LoginName ?? "",
-      displayName: parsed.UserProfile?.DisplayName ?? "",
-      nodeName: parsed.Node?.ComputedName || dnsName.split(".")[0] || "",
+      loginName: text(profile.LoginName),
+      displayName: text(profile.DisplayName),
+      nodeName: text(node.ComputedName) || dnsName.split(".")[0] || "",
       dnsName,
-      nodeId: parsed.Node?.StableID ?? "",
-      userId: parsed.UserProfile?.ID ?? parsed.Node?.User ?? 0,
-      tailscaleIPs: (parsed.Node?.Addresses ?? []).map((prefix) => prefix.replace(/\/\d+$/, "")),
-      tags: parsed.Node?.Tags ?? [],
+      nodeId: text(node.StableID),
+      userId: userNumber(profile.ID),
+      nodeUserId: userNumber(node.User),
+      tailscaleIPs: addresses.map((prefix) => prefix.replace(/\/\d+$/, "")),
+      tags,
     },
   };
 }
 
 export interface StatusNodeJson {
+  ID?: string;
   DNSName?: string;
   HostName?: string;
   UserID?: number;

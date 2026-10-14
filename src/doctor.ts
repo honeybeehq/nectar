@@ -34,6 +34,8 @@ export interface DoctorCheck {
   binary_source?: string;
   api?: "localapi" | "cli";
   localapi?: string | null;
+  listener?: "off" | "listening" | "failed";
+  address?: string;
 }
 
 export interface DoctorAction {

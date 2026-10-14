@@ -1,4 +1,6 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer, type Server } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { groupAlive, pidAlive, scrubbedEnvironment, spawnDetachedExecutable, stopProcessGroup } from "../src/commands.js";
@@ -333,5 +335,111 @@ describe("doctor --fix on a messy machine", () => {
     expect((other.actions as DoctorAction[]).map((action) => action.action)).not.toContain("reinstall-nectard");
     expect(await readFile(unit, "utf8")).toContain("/elsewhere/.nectar");
     await expect(service.doctor({ dryRun: true })).rejects.toMatchObject({ code: "E_USAGE" });
+  });
+});
+
+describe("doctor --no-daemon", () => {
+  it("skips installing nectard, reports it as info, and --save keeps that until daemon install", async () => {
+    const state = await tempDir("doctor-nodaemon-state");
+    vi.stubEnv("NECTAR_HOME", state);
+    vi.stubEnv("NECTAR_TAILSCALE_BIN", "/bin/false");
+    const manager = await fakeServiceManager(await tempDir("doctor-nodaemon-bin"));
+    if (process.platform !== "linux" && process.platform !== "darwin") return;
+    const service = new NectarService(state);
+    const actionsOf = (result: Record<string, unknown>): string[] => (result.actions as DoctorAction[]).map((action) => action.action);
+    const nectardOf = (result: Record<string, unknown>): DoctorCheck | undefined => (result.checks as DoctorCheck[]).find((check) => check.name === "nectard");
+
+    expect(actionsOf(await service.doctor({ fix: true, dryRun: true }))).toContain("install-nectard");
+    const skipped = await service.doctor({ fix: true, noDaemon: true });
+    expect(actionsOf(skipped)).not.toContain("install-nectard");
+    expect(nectardOf(skipped)).toMatchObject({ status: "info" });
+    expect(nectardOf(skipped)?.message).toContain("--no-daemon");
+    await expect(readFile(path.join(manager.home, ".config", "systemd", "user", "nectard.service"), "utf8")).rejects.toThrow();
+
+    await expect(service.doctor({ save: true })).rejects.toMatchObject({ code: "E_USAGE" });
+    await service.doctor({ noDaemon: true, save: true });
+    expect(await service.store.readConfig()).toMatchObject({ daemon: "disabled" });
+    const remembered = await service.doctor({ fix: true, dryRun: true });
+    expect(actionsOf(remembered)).not.toContain("install-nectard");
+    expect(nectardOf(remembered)).toMatchObject({ status: "info" });
+    expect(nectardOf(remembered)?.message).toContain('daemon: "disabled"');
+
+    await service.enableDaemon();
+    expect((await service.store.readConfig()).daemon).toBeUndefined();
+    expect(actionsOf(await service.doctor({ fix: true, dryRun: true }))).toContain("install-nectard");
+  });
+});
+
+describe("tailscale-serve doctor check", () => {
+  const sockets: Server[] = [];
+  afterEach(async () => {
+    for (const server of sockets.splice(0)) await new Promise((resolve) => server.close(resolve));
+  });
+
+  async function fakeTailscaled(status: number, body: string, seen: string[]): Promise<string> {
+    const socket = path.join(await tempDir("tsd"), "tailscaled.sock");
+    const server = createServer((request, response) => {
+      let received = "";
+      request.on("data", (chunk: Buffer) => (received += chunk.toString()));
+      request.on("end", () => {
+        seen.push(`${request.method} ${request.url} ${received}`);
+        response.writeHead(status, { "Content-Type": "text/plain" }).end(body);
+      });
+    });
+    sockets.push(server);
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    return socket;
+  }
+
+  it("fails with the operator hint when tailscaled denies serve changes, and never changes the config", async () => {
+    if (process.platform !== "linux") return;
+    const state = await tempDir("doctor-serve-state");
+    vi.stubEnv("NECTAR_HOME", state);
+    await statefulTailscale(await tempDir("doctor-serve-bin"));
+    const seen: string[] = [];
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", await fakeTailscaled(403, "serve config denied\n", seen));
+    const service = new NectarService(state);
+    const denied = await service.doctor();
+    const check = (denied.checks as DoctorCheck[]).find((item) => item.name === "tailscale-serve");
+    expect(check).toMatchObject({ status: "fail", hint: expect.stringContaining("sudo tailscale set --operator=$USER") as unknown });
+    expect(check?.message).toContain("serve config denied");
+    expect(denied.healthy).toBe(false);
+    expect(seen).toEqual(["POST /localapi/v0/serve-config not json"]);
+
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", await fakeTailscaled(400, "decoding config: invalid character\n", seen));
+    const allowed = await service.doctor();
+    expect((allowed.checks as DoctorCheck[]).find((item) => item.name === "tailscale-serve")).toMatchObject({ status: "pass" });
+  });
+});
+
+describe("republish next to a foreign serve entry", () => {
+  it("leaves a foreign entry on its old tailnet port alone and moves to a fresh port", async () => {
+    const state = await tempDir("foreign-state");
+    vi.stubEnv("NECTAR_HOME", state);
+    vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
+    const tailscale = await statefulTailscale(await tempDir("foreign-bin"));
+    const site = await tempDir("foreign-site");
+    await writeFile(path.join(site, "index.html"), "<h1>one</h1>\n");
+    const service = new NectarService(state);
+    const first = await service.publish({ repo: site, name: "foreign", ttl: "1h" });
+    const env = first.env as string;
+    try {
+      const oldPort = (await service.store.readEnv(env)).serve?.tailnet_port;
+      const table = JSON.parse(await readFile(tailscale.state, "utf8")) as { Web: Record<string, { Handlers: Record<string, { Proxy: string }> }> };
+      table.Web[`fixture.tailtest.ts.net:${oldPort}`] = { Handlers: { "/": { Proxy: "https://someone-else.example" } } };
+      await writeFile(tailscale.state, JSON.stringify(table));
+
+      await writeFile(path.join(site, "index.html"), "<h1>two</h1>\n");
+      const second = await service.publish({ repo: site, name: "foreign", ttl: "1h" });
+      const newPort = (await service.store.readEnv(env)).serve?.tailnet_port;
+      expect(newPort).not.toBe(oldPort);
+      expect((second.urls as { mesh: string }).mesh).toBe(`https://fixture.tailtest.ts.net:${newPort}`);
+      expect((second.warnings as string[]).join("\n")).toContain(`:${oldPort} now holds an entry Nectar did not create`);
+      const after = JSON.parse(await readFile(tailscale.state, "utf8")) as typeof table;
+      expect(after.Web[`fixture.tailtest.ts.net:${oldPort}`]).toEqual({ Handlers: { "/": { Proxy: "https://someone-else.example" } } });
+      expect((await readFile(tailscale.log, "utf8")).split("\n")).not.toContain(`serve --https=${oldPort} off`);
+    } finally {
+      await service.remove(env, true);
+    }
   });
 });

@@ -21,7 +21,7 @@ export interface ServeEntryProbe {
   appAnswers?: boolean;
 }
 
-export type CheckStatus = "pass" | "warn" | "fail";
+export type CheckStatus = "pass" | "info" | "warn" | "fail";
 
 export interface DoctorCheck {
   name: string;

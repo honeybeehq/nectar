@@ -61,6 +61,7 @@ pnpm install && pnpm build && pnpm link --global
 nectar doctor                # check nectard, gc, dead envs, serve entries, PATH tools, the pack store
 nectar doctor --fix --dry-run  # list the repairs it would make
 nectar doctor --fix          # run gc, remove orphaned Nectar serve entries, install nectard, restart the pack store
+nectar doctor --fix --no-daemon --save  # the same cleanup, but never install nectard on this machine
 nectar daemon install        # optional: nectard revives crashed previews, restores them after reboot, runs gc hourly
 ```
 

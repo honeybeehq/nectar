@@ -986,7 +986,23 @@ exit 1
       is_self: true,
     };
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", JSON.stringify({ ok: true, command: "resolve", result: remote }));
-    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual({ ...remote, is_self: false });
+    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual({
+      ...remote,
+      is_self: false,
+      ref: "nectar://remote/remote-app--main--web",
+      packet_fields: { preview_url: remote.urls.mesh, testpack_ref: null, dev_ref: null, shell_recipe: null, public_url: null },
+      expires_at: null,
+      expires_in: null,
+    });
+    const current = {
+      ...remote,
+      ref: "nectar://remote/remote-app--main--web",
+      packet_fields: { preview_url: remote.urls.mesh, testpack_ref: null, dev_ref: null, shell_recipe: null, public_url: "https://demo.nctr.site" },
+      expires_at: "2099-01-01T00:00:00.000Z",
+      expires_in: "26000d",
+    };
+    vi.stubEnv("FAKE_TS_SSH_RESPONSE", JSON.stringify({ ok: true, command: "resolve", result: current }));
+    expect(await service.resolve("nectar://remote/remote-app--main--web")).toEqual({ ...current, is_self: false });
     vi.stubEnv("FAKE_TS_SSH_RESPONSE", "");
     vi.stubEnv("FAKE_TS_SSH_FAIL", "1");
     await expect(service.resolve("nectar://offline/remote-app--main--web")).rejects.toThrow(/Host 'offline' unreachable/);

@@ -1,8 +1,9 @@
 import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { runCommand } from "../src/commands.js";
-import { fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
+import { fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
 
 // The --json envelope + exit code IS the product contract for agents, so this
 // suite drives the real built CLI, not NectarService.
@@ -26,6 +27,16 @@ beforeAll(async () => {
 
 async function cli(...args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return runCommand(process.execPath, [cliEntry, ...args], { env, cwd: repoRoot, timeoutMs: 30_000 });
+}
+
+async function cliWith(extra: NodeJS.ProcessEnv, ...args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return runCommand(process.execPath, [cliEntry, ...args], { env: { ...env, ...extra }, cwd: repoRoot, timeoutMs: 30_000 });
+}
+
+async function staticSite(): Promise<string> {
+  const site = await tempDir("cli-site");
+  await writeFile(path.join(site, "index.html"), "<h1>proof</h1>\n");
+  return site;
 }
 
 function envelope(stdout: string): Record<string, unknown> {
@@ -98,6 +109,76 @@ describe("cli --json contract", () => {
         },
       },
     });
+  });
+
+  it("resolve carries publish's ref, packet_fields and expiry under stable names", async () => {
+    const published = envelope((await cli("publish", await staticSite(), "--name", "cli-resolve", "--json")).stdout).result as Record<string, unknown>;
+    const name = published.env as string;
+    try {
+      const resolved = await cli("resolve", name, "--json");
+      expect(resolved.exitCode).toBe(0);
+      const result = envelope(resolved.stdout).result as Record<string, unknown>;
+      expect(Object.keys(result).sort()).toEqual(
+        [
+          "env",
+          "ref",
+          "mode",
+          "commit",
+          "current_commit",
+          "stale",
+          "is_self",
+          "urls",
+          "testpack_url",
+          "sha256",
+          "size_bytes",
+          "platform",
+          "entry",
+          "bundle_id",
+          "ax_url",
+          "host",
+          "status",
+          "liveness",
+          "packet_fields",
+          "expires_at",
+          "expires_in",
+        ].sort(),
+      );
+      expect(Object.keys(result.packet_fields as object).sort()).toEqual(["dev_ref", "preview_url", "public_url", "shell_recipe", "testpack_ref"]);
+      expect(result.ref).toBe(published.ref);
+      expect(result.packet_fields).toEqual(published.packet_fields);
+      expect(result.packet_fields).toMatchObject({ preview_url: (published.urls as { mesh: string }).mesh, public_url: null });
+      expect(Date.parse(result.expires_at as string)).toBeGreaterThanOrEqual(Date.parse(published.expires_at as string));
+      expect(result.expires_in).toMatch(/^\d+[dhms]/);
+    } finally {
+      await cli("rm", name, "--force", "--json");
+    }
+  });
+
+  it("quotes tailscale's serve denial in the warning and mesh_error instead of blaming a logged-out tailnet", async () => {
+    const fakeDir = await tempDir("cli-denied");
+    const denied = await fakeExecutable(
+      fakeDir,
+      "tailscale",
+      `if [ "$1" = "status" ]; then printf '{"BackendState":"Running","Self":{"DNSName":"fixture.tailtest.ts.net."}}\\n'; exit 0; fi
+if [ "$1" = "serve" ] && [ "$2" = "status" ]; then printf '{}\\n'; exit 0; fi
+if [ "$1" = "serve" ]; then
+  printf 'sending serve config: Access denied: serve config denied\\n\\nUse '"'"'sudo tailscale serve %s'"'"'.\\nTo not require root, use '"'"'sudo tailscale set --operator=$USER'"'"' once.\\n' "$*" >&2
+  exit 1
+fi
+exit 0`,
+    );
+    const published = await cliWith({ NECTAR_TAILSCALE_BIN: denied }, "publish", await staticSite(), "--name", "cli-denied", "--json");
+    const result = envelope(published.stdout).result as { env: string; urls: { mesh: string | null }; mesh_error: string; warnings: string[] };
+    try {
+      expect(published.exitCode).toBe(0);
+      expect(result.urls.mesh).toBeNull();
+      expect(result.mesh_error).toContain("Access denied: serve config denied");
+      const warning = result.warnings.find((line) => line.startsWith("tailscale serve was denied"));
+      expect(warning).toContain("sudo tailscale set --operator=$USER");
+      expect(result.warnings.join("\n")).not.toContain("logged out");
+    } finally {
+      await cliWith({ NECTAR_TAILSCALE_BIN: denied }, "rm", result.env, "--force", "--json");
+    }
   });
 
   it("recognizes open --target/--keep and publish --verify as contract flags", async () => {

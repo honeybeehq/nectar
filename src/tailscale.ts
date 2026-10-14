@@ -1,4 +1,5 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./commands.js";
@@ -86,13 +87,58 @@ export async function tailnetIdentity(): Promise<TailnetIdentity | undefined> {
   }
 }
 
-export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<boolean> {
-  const result = await runCommand(
-    tailscaleBinary(),
-    ["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl],
-    { timeoutMs: 10_000 },
-  );
-  return result.exitCode === 0;
+export interface ServeOutcome {
+  ok: boolean;
+  message: string;
+}
+
+export const OPERATOR_HINT = "sudo tailscale set --operator=$USER";
+
+export function serveDenied(message: string): boolean {
+  return /access denied|serve config denied/i.test(message);
+}
+
+export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<ServeOutcome> {
+  try {
+    const result = await runCommand(
+      tailscaleBinary(),
+      ["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl],
+      { timeoutMs: 10_000 },
+    );
+    return { ok: result.exitCode === 0, message: result.stderr.trim() || result.stdout.trim() };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export const TAILSCALE_SOCKETS = ["/var/run/tailscale/tailscaled.sock", "/run/tailscale/tailscaled.sock"];
+
+export type ServeRights = { state: "allowed" } | { state: "denied"; message: string } | { state: "unknown"; message: string };
+
+export async function probeServeRights(socket = process.env.NECTAR_TAILSCALE_SOCKET ?? TAILSCALE_SOCKETS.find((file) => existsSync(file))): Promise<ServeRights> {
+  if (socket === undefined) return { state: "unknown", message: `no tailscaled socket at ${TAILSCALE_SOCKETS.join(" or ")}` };
+  return new Promise((resolve) => {
+    const request = http.request(
+      {
+        socketPath: socket,
+        path: "/localapi/v0/serve-config",
+        method: "POST",
+        headers: { Host: "local-tailscaled.sock", "Sec-Tailscale": "localapi", "Content-Type": "application/json" },
+        timeout: 5_000,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const body = Buffer.concat(chunks).toString().trim();
+          resolve(response.statusCode === 403 && serveDenied(body) ? { state: "denied", message: body } : { state: "allowed" });
+        });
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error(`tailscaled socket ${socket} did not answer`)));
+    request.on("error", (error) => resolve({ state: "unknown", message: error.message }));
+    request.end("not json");
+  });
 }
 
 export async function servePackStore(target: string): Promise<{ ok: boolean; message: string }> {

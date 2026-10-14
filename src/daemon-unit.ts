@@ -11,6 +11,8 @@ import { resolveTailscale, type TailscaleLookup } from "./tailscale.js";
 
 export const LAUNCHD_LABEL = "com.honeybeehq.nectard";
 export const SYSTEMD_UNIT = "nectard.service";
+const LAUNCHD_SETTLE_MS = 5_000;
+const LAUNCHD_RETRY_MS = 500;
 
 type UnitPlatform = "darwin" | "linux";
 
@@ -221,11 +223,14 @@ export async function installUnit(
   await mkdir(paths.logs, { recursive: true });
   await mkdir(path.dirname(file), { recursive: true });
   if (kind === "darwin") {
-    await writeFile(file, launchdPlist(spec), { mode: 0o644 });
-    await safely(launchctl(), ["bootout", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
-    const loaded = await safely(launchctl(), ["bootstrap", launchdDomain(), file]);
-    if (loaded.exitCode !== 0) {
-      throw new NectarError("E_PLATFORM", `launchctl bootstrap failed: ${loaded.stderr.trim() || loaded.stdout.trim()}`);
+    const plist = launchdPlist(spec);
+    const unchanged = (await readFile(file, "utf8").catch(() => undefined)) === plist;
+    const running = await managerState(kind);
+    const restarted =
+      unchanged && running.pid !== undefined && (await safely(launchctl(), ["kickstart", "-k", `${launchdDomain()}/${LAUNCHD_LABEL}`])).exitCode === 0;
+    if (!restarted) {
+      await writeFile(file, plist, { mode: 0o644 });
+      await bootstrapAgent(file);
     }
   } else {
     const session = await safely(systemctl(), ["--user", "show-environment"]);
@@ -238,6 +243,10 @@ export async function installUnit(
       if (result.exitCode !== 0) {
         throw new NectarError("E_PLATFORM", `systemctl --user ${args.join(" ")} failed: ${result.stderr.trim()}`);
       }
+    }
+    const started = await daemonState(kind, paths, { ms: options.waitMs ?? 5_000, anyState: false });
+    if (!RUNNING_STATES.has(started.active)) {
+      throw new NectarError("E_PLATFORM", `systemctl --user restart ${SYSTEMD_UNIT} left it ${started.active}; see journalctl --user -u ${SYSTEMD_UNIT}`);
     }
     const linger = await safely(loginctl(), ["show-user", os.userInfo().username, "--property=Linger"]);
     if (!linger.stdout.includes("Linger=yes")) {
@@ -257,6 +266,33 @@ export async function installUnit(
     log: daemonLogFile(paths),
     warnings,
   };
+}
+
+async function agentLoaded(): Promise<boolean> {
+  return (await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`])).exitCode === 0;
+}
+
+async function bootoutAgent(): Promise<void> {
+  await safely(launchctl(), ["bootout", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
+  const deadline = Date.now() + LAUNCHD_SETTLE_MS;
+  while (await agentLoaded()) {
+    if (Date.now() >= deadline) {
+      throw new NectarError("E_PLATFORM", `launchctl bootout left ${LAUNCHD_LABEL} loaded after ${LAUNCHD_SETTLE_MS / 1_000}s; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL} and retry`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function bootstrapAgent(file: string): Promise<void> {
+  let failure = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await bootoutAgent();
+    const loaded = await safely(launchctl(), ["bootstrap", launchdDomain(), file]);
+    if (loaded.exitCode === 0 && (await agentLoaded())) return;
+    failure = loaded.exitCode === 0 ? "bootstrap succeeded but the agent is not loaded" : loaded.stderr.trim() || loaded.stdout.trim() || `exit ${loaded.exitCode}`;
+    await new Promise((resolve) => setTimeout(resolve, LAUNCHD_RETRY_MS));
+  }
+  throw new NectarError("E_PLATFORM", `launchctl bootstrap ${launchdDomain()} ${file} failed twice (${failure}); ${LAUNCHD_LABEL} is not loaded. Run nectar daemon install again`);
 }
 
 export async function uninstallUnit(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<Record<string, unknown>> {

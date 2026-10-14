@@ -9,7 +9,7 @@ import { installUnit, launchdPlist, systemdUnit, uninstallUnit, unitPath, unitSt
 import { getPaths } from "../src/paths.js";
 import { NectarService, type ReviveResult } from "../src/service.js";
 import type { EnvRecord, Liveness, ServeRecord } from "../src/types.js";
-import { fakeExecutable, fakeTailscale, initGitRepo, record, tempDir } from "./helpers.js";
+import { fakeExecutable, fakeServiceManager, fakeTailscale, initGitRepo, record, tempDir } from "./helpers.js";
 
 const FUTURE = "2099-01-01T00:00:00.000Z";
 const BOOT = Date.parse("2026-10-01T00:00:00.000Z");
@@ -490,46 +490,136 @@ describe("service units", () => {
       "systemctl --user restart nectard.service",
       show,
       show,
+      show,
       "systemctl --user disable --now nectard.service",
       "systemctl --user daemon-reload",
     ]);
   });
 
-  it("installs and removes the launchd agent through launchctl bootstrap/bootout", async () => {
+  async function fakeLaunchd(options: { loaded?: boolean; unloadPrints?: number; bootstrapFailures?: number } = {}): Promise<{ home: string; calls: string; file: string }> {
     const home = await tempDir("daemon-home");
     const fakeDir = await tempDir("daemon-launchctl");
     const calls = path.join(fakeDir, "calls.log");
+    const loaded = path.join(fakeDir, "loaded");
+    const unloading = path.join(fakeDir, "unloading");
+    const failures = path.join(fakeDir, "failures");
     vi.stubEnv("HOME", home);
-    vi.stubEnv("NECTAR_LAUNCHCTL_BIN", await fakeExecutable(fakeDir, "launchctl", `echo "launchctl $*" >> ${calls}; [ "$1" = "print" ] && exit 113; exit 0`));
+    if (options.loaded === true) await writeFile(loaded, "");
+    await writeFile(failures, String(options.bootstrapFailures ?? 0));
+    vi.stubEnv(
+      "NECTAR_LAUNCHCTL_BIN",
+      await fakeExecutable(
+        fakeDir,
+        "launchctl",
+        `echo "launchctl $*" >> '${calls}'
+case "$1" in
+  bootout) [ -f '${loaded}' ] && echo ${options.unloadPrints ?? 0} > '${unloading}' ;;
+  print)
+    if [ -f '${unloading}' ]; then
+      left=$(cat '${unloading}')
+      if [ "$left" -le 0 ]; then rm -f '${unloading}' '${loaded}'; else echo $((left - 1)) > '${unloading}'; fi
+    fi
+    [ -f '${loaded}' ] || exit 113
+    printf 'state = running\npid = %s\n' "$PPID" ;;
+  bootstrap)
+    left=$(cat '${failures}')
+    if [ -f '${loaded}' ] || [ "$left" -gt 0 ]; then
+      echo $((left - 1)) > '${failures}'
+      printf 'Bootstrap failed: 5: Input/output error\nTry re-running the command as root for richer errors.\n' >&2
+      exit 5
+    fi
+    : > '${loaded}' ;;
+esac
+exit 0`,
+      ),
+    );
+    return { home, calls, file: path.join(home, "Library", "LaunchAgents", "com.honeybeehq.nectard.plist") };
+  }
+
+  async function launchctlCalls(calls: string, verb: string): Promise<string[]> {
+    return (await readFile(calls, "utf8")).trim().split("\n").filter((line) => line.startsWith(`launchctl ${verb}`));
+  }
+
+  it("installs and removes the launchd agent through launchctl bootstrap/bootout", async () => {
+    const { home, calls, file } = await fakeLaunchd();
     const paths = getPaths(path.join(home, ".nectar"));
-    await installUnit(paths, "darwin", { waitMs: 0 });
-    const file = path.join(home, "Library", "LaunchAgents", "com.honeybeehq.nectard.plist");
+    expect(await installUnit(paths, "darwin", { waitMs: 0 })).toMatchObject({ active: "running", pid: process.pid, pid_source: "launchctl" });
     expect(await readFile(file, "utf8")).toContain("<key>KeepAlive</key>");
     await uninstallUnit(paths, "darwin");
     await expect(access(file)).rejects.toThrow();
     const uid = process.getuid?.() ?? 0;
+    const print = `launchctl print gui/${uid}/com.honeybeehq.nectard`;
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
+      print,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
+      print,
       `launchctl bootstrap gui/${uid} ${file}`,
-      `launchctl print gui/${uid}/com.honeybeehq.nectard`,
+      print,
+      print,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
     ]);
   });
 
-  it("daemon status reads the live pid from launchctl print right after install", async () => {
+  it("reinstalling over a loaded agent waits for bootout to finish before bootstrapping", async () => {
+    const { home, calls, file } = await fakeLaunchd({ loaded: true, unloadPrints: 3 });
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "<plist>an older install</plist>");
+    const installed = await installUnit(getPaths(path.join(home, ".nectar")), "darwin");
+    expect(installed).toMatchObject({ active: "running", pid: process.pid });
+    expect(await launchctlCalls(calls, "bootstrap")).toHaveLength(1);
+    expect(await launchctlCalls(calls, "kickstart")).toHaveLength(0);
+  });
+
+  it("retries bootstrap once on launchd's transient I/O error 5 and ends loaded", async () => {
+    const { home, calls } = await fakeLaunchd({ bootstrapFailures: 1 });
+    expect(await installUnit(getPaths(path.join(home, ".nectar")), "darwin")).toMatchObject({ active: "running", pid: process.pid });
+    expect(await launchctlCalls(calls, "bootstrap")).toHaveLength(2);
+  });
+
+  it("fails clearly, naming launchctl's error, when bootstrap keeps failing", async () => {
+    const { home, calls } = await fakeLaunchd({ bootstrapFailures: 5 });
+    const failed = installUnit(getPaths(path.join(home, ".nectar")), "darwin");
+    await expect(failed).rejects.toMatchObject({ code: "E_PLATFORM" });
+    await expect(failed).rejects.toThrow(/Input\/output error.*is not loaded/s);
+    expect(await launchctlCalls(calls, "bootstrap")).toHaveLength(2);
+  });
+
+  it("reinstalling an unchanged, running launchd agent restarts it in place", async () => {
+    const { home, calls } = await fakeLaunchd();
+    const paths = getPaths(path.join(home, ".nectar"));
+    await installUnit(paths, "darwin");
+    await writeFile(calls, "");
+    expect(await installUnit(paths, "darwin")).toMatchObject({ active: "running", pid: process.pid });
+    expect(await launchctlCalls(calls, "kickstart")).toEqual([`launchctl kickstart -k gui/${process.getuid?.() ?? 0}/com.honeybeehq.nectard`]);
+    expect(await launchctlCalls(calls, "bootout")).toHaveLength(0);
+    expect(await launchctlCalls(calls, "bootstrap")).toHaveLength(0);
+  });
+
+  it("reinstalling the systemd unit twice restarts it and leaves it active with a pid", async () => {
+    const fakeDir = await tempDir("daemon-systemctl");
+    const { calls, home } = await fakeServiceManager(fakeDir);
+    const paths = getPaths(path.join(home, ".nectar"));
+    for (let run = 0; run < 2; run += 1) {
+      const installed = await installUnit(paths, "linux");
+      expect(installed).toMatchObject({ installed: true, active: "active", pid_source: "systemctl" });
+      expect(installed.pid).toBeGreaterThan(1);
+    }
+    expect((await readFile(calls, "utf8")).split("\n").filter((line) => line.includes(" restart "))).toHaveLength(2);
+  });
+
+  it("fails clearly when systemctl restart leaves the unit failed", async () => {
     const home = await tempDir("daemon-home");
-    const fakeDir = await tempDir("daemon-launchctl");
+    const fakeDir = await tempDir("daemon-systemctl");
     vi.stubEnv("HOME", home);
-    const printed = [
-      "gui/501/com.honeybeehq.nectard = {",
-      "\tactive count = 1",
-      "\tstate = running",
-      "\tprogram = /opt/homebrew/bin/node",
-      `\tpid = ${process.pid}`,
-      "\tlast exit code = (never exited)",
-      "}",
-    ].join("\\n");
-    vi.stubEnv("NECTAR_LAUNCHCTL_BIN", await fakeExecutable(fakeDir, "launchctl", `[ "$1" = "print" ] && printf '${printed}\\n'; exit 0`));
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
+    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `[ "$2" = "show" ] && printf 'ActiveState=failed\nMainPID=0\n'; exit 0`));
+    const failed = installUnit(getPaths(path.join(home, ".nectar")), "linux");
+    await expect(failed).rejects.toMatchObject({ code: "E_PLATFORM" });
+    await expect(failed).rejects.toThrow("left it failed");
+  });
+
+  it("daemon status reads the live pid from launchctl print right after install", async () => {
+    const { home } = await fakeLaunchd();
     const paths = getPaths(path.join(home, ".nectar"));
     expect(await installUnit(paths, "darwin")).toMatchObject({ active: "running", pid: process.pid, pid_source: "launchctl" });
     expect(await unitStatus(paths, "darwin")).toMatchObject({ installed: true, active: "running", pid: process.pid, pid_source: "launchctl" });

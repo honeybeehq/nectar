@@ -179,8 +179,12 @@ program
   .description("check nectard, gc, env resources, serve entries, PATH tools, ports, and the pack store")
   .option("--fix", "run gc, remove orphaned Nectar Serve entries, install nectard, and repair the :8440 pack-store chain")
   .option("--dry-run", "with --fix: list the repairs without making them")
-  .action(async (options: { fix?: boolean; dryRun?: boolean }) =>
-    execute("doctor", async () => new NectarService().doctor({ fix: options.fix ?? false, dryRun: options.dryRun ?? false })),
+  .option("--no-daemon", "never install or restart nectard; its check is info only")
+  .option("--save", "with --no-daemon: remember it in nectar.json until `nectar daemon install`")
+  .action(async (options: { fix?: boolean; dryRun?: boolean; daemon: boolean; save?: boolean }) =>
+    execute("doctor", async () =>
+      new NectarService().doctor({ fix: options.fix ?? false, dryRun: options.dryRun ?? false, noDaemon: !options.daemon, save: options.save ?? false }),
+    ),
   );
 
 const daemon = program.command("daemon").description("nectard: revive crashed envs, restore them after reboot, run gc hourly");
@@ -218,7 +222,14 @@ daemon
 daemon
   .command("install")
   .description("install and start nectard as a launchd user agent (macOS) or systemd --user unit (Linux)")
-  .action(async () => execute("daemon", async () => installUnit(new NectarService().paths)));
+  .action(async () =>
+    execute("daemon", async () => {
+      const service = new NectarService();
+      const installed = await installUnit(service.paths);
+      await service.enableDaemon();
+      return installed;
+    }),
+  );
 
 daemon
   .command("uninstall")

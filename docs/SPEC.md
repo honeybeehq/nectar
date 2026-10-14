@@ -328,6 +328,15 @@ The unit runs `<node> <nectar>/dist/cli.js daemon run` with the installing shell
 `pid` or systemd's `MainPID`, else `nectard.pid`. While the unit is starting, they wait a few
 seconds for one to appear.
 
+`install` is safe to repeat and ends with the agent loaded or a clear `E_PLATFORM` error. On
+macOS an unchanged plist with a running agent is restarted in place (`launchctl kickstart -k`).
+Otherwise it writes the plist, runs `launchctl bootout`, waits up to 5 s until `launchctl
+print` no longer finds the agent, then runs `launchctl bootstrap`; launchd's transient
+"Bootstrap failed: 5: Input/output error" gets one more bootout and bootstrap before install
+fails, naming launchctl's error. On Linux `daemon-reload`, `enable` and `restart` are
+idempotent; install then fails if the unit is not running (`failed`, `inactive`).
+`daemon install` also clears a saved `daemon: "disabled"` (§10.5).
+
 Cost: idle nectard is a Node process with ~60–90 MB RSS on both macOS and Linux (the Node
 baseline, ~55 MB of it shared), and well under 0.1 % of one core at the default intervals.
 systemd's cgroup accounting for the unit shows less (~27 MB, peak ~30 MB) because it counts
@@ -846,7 +855,18 @@ nectar open <env|ref>
 
 nectar shell <env|ref> [--no-record] [--json]
 nectar resolve <ref> [--json]
-    # ref → concrete consumables: { mode, is_self, urls, testpack_url, host, status, liveness }.
+    # ref → concrete consumables: { env, ref, mode, commit, current_commit, stale, is_self,
+    #   urls, testpack_url, sha256, size_bytes, platform, entry, bundle_id, ax_url, host,
+    #   status, liveness, packet_fields, expires_at, expires_in } (+ log_tail when crashed or
+    #   unhealthy); a bare env name matching several modes returns { env, host, is_self,
+    #   resolutions: [...] } with that shape per mode.
+    # packet_fields has publish's keys and meaning (preview_url, testpack_ref, dev_ref,
+    # shell_recipe, public_url), read from the record, so it shows the current mesh and public
+    # URL; a desktop env's preview_url is null here (publish fills it from its embedded web
+    # env). expires_at is the expiry after this resolve's touch. A remote ref returns the
+    # remote's values; when the remote's Nectar predates these fields, ref and packet_fields
+    # are derived from its urls and mode (public_url from urls.public) and expires_at /
+    # expires_in are null.
     # Consumers prefer urls.local when is_self, urls.mesh otherwise. Touches the env.
 
 nectar touch <env|ref> [--ttl <duration>]
@@ -871,9 +891,10 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
     # run is the foreground supervisor the unit starts.
 
-nectar doctor [--fix [--dry-run]]
+nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # Checks (§10.5): portless on PATH + proxy up · tailscale up (names the CLI
-    # used and its source, §4.5) · no 443 serve entry
+    # used and its source, §4.5) · tailscale-serve: this user may change the serve
+    # config (Linux) · no 443 serve entry
     # (portless killer) · no funnel · Serve entries in Nectar's tailnet range, classified
     # owned / orphan / foreign / ambiguous · dead or expired envs still holding a process or
     # Serve entry · gc recency · nectard installed, active and pointing at this install ·
@@ -882,7 +903,10 @@ nectar doctor [--fix [--dry-run]]
     # installs or reinstalls nectard and restarts the pack server (testpacks only: with no
     # packs stored, a stopped pack chain is a warning); --dry-run lists those
     # actions without making them. Result: { healthy, checks[], actions[] } where every
-    # action has { action, target, reason, status, before, after }.
+    # action has { action, target, reason, status, before, after }. Check status is pass,
+    # info, warn or fail; only fail makes healthy false. --no-daemon never installs or
+    # restarts nectard and reports it as info; --save stores that as daemon: "disabled"
+    # in nectar.json until `nectar daemon install`.
 ```
 
 ### `publish --json` result (web example)
@@ -907,10 +931,17 @@ nectar doctor [--fix [--dry-run]]
     },
     "evidence": [],
     "expires_at": "2026-07-21T12:04:11Z",
-    "warnings": ["portless proxy not running — local URL degraded to http://127.0.0.1:4117"]
+    "warnings": ["portless proxy not running — local URL degraded to http://127.0.0.1:4117"],
+    "mesh_error": null
   }
 }
 ```
+
+`mesh_error` (web, static, and desktop with an embedded web env) is `tailscale serve`'s own
+output when it refused the mesh entry, else null. The warning quotes it. When tailscaled
+denied the change ("Access denied: serve config denied"), the warning says this user is not a
+Tailscale operator and to run `sudo tailscale set --operator=$USER` once. Nectar never runs
+sudo. "tailscale unavailable or logged out" is reserved for a tailnet that is down.
 
 `result.packet_fields` is the ergonomic core: **the exact strings to copy onto the Forum
 packet**, keyed with Forum's snake_case names. Desktop publish fills `testpack_ref`
@@ -1031,10 +1062,10 @@ warns if `gc` hasn't run in 24 h.
 | # | failure | behavior |
 | --- | --- | --- |
 | F1 | portless missing / proxy down | web publish **succeeds**; `urls.local` degrades to the healthy IPv4/IPv6 loopback origin; warning in envelope; mesh URL unaffected |
-| F2 | tailscale down / logged out | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`) |
+| F2 | tailscale down / logged out, or `tailscale serve` refused | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`); a refused serve quotes tailscale's output in the warning and `mesh_error`, with the operator hint when it was a permission denial |
 | F3 | serve crashes post-publish | lazy detection on every read → `status: crashed` (process gone) or `unhealthy` (port silent), back to `serving` when the port answers; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
 | F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; detached process killed, Serve entry removed, runtime fields/port claims cleared; env kept as `crashed` with `failure` details |
-| F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove only the orphan class of §10.5 and clear matching env claims; foreign and ambiguous entries are reported and left alone |
+| F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove only the orphan class of §10.5 and clear matching env claims; foreign and ambiguous entries are reported and left alone. A republish keeps its tailnet port only while the entry there is still its own; if something else took the port, the republish leaves that entry alone, moves to a free port and warns that the mesh URL changed |
 | F6 | checkout conflict / dirty nectar worktree | worktree is nectar-owned ⇒ `git reset --hard` + clean is always legal; borrowed `--worktree` is never reset — publish fails `E_CHECKOUT` instead |
 | F7 | smoke fails (backend) | publish fails `E_SMOKE_FAILED`; evidence written; no packet fields emitted |
 | F8 | testpack fetch sha mismatch | `open` deletes the download, retries once, then errors — never launches an unverified pack |
@@ -1072,12 +1103,23 @@ upstream is reported by `env-resources` along with pending gc transitions.
    `remove-serve-entry` per orphan, one `gc-<transition>` per env and the `gc` run itself.
 2. `release-env` for dead envs gc did not cover: stop the env's own process group and its own
    Serve entry; the record keeps its status and ports.
-3. `install-nectard` / `reinstall-nectard` through `nectar daemon install` when nectard is
+3. (skipped with `--no-daemon` or a saved `daemon: "disabled"`; the `nectard` check is then
+   `info`) `install-nectard` / `reinstall-nectard` through `nectar daemon install` when nectard is
    missing, inactive, or its unit runs a different node or CLI than the running install. A
    unit bound to another `NECTAR_HOME` is reported and left alone. `nectar daemon uninstall`
    removes it.
-4. `start-pack-server` / `serve-pack-store` when Tailscale is up and no Funnel is on: start a
+4. `start-pack-server` / `serve-pack-store` when Tailscale is up, this user may change the
+   serve config (`tailscale-serve` passes) and no Funnel is on: start a
    new read-only pack server (an old recorded PID is never signalled) and point `:8440` at it.
+
+**Serve rights.** On Linux, `tailscale-serve` asks tailscaled whether this user may change
+the serve config without changing it: it POSTs a body that is not JSON to the LocalAPI
+`/localapi/v0/serve-config` on tailscaled's socket (`/var/run/tailscale/tailscaled.sock` or
+`/run/tailscale/tailscaled.sock`; `NECTAR_TAILSCALE_SOCKET` overrides). tailscaled checks
+write permission before it parses the body, so a 403 "serve config denied" means the user is
+not a Tailscale operator (fail, hint `sudo tailscale set --operator=$USER`), and any other
+answer means it may. Without a socket it warns; on macOS it is not probed. `--fix` never
+repairs it.
 
 Doctor never starts, stops or configures Portless and never touches port 443, Funnel, or any
 process without the env's `NECTAR_ENV`. Missing tools (`path-tools`, `portless`) are warnings

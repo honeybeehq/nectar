@@ -490,3 +490,15 @@ killed process groups by recorded pgid alone, which a recycled pgid turns into k
 stranger. (b) duplicates what env records already hold, and drifts. (c) leaves the rollout to
 hand-written shell. Anything doctor cannot prove stays put and is reported with a hint.
 
+## D28 — `doctor --no-daemon` for machines that get cleanup without nectard
+
+**Chose:** `nectar doctor --no-daemon` skips `install-nectard` / `reinstall-nectard` and
+reports the `nectard` check as `info`, which does not count against `healthy`. `--save`
+stores `daemon: "disabled"` in `nectar.json` so later doctor runs behave the same, and
+`nectar daemon install` clears it. An installed unit is reported, never removed. (SPEC §7,
+§10.5.)
+**Alternatives:** (a) a separate cleanup command; (b) always persist the flag; (c) downgrade
+the check to `warn`.
+**Why:** the Studio gets gc and orphan cleanup but no supervisor. (a) duplicates doctor's
+plan and its `--dry-run`. (b) makes a one-off run change the machine. (c) keeps nagging on a
+machine where no daemon is the intended state.

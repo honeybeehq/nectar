@@ -203,10 +203,12 @@ export interface MachineConfig {
   tailnet_dns_name?: string;
   last_gc_at?: string;
   exposures?: Record<string, ExposureTarget>;
+  daemon?: "disabled";
 }
 
 export interface ResolveResult {
   env: string;
+  ref: string;
   mode: Mode;
   commit: string;
   current_commit: string | null;
@@ -223,6 +225,9 @@ export interface ResolveResult {
   host: string;
   status: EnvStatus;
   liveness: Liveness | null;
+  packet_fields: PacketFields;
+  expires_at: string | null;
+  expires_in: string | null;
   log_tail?: string[];
 }
 

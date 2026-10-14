@@ -29,12 +29,15 @@ import { StateStore } from "./state.js";
 import { logTail, prepareLog } from "./logs.js";
 import {
   loopbackProxy,
+  OPERATOR_HINT,
+  probeServeRights,
   remoteNectar,
   resolveTailscale,
   rootMount,
   serveEntries,
   servePackStore,
   serveStatus,
+  serveDenied,
   serveWeb,
   statusHasFunnel,
   statusHasPort,
@@ -43,6 +46,7 @@ import {
   stopServe,
   TAILSCALE_FALLBACKS,
   tailnetIdentity,
+  type ServeOutcome,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
@@ -85,6 +89,7 @@ import type {
   DevRecipe,
   EnvRecord,
   EnvStatus,
+  EnvUrls,
   IosRecipe,
   MachineConfig,
   Mode,
@@ -125,6 +130,32 @@ interface MachineIdentity {
 interface PublishedWeb {
   record: EnvRecord;
   warnings: string[];
+  meshError: string | null;
+}
+
+function meshWarning(outcome: ServeOutcome | undefined, fallback: string): string {
+  if (outcome === undefined) return `tailscale unavailable or logged out — ${fallback}`;
+  const quoted = outcome.message.replace(/\s*\n\s*/g, " ") || "no output";
+  if (serveDenied(outcome.message)) {
+    return `tailscale serve was denied: "${quoted}" — ${fallback}. This user is not a Tailscale operator; run once: ${OPERATOR_HINT} (Nectar never runs sudo)`;
+  }
+  return `tailscale serve failed: "${quoted}" — ${fallback}`;
+}
+
+function movedWarning(old: EnvRecord | undefined, tailnetPort: number): string[] {
+  const previous = old?.serve?.tailnet_port;
+  if (previous === undefined || previous === tailnetPort) return [];
+  return [`tailscale serve :${previous} now holds an entry Nectar did not create; left it alone and moved this env to :${tailnetPort}, so its mesh URL changed`];
+}
+
+function packetFieldsFor(mode: Mode, ref: string, urls: EnvUrls, publicUrl: string | null): PacketFields {
+  return {
+    preview_url: mode === "web" || mode === "ios" ? urls.mesh ?? urls.local : null,
+    testpack_ref: mode === "desktop" || mode === "ios" ? ref : null,
+    dev_ref: mode === "dev" ? ref : null,
+    shell_recipe: null,
+    public_url: publicUrl,
+  };
 }
 
 export interface ReviveResult {
@@ -166,6 +197,7 @@ interface Diagnosis {
   checks: DoctorCheck[];
   config: MachineConfig;
   online: boolean;
+  serveDenied: boolean;
   funnelOn: boolean;
   gcPlan: GcReport;
   gcOverdue: boolean;
@@ -255,7 +287,7 @@ export class NectarService {
     };
     if (mode === "web") {
       const web = await this.publishWeb(publishOptions);
-      return this.publishResult(web.record, this.packetFields(web.record), web.warnings);
+      return this.publishResult(web.record, this.packetFields(web.record), web.warnings, { mesh_error: web.meshError });
     }
     if (mode === "ios") return this.publishIos(publishOptions);
     if (mode === "dev") return this.publishDev(publishOptions);
@@ -358,7 +390,7 @@ export class NectarService {
       site,
       ...(options.packet === undefined ? {} : { packet: options.packet }),
     });
-    return this.publishResult(web.record, this.packetFields(web.record), web.warnings, { source: site.source });
+    return this.publishResult(web.record, this.packetFields(web.record), web.warnings, { source: site.source, mesh_error: web.meshError });
   }
 
   private async stageStatic(record: EnvRecord, site: StaticSite): Promise<string[]> {
@@ -590,7 +622,7 @@ export class NectarService {
   private async cleanupServeOrphan(orphan: ClassifiedServeEntry): Promise<boolean> {
     if (orphan.class !== "orphan" || !(await this.soleEntryAt(orphan.tailnetPort, orphan.target))) return false;
     if (orphan.env === undefined) return stopServe(orphan.tailnetPort);
-    if (orphan.direct !== undefined) return serveWeb(orphan.tailnetPort, orphan.direct);
+    if (orphan.direct !== undefined) return (await serveWeb(orphan.tailnetPort, orphan.direct)).ok;
     const env = orphan.env;
     try {
       return await this.store.withLock(env, async () => {
@@ -786,8 +818,9 @@ export class NectarService {
       // Loopback probing says nothing about existing `tailscale serve` entries —
       // consult the serve table so we never clobber one (F5). This env's own old
       // entry stays claimable, or republish would lose its stable URL.
-      for (const port of statusPorts(await serveStatus())) reservedTailnet.add(port);
-      if (old?.serve?.tailnet_port !== undefined) reservedTailnet.delete(old.serve.tailnet_port);
+      const status = await serveStatus();
+      for (const port of statusPorts(status)) reservedTailnet.add(port);
+      if (old?.serve?.tailnet_port !== undefined && !(await this.foreignServeAt(old.serve, status))) reservedTailnet.delete(old.serve.tailnet_port);
       const upstreamPort = await allocatePort({
         start: identity.config.upstream_port_start,
         end: identity.config.upstream_port_end,
@@ -831,7 +864,7 @@ export class NectarService {
       });
       return { ...spawnDetached(recipe.serve, record.worktree, childEnv, log), cmd: recipe.serve };
     });
-    const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`];
+    const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`, ...movedWarning(old, tailnetPort)];
     await this.store.writeEnv(record);
 
     const readyUrl = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
@@ -842,19 +875,19 @@ export class NectarService {
     }
     record.urls.local = readyUrl.origin;
     warnings[0] = `portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`;
-    let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, await this.meshTarget(record));
-    if (meshReady && identity.dnsName !== undefined) {
+    let mesh: ServeOutcome | undefined;
+    if (identity.online && identity.dnsName !== undefined) mesh = await serveWeb(tailnetPort, await this.meshTarget(record));
+    if (mesh?.ok === true && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
-      warnings.push(`tailscale unavailable or logged out — mesh URL unavailable; preview_url fell back to ${record.urls.local}`);
+      warnings.push(meshWarning(mesh, `mesh URL unavailable; preview_url fell back to ${record.urls.local}`));
     }
     record.status = "serving";
     delete record.failure;
     delete record.liveness;
     await this.store.writeEnv(record);
-    return { record, warnings };
+    return { record, warnings, meshError: mesh === undefined || mesh.ok ? null : mesh.message };
   }
 
   private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {
@@ -1044,7 +1077,7 @@ export class NectarService {
         return this.publishResult(record, packetFields, embeddedWeb?.warnings ?? [], {
           sha256: packResult.sha256,
           size_bytes: packResult.size,
-          ...(embeddedWeb === undefined ? {} : { web_env: embeddedWeb.record.name }),
+          ...(embeddedWeb === undefined ? {} : { web_env: embeddedWeb.record.name, mesh_error: embeddedWeb.meshError }),
         });
       } catch (error) {
         record.status = "crashed";
@@ -1324,7 +1357,7 @@ export class NectarService {
       const command = serveSimCommand(deviceName, port);
       return { ...spawnDetached(command, record.worktree, childEnv, log), cmd: command };
     });
-    const warnings: string[] = [];
+    const warnings = movedWarning(old, tailnetPort);
     await this.store.writeEnv(record);
     const readyUrl = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
     if (readyUrl === undefined) {
@@ -1333,26 +1366,20 @@ export class NectarService {
       });
     }
     record.urls.local = readyUrl.origin;
-    let meshReady = false;
-    if (identity.online && identity.dnsName !== undefined) meshReady = await serveWeb(tailnetPort, readyUrl.origin);
-    if (meshReady && identity.dnsName !== undefined) {
+    let mesh: ServeOutcome | undefined;
+    if (identity.online && identity.dnsName !== undefined) mesh = await serveWeb(tailnetPort, readyUrl.origin);
+    if (mesh?.ok === true && identity.dnsName !== undefined) {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
-      warnings.push(`tailscale unavailable or logged out — stream URL fell back to ${record.urls.local}`);
+      warnings.push(meshWarning(mesh, `stream URL fell back to ${record.urls.local}`));
     }
     await this.store.writeEnv(record);
     return { warnings };
   }
 
   private packetFields(record: EnvRecord): PacketFields {
-    return {
-      preview_url: record.mode === "web" || record.mode === "ios" ? record.urls.mesh ?? record.urls.local : null,
-      testpack_ref: record.mode === "desktop" || record.mode === "ios" ? record.ref : null,
-      dev_ref: record.mode === "dev" ? record.ref : null,
-      shell_recipe: null,
-      public_url: record.exposure?.url ?? null,
-    };
+    return packetFieldsFor(record.mode, record.ref, record.urls, record.exposure?.url ?? null);
   }
 
   private publishResult(
@@ -1483,7 +1510,7 @@ export class NectarService {
       record.urls.mesh = null;
       return false;
     }
-    if (!(await serveWeb(tailnetPort, await this.meshTarget(record)))) return false;
+    if (!(await serveWeb(tailnetPort, await this.meshTarget(record))).ok) return false;
     record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     return true;
   }
@@ -1532,7 +1559,7 @@ export class NectarService {
         const tailnetPort = serve?.tailnet_port;
         if (record.mode !== "web" || record.urls.mesh === null || record.urls.local === null || serve === undefined || tailnetPort === undefined) return;
         if (await this.foreignServeAt(serve)) return;
-        restored = await serveWeb(tailnetPort, record.urls.local);
+        restored = (await serveWeb(tailnetPort, record.urls.local)).ok;
       },
       { bestEffort: true },
     );
@@ -1663,6 +1690,7 @@ export class NectarService {
       const commitState = await this.commitState(record);
       resolutions.push({
         env: record.name,
+        ref: record.ref,
         mode: record.mode,
         commit: record.commit,
         current_commit: commitState.currentCommit,
@@ -1679,6 +1707,9 @@ export class NectarService {
         host,
         status: record.status,
         liveness: record.liveness ?? null,
+        packet_fields: this.packetFields(record),
+        expires_at: record.expires_at,
+        expires_in: formatRemaining(record.expires_at),
         ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
       });
     }
@@ -1691,14 +1722,19 @@ export class NectarService {
     const parsed = parseRef(input);
     if (await this.isLocalHost(parsed.host, identity)) return this.localResolve(parsed.env, parsed.host, true);
     const remote = await this.remoteResult<ResolveResult | MultiResolveResult>(parsed.host, ["resolve", parsed.env, "--json"]);
-    if ("resolutions" in remote) {
+    const remoteResolution = (resolution: ResolveResult): ResolveResult => {
+      const ref = resolution.ref ?? `nectar://${parsed.host}/${resolution.env}`;
       return {
-        ...remote,
+        ...resolution,
+        ref,
         is_self: false,
-        resolutions: remote.resolutions.map((resolution) => ({ ...resolution, is_self: false })),
+        packet_fields: resolution.packet_fields ?? packetFieldsFor(resolution.mode, ref, resolution.urls, resolution.urls.public ?? null),
+        expires_at: resolution.expires_at ?? null,
+        expires_in: resolution.expires_in ?? null,
       };
-    }
-    return { ...remote, is_self: false };
+    };
+    if ("resolutions" in remote) return { ...remote, is_self: false, resolutions: remote.resolutions.map(remoteResolution) };
+    return remoteResolution(remote);
   }
 
   private async remoteResult<T extends object = Record<string, unknown>>(host: string, args: string[]): Promise<T> {
@@ -2320,17 +2356,22 @@ export class NectarService {
     return { config: updated, started: true };
   }
 
-  async doctor(options: { fix?: boolean; dryRun?: boolean } = {}): Promise<Record<string, unknown>> {
+  async doctor(options: { fix?: boolean; dryRun?: boolean; noDaemon?: boolean; save?: boolean } = {}): Promise<Record<string, unknown>> {
     if (options.dryRun === true && options.fix !== true) {
       throw new NectarError("E_USAGE", "--dry-run plans repairs; pass it together with --fix");
     }
+    if (options.save === true && (options.noDaemon !== true || options.dryRun === true)) {
+      throw new NectarError("E_USAGE", "--save remembers --no-daemon; pass it with --no-daemon and without --dry-run");
+    }
     await this.store.init();
-    const before = await this.diagnose();
+    if (options.save === true) await this.store.writeConfig({ ...(await this.store.readConfig()), daemon: "disabled" });
+    const noDaemon = options.noDaemon === true;
+    const before = await this.diagnose(noDaemon);
     if (options.fix !== true) return { healthy: before.healthy, checks: before.checks };
     const actions = this.planRepairs(before);
     if (options.dryRun === true) return { dry_run: true, healthy: before.healthy, checks: before.checks, actions };
     await this.runRepairs(actions);
-    const after = await this.diagnose();
+    const after = await this.diagnose(noDaemon);
     const unhealthyBefore = new Set(before.checks.filter((check) => check.status !== "pass").map((check) => check.name));
     const checks = after.checks.map((check) =>
       check.status === "pass" && unhealthyBefore.has(check.name) ? { ...check, fixed: true } : check,
@@ -2338,7 +2379,32 @@ export class NectarService {
     return { dry_run: false, healthy: after.healthy, checks, actions };
   }
 
-  private async diagnose(): Promise<Diagnosis> {
+  private async serveRightsCheck(online: boolean): Promise<DoctorCheck> {
+    if (process.platform !== "linux") {
+      return { name: "tailscale-serve", status: "pass", message: `Serve rights are not probed on ${process.platform}; the Tailscale app grants them to the logged-in user` };
+    }
+    if (!online) return { name: "tailscale-serve", status: "warn", message: "Tailscale is not up, so serve rights were not probed" };
+    const rights = await probeServeRights();
+    if (rights.state === "allowed") return { name: "tailscale-serve", status: "pass", message: "This user may change the tailscale serve config" };
+    if (rights.state === "unknown") {
+      return { name: "tailscale-serve", status: "warn", message: `Could not probe serve rights: ${rights.message}` };
+    }
+    return {
+      name: "tailscale-serve",
+      status: "fail",
+      message: `tailscaled refuses serve changes from ${os.userInfo().username} ("${rights.message}"); publishes will be local-only with no mesh URL`,
+      hint: `Make this user a Tailscale operator once: ${OPERATOR_HINT}. Nectar never runs sudo, and doctor --fix leaves this alone`,
+    };
+  }
+
+  async enableDaemon(): Promise<void> {
+    const config = await this.store.readConfig();
+    if (config.daemon === undefined) return;
+    delete config.daemon;
+    await this.store.writeConfig(config);
+  }
+
+  private async diagnose(noDaemon = false): Promise<Diagnosis> {
     const config = await this.store.readConfig();
     const identity = await tailnetIdentity();
     const status = await serveStatus();
@@ -2391,6 +2457,8 @@ export class NectarService {
       binary: tailscale.source === "none" ? null : tailscale.path,
       binary_source: tailscale.source,
     });
+    const serveRights = await this.serveRightsCheck(identity !== undefined);
+    checks.push(serveRights);
     checks.push({
       name: "serve-443",
       status: statusHasPort(status, 443) ? "fail" : "pass",
@@ -2470,7 +2538,7 @@ export class NectarService {
       message: config.last_gc_at === undefined ? "GC has never run on this machine" : `Last GC: ${config.last_gc_at}`,
       ...(gcOverdue ? { hint: "nectar doctor --fix runs gc now; nectard runs it hourly" } : {}),
     });
-    const nectard = await this.nectardState();
+    const nectard = await this.nectardState(noDaemon ? "--no-daemon" : config.daemon === "disabled" ? `daemon: "disabled" in ${this.paths.config}` : undefined);
     if (nectard.check !== undefined) checks.push(nectard.check);
     checks.push(await this.pathToolsCheck(nectard.unitPath));
     const packServerLive = await this.packServerAlive(config);
@@ -2557,6 +2625,7 @@ export class NectarService {
       checks,
       config,
       online: identity !== undefined,
+      serveDenied: serveRights.status === "fail",
       funnelOn,
       gcPlan,
       gcOverdue,
@@ -2594,9 +2663,9 @@ export class NectarService {
     return holders.filter((holder): holder is DeadHolder => holder !== undefined);
   }
 
-  private async nectardState(): Promise<NectardState> {
+  private async nectardState(disabledBy?: string): Promise<NectardState> {
     if (process.platform !== "darwin" && process.platform !== "linux") return {};
-    const [installed, status] = await Promise.all([readInstalledUnit(), unitStatus(this.paths)]);
+    const [installed, status] = await Promise.all([readInstalledUnit(), unitStatus(this.paths, process.platform, disabledBy === undefined ? {} : { waitMs: 0 })]);
     const spec = unitSpec(this.paths);
     const expected = spec.program;
     const facts = {
@@ -2609,6 +2678,18 @@ export class NectarService {
     };
     const unitPath = installed?.env.PATH;
     const withPath = (state: NectardState): NectardState => (unitPath === undefined ? state : { ...state, unitPath });
+    if (disabledBy !== undefined) {
+      return withPath({
+        facts,
+        check: {
+          name: "nectard",
+          status: "info",
+          message: `nectard is disabled here (${disabledBy}); doctor --fix will not install or restart it. Unit: ${installed === undefined ? "not installed" : status.active}`,
+          hint: "`nectar daemon install` installs it and clears the saved choice",
+          details: [facts],
+        },
+      });
+    }
     if (installed === undefined) {
       return {
         problem: "missing",
@@ -2779,7 +2860,7 @@ export class NectarService {
         planned(problem === "missing" ? "install-nectard" : "reinstall-nectard", "nectar daemon install", `nectard is ${problem}`, diagnosis.nectard.facts),
       );
     }
-    if (diagnosis.online && !diagnosis.funnelOn) {
+    if (diagnosis.online && !diagnosis.funnelOn && !diagnosis.serveDenied) {
       const pack = { pid: diagnosis.config.pack_server_pid ?? null, port: diagnosis.config.pack_server_port, live: diagnosis.packServerLive };
       if (!diagnosis.packServerLive) actions.push(planned("start-pack-server", "pack-store", "the read-only pack server is down", pack));
       if (!diagnosis.packServerLive || !diagnosis.proxyPresent) {
@@ -2842,7 +2923,12 @@ export class NectarService {
       } else if (action.action === "install-nectard" || action.action === "reinstall-nectard") {
         await settle(action, async () => {
           await installUnit(this.paths);
-          const state = await this.nectardState();
+          const deadline = Date.now() + 5_000;
+          let state = await this.nectardState();
+          while (state.problem !== undefined && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            state = await this.nectardState();
+          }
           return { ok: state.problem === undefined, after: state.facts };
         });
       }

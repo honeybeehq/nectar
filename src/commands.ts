@@ -122,6 +122,16 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+export function groupAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<void> {
   const groupAlive = (): boolean => {
     try {

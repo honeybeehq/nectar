@@ -90,7 +90,8 @@ gc (hourly, pollinate-scheduled)
 
 `nectar` is a single CLI. There is **no daemon in v0/v1**. Long-running serve processes are
 spawned detached (own process group, stdio to log files); their PIDs live in the env record;
-liveness is checked lazily (`nectar ls`/`show`/`gc` verify PID + port). Periodic work (TTL
+liveness is checked lazily: every read (`ls`, `show`, `resolve`, `expose`, dev `open`) re-derives
+it from PID/process group + port (§4.4 "Liveness"). Periodic work (TTL
 enforcement, reaping) is `nectar gc`, scheduled externally via pollinate (§10.3).
 
 A supervisor daemon (`nectard`: restart crashed servers, push state, watch TTLs in real
@@ -168,6 +169,7 @@ reads Forum.
 ```text
 publishing → serving → expired → cold → (reaped)
                 │
+                ├→ unhealthy        (process alive, port silent; flips back on answer)
                 ├→ crashed          (serve process died; record + logs kept)
                 └→ stopped          (explicit nectar stop; worktree kept)
 ```
@@ -184,8 +186,29 @@ publishing → serving → expired → cold → (reaped)
   worktree exists).
 - **cold** — 24 h after expiry: worktree deleted. Packs and evidence persist to their own
   quotas (§10).
+- **unhealthy / crashed (liveness)** — see "Liveness" below. Neither is sticky while the
+  record still holds its `serve` block.
 - **reaped** — record deleted after 14 days cold. Evidence referenced from packets should be
   copied out by then (Forum owns long-term evidence retention; nectar is not an archive).
+
+#### Liveness
+
+Every read re-probes an env whose status is `serving`, `unhealthy` or `crashed` and that
+still has a `serve` block (`src/liveness.ts` `probeLiveness`, reusable by `nectard`):
+
+- `upstream_port` answers on loopback → `serving` (`reason: port_open`), even when the
+  record said `crashed` or the recorded PID is gone.
+- PID or its process group alive, port silent after retries (300/600/1200 ms timeouts with
+  150 ms backoff, ≈2.4 s budget) → `unhealthy` (`port_unresponsive`). Still holds its port,
+  counts toward quota, needs `rm --force`.
+- Process and group gone, port silent on one probe → `crashed` (`process_exited`).
+- No `upstream_port` → process alone decides (`process_alive` / `process_exited`).
+
+The result is stored on the record as `liveness: { state, reason, checked_at, pid_alive,
+port_open }` and returned by `ls` (per row), `show` and `resolve`. The record is rewritten
+only when status or reason changes (best-effort lock; a publish in flight wins). Crashed
+records from a failed publish or orphan cleanup have no `serve` block and stay `crashed`.
+`gc`'s dead-Serve-proxy check uses the same port retries before tearing down an env.
 
 TTL default **72 h**, per-publish `--ttl 12h|7d`. Any `nectar open` / `nectar touch` /
 desk render (desk calls `nectar touch` on view) resets the clock. Active review never gets
@@ -570,10 +593,10 @@ nectar publish [--mode web|desktop|cli|backend|ios] [--branch <b>] [--ttl 72h]
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
 
 nectar ls [--json] [--mode <m>] [--status <s>]
-    # This machine's envs: name, mode, status, urls.mesh, expires-in, publisher bee.
+    # This machine's envs: name, mode, status, urls.mesh, expires-in, publisher bee, liveness.
 
 nectar show <env|ref> [--json]
-    # Full record + last 40 log lines when status is crashed.
+    # Full record (incl. liveness) + last 40 log lines when status is crashed or unhealthy.
 
 nectar open <env|ref>
     # web → open urls.local when resolve.is_self, otherwise urls.mesh ·
@@ -584,7 +607,7 @@ nectar open <env|ref>
 
 nectar shell <env|ref> [--no-record] [--json]
 nectar resolve <ref> [--json]
-    # ref → concrete consumables: { mode, is_self, urls, testpack_url, host, status }.
+    # ref → concrete consumables: { mode, is_self, urls, testpack_url, host, status, liveness }.
     # Consumers prefer urls.local when is_self, urls.mesh otherwise.
 
 nectar touch <env|ref> [--ttl 72h]
@@ -592,7 +615,7 @@ nectar touch <env|ref> [--ttl 72h]
     # re-arm the env's own publish TTL, never the 72 h default.
 nectar stop <env>            # stop serve process, keep everything; status → stopped
 nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash);
-                             # a *serving* env refuses without --force (E_USAGE)
+                             # a *serving*/*unhealthy* env refuses without --force (E_USAGE)
 nectar gc [--dry-run] [--json]
     # Enforce §10: expire → stop; cold → delete worktrees; reap old records; prune pack
     # store to quota (LRU). Prints a reap report. Safe to run concurrently (per-env locks).
@@ -747,7 +770,7 @@ doctor` warns if `gc` hasn't run in 24 h.
 | --- | --- | --- |
 | F1 | portless missing / proxy down | web publish **succeeds**; `urls.local` degrades to the healthy IPv4/IPv6 loopback origin; warning in envelope; mesh URL unaffected |
 | F2 | tailscale down / logged out | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`) |
-| F3 | serve crashes post-publish | lazy detection → `status: crashed`; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
+| F3 | serve crashes post-publish | lazy detection on every read → `status: crashed` (process gone) or `unhealthy` (port silent), back to `serving` when the port answers; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
 | F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; detached process killed, Serve entry removed, runtime fields/port claims cleared; env kept as `crashed` with `failure` details |
 | F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove them and clear matching env claims |
 | F6 | checkout conflict / dirty nectar worktree | worktree is nectar-owned ⇒ `git reset --hard` + clean is always legal; borrowed `--worktree` is never reset — publish fails `E_CHECKOUT` instead |

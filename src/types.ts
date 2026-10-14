@@ -6,8 +6,17 @@ export type EnvStatus =
   | "serving"
   | "expired"
   | "cold"
+  | "unhealthy"
   | "crashed"
   | "stopped";
+
+export interface Liveness {
+  state: "serving" | "unhealthy" | "crashed";
+  reason: "port_open" | "process_alive" | "port_unresponsive" | "process_exited";
+  checked_at: string;
+  pid_alive: boolean;
+  port_open: boolean | null;
+}
 
 export interface WebRecipe {
   serve: string;
@@ -149,6 +158,7 @@ export interface EnvRecord {
   borrowed_worktree: boolean;
   status: EnvStatus;
   serve?: ServeRecord;
+  liveness?: Liveness;
   dev?: DevRecord;
   pinned?: boolean;
   last_opened_at?: string;
@@ -207,6 +217,7 @@ export interface ResolveResult {
   ax_url: string | null;
   host: string;
   status: EnvStatus;
+  liveness: Liveness | null;
   log_tail?: string[];
 }
 

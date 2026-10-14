@@ -38,6 +38,7 @@ import {
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
+import { hasProbeableServe, holdsRuntime, portAnswers, probeLiveness } from "./liveness.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
@@ -281,6 +282,7 @@ export class NectarService {
       }
     }
     delete record.serve;
+    delete record.liveness;
     record.urls = { local: null, mesh: null };
     return cleanupErrors;
   }
@@ -311,7 +313,7 @@ export class NectarService {
       candidates.map(async (entry): Promise<ServeOrphan | undefined> => {
         const open =
           entry.upstreamHost === "localhost"
-            ? await portOpen(entry.upstreamPort)
+            ? await portAnswers(entry.upstreamPort)
             : await portOpenOnHost(entry.upstreamPort, entry.upstreamHost);
         if (open) return undefined;
         const owner = records.find((record) => record.serve?.tailnet_port === entry.tailnetPort);
@@ -373,10 +375,10 @@ export class NectarService {
       const activeWeb = (
         await Promise.all(
           records
-            .filter((record) => record.name !== name && record.mode === "web" && record.status === "serving" && record.serve !== undefined)
+            .filter((record) => record.name !== name && record.mode === "web" && hasProbeableServe(record))
             .map(async (record) => this.refreshLiveness(record)),
         )
-      ).filter((record) => record.status === "serving");
+      ).filter((record) => holdsRuntime(record.status));
       const config = await this.store.readConfig();
       if (activeWeb.length >= config.serving_web_limit) {
         throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
@@ -491,6 +493,7 @@ export class NectarService {
     }
     record.status = "serving";
     delete record.failure;
+    delete record.liveness;
     await this.store.writeEnv(record);
     return { record, warnings };
   }
@@ -618,6 +621,7 @@ export class NectarService {
     }
     record.status = "serving";
     delete record.failure;
+    delete record.liveness;
     await this.store.writeEnv(record);
   }
 
@@ -830,7 +834,7 @@ export class NectarService {
     return this.store.withLock(name, async () => {
       const records = await this.store.listEnvs();
       const activeSims = records.filter(
-        (record) => record.name !== name && record.mode === "ios" && record.status === "serving" && record.serve !== undefined,
+        (record) => record.name !== name && record.mode === "ios" && holdsRuntime(record.status) && record.serve !== undefined,
       );
       const config = await this.store.readConfig();
       if (activeSims.length >= config.serving_sim_limit) {
@@ -1015,23 +1019,22 @@ export class NectarService {
   }
 
   private async refreshLiveness(record: EnvRecord): Promise<EnvRecord> {
-    if (record.status !== "serving" || record.serve === undefined) return record;
-    const processDead = !pidAlive(record.serve.pid);
-    const portDead =
-      record.serve.upstream_port !== undefined && !(await portOpen(record.serve.upstream_port));
-    if (processDead || portDead) {
-      record.status = "crashed";
-      // Locked, best-effort: writing this stale snapshot back directly would
-      // clobber a concurrent republish's fresh serve block (a lost update that
-      // leaks the new detached server forever).
-      await this.store.updateEnv(
-        record.name,
-        (current) => {
-          if (current.status === "serving") current.status = "crashed";
-        },
-        { bestEffort: true },
-      );
-    }
+    if (!hasProbeableServe(record)) return record;
+    const serve = record.serve;
+    const liveness = await probeLiveness(serve);
+    const previous = { status: record.status, reason: record.liveness?.reason };
+    record.status = liveness.state;
+    record.liveness = liveness;
+    if (previous.status === liveness.state && previous.reason === liveness.reason) return record;
+    await this.store.updateEnv(
+      record.name,
+      (current) => {
+        if (!hasProbeableServe(current) || current.serve.pid !== serve.pid) return;
+        current.status = liveness.state;
+        current.liveness = liveness;
+      },
+      { bestEffort: true },
+    );
     return record;
   }
 
@@ -1047,6 +1050,7 @@ export class NectarService {
         mesh_url: record.urls.mesh,
         expires_in: formatRemaining(record.expires_at),
         publisher_bee: record.publisher.hive_bee ?? null,
+        liveness: record.liveness ?? null,
       }));
     return { envs };
   }
@@ -1060,7 +1064,7 @@ export class NectarService {
     const record = await this.refreshLiveness(await this.store.readEnv(validateEnvName(input)));
     return {
       env: record,
-      ...(record.status === "crashed" ? { log_tail: await logTail(this.paths, record.name) } : {}),
+      ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
     };
   }
 
@@ -1129,7 +1133,8 @@ export class NectarService {
         ax_url: record.mode === "ios" && record.status === "serving" && streamUrl !== null ? `${streamUrl}/ax` : null,
         host,
         status: record.status,
-        ...(record.status === "crashed" ? { log_tail: await logTail(this.paths, record.name) } : {}),
+        liveness: record.liveness ?? null,
+        ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
       });
     }
     return this.isQualified(name) ? (resolutions[0] as ResolveResult) : { env: name, host, is_self: isSelf, resolutions };
@@ -1248,11 +1253,12 @@ export class NectarService {
       if (record.dev === undefined) {
         throw new NectarError("E_NOT_FOUND", `Dev environment '${name}' has no registered launch command; republish it`);
       }
-      if (record.status === "serving" && (record.serve === undefined || !pidAlive(record.serve.pid))) {
-        if (record.serve !== undefined) await this.stopRuntime(record);
-        delete record.serve;
-        record.status = "crashed";
+      if (hasProbeableServe(record)) {
+        const liveness = await probeLiveness(record.serve);
+        record.status = liveness.state === "serving" ? "serving" : "crashed";
+        record.liveness = liveness;
       }
+      if (record.status === "serving" && record.serve === undefined) record.status = "crashed";
       if (record.status !== "serving" && record.serve !== undefined) {
         await this.stopRuntime(record);
         delete record.serve;
@@ -1484,10 +1490,11 @@ export class NectarService {
       // put them so ls/resolve keep telling the truth.
       if (
         current.mode !== "dev" &&
-        (current.status === "serving" || current.status === "publishing" || current.status === "crashed")
+        (holdsRuntime(current.status) || current.status === "publishing" || current.status === "crashed")
       ) {
         current.status = "stopped";
       }
+      delete current.liveness;
       await this.store.writeEnv(current);
       return current;
     });
@@ -1497,7 +1504,7 @@ export class NectarService {
   async remove(name: string, force = false): Promise<Record<string, unknown>> {
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
-      if (record.status === "serving" && !force) {
+      if (holdsRuntime(record.status) && !force) {
         throw new NectarError("E_USAGE", `Environment '${name}' is serving; pass --force to stop and remove it`);
       }
       await this.stopRuntime(record);

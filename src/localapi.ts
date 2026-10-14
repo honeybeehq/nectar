@@ -63,6 +63,7 @@ export interface DiscoveryOptions {
 
 export const DISCOVERY_STEP_TIMEOUT_MS = 3_000;
 export const DISCOVERY_BUDGET_MS = 10_000;
+const KILL_MARGIN_MS = 250;
 export const REDISCOVER_MIN_MS = 30_000;
 export const REDISCOVER_MAX_MS = 300_000;
 
@@ -307,7 +308,7 @@ export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<
   };
   if (platform === "darwin") {
     const lsofBinary = env.NECTAR_TEST_LSOF_BIN || (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof");
-    const lsof = options.lsof ?? lsofRunner(lsofBinary, stepMs);
+    const lsof = options.lsof ?? lsofRunner(lsofBinary, stepMs + KILL_MARGIN_MS);
     const macsysDir = options.macsysDir ?? (env.NECTAR_TEST_MACSYS_DIR || MACSYS_SHARED_DIR);
     const home = options.home ?? os.homedir();
     const lsofStep = (): Promise<void> => run("lsof", options.lsof === undefined ? `lsof:${lsofBinary}` : undefined, (stepNotes) => lsofProofs(lsof, stepNotes));

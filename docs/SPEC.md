@@ -539,7 +539,7 @@ never keeps a Nectar process from exiting. Every discovery step (`env`,
 step that runs out is recorded as `timeout` and skipped, and a step whose earlier call
 has still not returned is not started again (`stuck`), so a blocked file-system call
 costs one worker thread once, not one per retry. A step left with no budget is
-`skipped`. lsof is killed at its 3 s. The discovery is cached in the process: an endpoint
+`skipped`. lsof is killed 250 ms after its 3 s, so the step is always recorded as `timeout`. The discovery is cached in the process: an endpoint
 that answers is reused until it fails, and when none answers, the same endpoints are
 retried without a new discovery for 30 s, doubling to at most 5 min, back to 30 s once
 one answers. A port that answers 401 to a reused discovery's token means the proof

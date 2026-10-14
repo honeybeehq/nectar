@@ -355,7 +355,7 @@ describe("LocalAPI discovery bounds", () => {
     expect(found.steps[0]).toMatchObject({ step: "lsof", outcome: "timeout" });
     expect(found.endpoints).toEqual([{ kind: "tcp", port: 50003, token: "abcdef", source: "macsys" }]);
     const pid = Number((await readFile(path.join(bin, "pid"), "utf8")).trim());
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     expect(() => process.kill(pid, 0)).toThrow();
   });
 

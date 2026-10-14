@@ -86,8 +86,9 @@ Agents in Honeybee Cells can't write `~/.nectar`, so with nectard running the CL
 `publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` to it over a Unix socket at
 `~/.config/nectar/nectard.sock` (owner-only). The CLI uses nectard whenever it answers for
 the same `NECTAR_HOME`, and acts on `NECTAR_HOME` itself otherwise. `--direct` forces the
-local path. If the home is read-only and nectard isn't running, commands fail with
-`E_DAEMON` and the hint `nectar daemon install`, which the user runs outside any Cell.
+local path. If the home is read-only and nectard isn't running, `ls`, `show` and
+`resolve` still answer read-only (`touched: false`), and the rest fail with `E_DAEMON`
+and the hint `nectar daemon install`, which the user runs outside any Cell.
 nectard copies or checks out the Cell's source into its own work dir, so the preview
 outlives the Cell.
 

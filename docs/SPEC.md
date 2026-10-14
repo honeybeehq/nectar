@@ -835,8 +835,10 @@ repo), `--direct` (never use nectard, act on `NECTAR_HOME` in this process).
 
 Route (D29): `publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` go through the
 local nectard (§4.5 control socket) when it answers for the same `NECTAR_HOME`.
-Otherwise they run in-process if `NECTAR_HOME` is writable (or can be created), and fail
-with `E_DAEMON` if it is not. Every other command runs in-process. On a read-only
+Otherwise they run in-process if `NECTAR_HOME` is writable (or can be created). If it is
+not, `ls`, `show` and `resolve` still answer from the records in read-only mode. They
+write nothing: no liveness write-back and no touch. `show` and `resolve` add
+`touched: false` and `touch_skipped: "<why>"`. The others fail with `E_DAEMON`. Every other command runs in-process. On a read-only
 `NECTAR_HOME` it fails with `E_DAEMON`. Through nectard, publish runs with nectard's
 environment (the unit's frozen `PATH`), not the calling shell's. Use `--direct` from a
 normal shell to publish with the shell's own toolchain. Everything an agent needs is a flag — no interactive prompts on any command an agent
@@ -865,8 +867,9 @@ plus (added post-v0 review, 2026-07-19):
 - `E_INTERNAL` — an unexpected internal failure (bug, fs error); `details.unexpected`
   is set when it was not a typed nectar error. Report it, don't remediate.
 - `E_DAEMON` (2026-10-14, D29) — `NECTAR_HOME` is read-only here (a Honeybee Cell) and
-  no nectard for that home answers on the control socket, or the command is not one
-  nectard serves (`publish`, `ls`, `show`, `resolve`, `touch`, `stop`, `rm`).
+  no nectard for that home answers on the control socket, for `publish`, `touch`, `stop`
+  or `rm`, or for any command nectard does not serve. (`ls`, `show` and `resolve` fall
+  back to a read-only view instead.)
   `error.hint` is `nectar daemon install`. The user runs it from a shell outside any
   Cell. An agent reports it as a blocker and does not install anything itself.
 

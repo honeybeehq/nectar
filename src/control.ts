@@ -401,7 +401,9 @@ export async function homeWritable(root: string): Promise<boolean> {
   }
 }
 
-export type Route = { kind: "direct" } | { kind: "daemon"; socket: string };
+export type Route = { kind: "direct" } | { kind: "daemon"; socket: string } | { kind: "readonly"; reason: string };
+
+const READ_ONLY_VIEWS: readonly string[] = ["ls", "show", "resolve"];
 
 export async function selectRoute(
   command: string,
@@ -429,6 +431,7 @@ export async function selectRoute(
       : !matches
         ? `nectard on ${socket} serves NECTAR_HOME ${hello.nectar_home}`
         : `nectard on ${socket} is older than this CLI and cannot run nectar ${command}; re-run nectar daemon install`;
+  if (READ_ONLY_VIEWS.includes(command)) return { kind: "readonly", reason: `NECTAR_HOME is read-only here and ${reason}` };
   throw new NectarError("E_DAEMON", `NECTAR_HOME ${paths.root} is read-only here and ${reason}. Ask the user to run \`${DAEMON_HINT}\` outside the Cell`, {
     hint: DAEMON_HINT,
     socket,

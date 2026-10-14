@@ -308,7 +308,7 @@ describe("route selection", () => {
   it("fails with E_DAEMON and the install hint when the home is read-only and nectard cannot help", async () => {
     const failures = [
       () => selectRoute("publish", paths, { socket: "/s", hello: none, writable: readOnly }),
-      () => selectRoute("ls", paths, { socket: "/s", hello: hello("/other"), writable: readOnly }),
+      () => selectRoute("touch", paths, { socket: "/s", hello: hello("/other"), writable: readOnly }),
       () => selectRoute("rm", paths, { socket: "/s", hello: hello("/srv/nectar", ["ls"]), writable: readOnly }),
       () => selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly }),
     ];
@@ -316,6 +316,12 @@ describe("route selection", () => {
       await expect(failure()).rejects.toMatchObject({ code: "E_DAEMON", details: { hint: "nectar daemon install" } });
     }
     expect(await codeOf(selectRoute("expose", paths, { writable }))).toBe("ok");
+    for (const view of ["ls", "show", "resolve"]) {
+      expect(await selectRoute(view, paths, { socket: "/s", hello: none, writable: readOnly })).toMatchObject({
+        kind: "readonly",
+        reason: expect.stringContaining("not installed, not running") as string,
+      });
+    }
   });
 
   it("finds the Cell root from the working directory", () => {

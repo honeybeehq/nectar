@@ -231,6 +231,8 @@ export interface ResolveResult {
   expires_at: string | null;
   expires_in: string | null;
   log_tail?: string[];
+  touched?: false;
+  touch_skipped?: string;
 }
 
 export interface MultiResolveResult {

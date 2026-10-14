@@ -516,8 +516,9 @@ the caller (`cell`, `hive_bee`, `hive_session`) and arguments checked against a
 per-operation allowlist of names and types. Replies are the CLI's own `--json` envelope.
 The CLI picks the route on each call. `--direct` means local. A nectard that answers
 for the same `NECTAR_HOME` and supports the operation is used. Otherwise a writable
-`NECTAR_HOME` means local. Anything else is `E_DAEMON` with
-`hint: "nectar daemon install"`. Publish through nectard takes a host path. nectard
+`NECTAR_HOME` means local. Otherwise `ls`, `show` and `resolve` give a read-only view
+(no touch, `touched: false` with the reason), so a Cell can still read its preview URL.
+Anything else is `E_DAEMON` with `hint: "nectar daemon install"`. Publish through nectard takes a host path. nectard
 resolves it with realpath and accepts it only inside the user's home or the caller's
 Cell. The Cell is self-reported, so it counts only as a directory the user owns below
 the Cells root (`~/.hive/v2/cells` by default). It refuses a scope that lies inside or

@@ -66,15 +66,29 @@ describe("CLI with a read-only NECTAR_HOME", () => {
     const readOnly = await tempDir("cli-daemon-ro");
     await chmod(readOnly, 0o555);
     const roEnv = { ...env, NECTAR_HOME: readOnly };
-    for (const args of [["publish", site], ["ls"], ["rm", "x--y--web"], ["expose", "x--y--web", "--to", "site"]]) {
+    for (const args of [["publish", site], ["touch", "x--y--web"], ["rm", "x--y--web"], ["expose", "x--y--web", "--to", "site"]]) {
       const result = await cli(roEnv, ...args);
       expect(result.exitCode).toBe(1);
       expect(result.envelope).toMatchObject({ ok: false, command: args[0], error: { code: "E_DAEMON", hint: "nectar daemon install" } });
     }
-    const direct = await cli(roEnv, "ls", "--direct");
-    expect(direct.envelope).toMatchObject({ ok: false });
-    expect((direct.envelope.error as { code: string }).code).not.toBe("E_DAEMON");
     await chmod(readOnly, 0o755);
+  });
+
+  it.skipIf(isRoot)("still lists, shows and resolves read-only without nectard, and says the touch was skipped", async () => {
+    const viewHome = await tempDir("cli-daemon-view");
+    const viewEnv = { ...env, NECTAR_HOME: viewHome };
+    expect((await cli(viewEnv, "publish", site, "--name", "view", "--direct")).envelope).toMatchObject({ ok: true });
+    await chmod(viewHome, 0o555);
+    try {
+      expect((await cli(viewEnv, "ls")).envelope).toMatchObject({ ok: true, result: { envs: [{ name: "view--static--web", status: "serving" }] } });
+      const skipped = { touched: false, touch_skipped: expect.stringContaining("read-only") as string };
+      expect((await cli(viewEnv, "show", "view--static--web")).envelope).toMatchObject({ ok: true, result: { status: "serving", ...skipped } });
+      expect((await cli(viewEnv, "resolve", "view--static--web")).envelope).toMatchObject({ ok: true, result: { env: "view--static--web", ...skipped } });
+      expect((await cli(viewEnv, "touch", "view--static--web")).envelope).toMatchObject({ ok: false, error: { code: "E_DAEMON" } });
+    } finally {
+      await chmod(viewHome, 0o755);
+      await cli(viewEnv, "rm", "view--static--web", "--force", "--direct");
+    }
   });
 
   it("routes to a running nectard, stamps the caller, and --direct bypasses it", async () => {

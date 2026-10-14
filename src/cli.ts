@@ -24,14 +24,15 @@ function directRequested(): boolean {
   return program.opts<{ direct?: boolean }>().direct === true;
 }
 
-async function routed(command: ControlOp, args: Record<string, unknown>, local: () => Promise<unknown>): Promise<unknown> {
+async function routed(command: ControlOp, args: Record<string, unknown>, local: (service: NectarService) => Promise<unknown>): Promise<unknown> {
   const paths = getPaths();
   const route = await selectRoute(command, paths, { direct: directRequested() });
-  if (route.kind === "direct") return local();
+  if (route.kind === "direct") return local(new NectarService());
+  if (route.kind === "readonly") return local(new NectarService(undefined, { readOnly: route.reason }));
   try {
     return await callDaemon(route.socket, command, { nectar_home: path.resolve(paths.root), caller: callerFromEnv(), args });
   } catch (error) {
-    if (error instanceof NectarError && error.details.refused === "path" && (await homeWritable(paths.root))) return local();
+    if (error instanceof NectarError && error.details.refused === "path" && (await homeWritable(paths.root))) return local(new NectarService());
     throw error;
   }
 }
@@ -103,7 +104,7 @@ program
           name: options.name,
           dry_run: options.dryRun,
         };
-        return routed("publish", args, async () => new NectarService().publish({
+        return routed("publish", args, async (service) => service.publish({
           repo: source,
           ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
           ...(options.mode === undefined ? {} : { mode: options.mode }),
@@ -123,13 +124,13 @@ program
   .option("--mode <mode>")
   .option("--status <status>")
   .action(async (options: { mode?: string; status?: string }) =>
-    execute("ls", async () => routed("ls", options, async () => new NectarService().list(options))),
+    execute("ls", async () => routed("ls", options, async (service) => service.list(options))),
   );
 
 program
   .command("show <env-or-ref>")
   .description("show a full environment record")
-  .action(async (input: string) => execute("show", async () => routed("show", { target: input }, async () => new NectarService().show(input))));
+  .action(async (input: string) => execute("show", async () => routed("show", { target: input }, async (service) => service.show(input))));
 
 program
   .command("open <env-or-ref>")
@@ -150,27 +151,27 @@ program
 program
   .command("resolve <env-or-ref>")
   .description("resolve a Nectar ref to concrete consumables")
-  .action(async (input: string) => execute("resolve", async () => routed("resolve", { target: input }, async () => new NectarService().resolve(input))));
+  .action(async (input: string) => execute("resolve", async () => routed("resolve", { target: input }, async (service) => service.resolve(input))));
 
 program
   .command("touch <env-or-ref>")
   .description("reset an environment's TTL")
   .option("--ttl <duration>", "time to live (default: the env's own TTL)")
   .action(async (input: string, options: { ttl?: string }) =>
-    execute("touch", async () => routed("touch", { target: input, ttl: options.ttl }, async () => new NectarService().touch(input, options.ttl))),
+    execute("touch", async () => routed("touch", { target: input, ttl: options.ttl }, async (service) => service.touch(input, options.ttl))),
   );
 
 program
   .command("stop <env>")
   .description("stop serving and retain environment files")
-  .action(async (input: string) => execute("stop", async () => routed("stop", { env: input }, async () => new NectarService().stop(input))));
+  .action(async (input: string) => execute("stop", async () => routed("stop", { env: input }, async (service) => service.stop(input))));
 
 program
   .command("rm <env>")
   .description("stop and trash an environment")
   .option("--force", "confirm removal of a serving environment")
   .action(async (input: string, options: { force?: boolean }) =>
-    execute("rm", async () => routed("rm", { env: input, force: options.force }, async () => new NectarService().remove(input, options.force ?? false))),
+    execute("rm", async () => routed("rm", { env: input, force: options.force }, async (service) => service.remove(input, options.force ?? false))),
   );
 
 program

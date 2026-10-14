@@ -236,11 +236,17 @@ export class NectarService {
   readonly store: StateStore;
 
   private readonly publisher: Publisher | undefined;
+  private readonly readOnly: string | undefined;
 
-  constructor(root?: string, options: { publisher?: Publisher } = {}) {
+  constructor(root?: string, options: { publisher?: Publisher; readOnly?: string } = {}) {
     this.paths = getPaths(root);
     this.store = new StateStore(this.paths);
     this.publisher = options.publisher;
+    this.readOnly = options.readOnly;
+  }
+
+  private touchNote(): { touched?: false; touch_skipped?: string } {
+    return this.readOnly === undefined ? {} : { touched: false, touch_skipped: this.readOnly };
   }
 
   private async identity(): Promise<MachineIdentity> {
@@ -249,7 +255,7 @@ export class NectarService {
     if (live !== undefined) {
       const updated = { ...config, tailnet_host: live.host, tailnet_dns_name: live.dnsName };
       // Rewriting on every call races doctor's pack-server registration writes.
-      if (config.tailnet_host !== live.host || config.tailnet_dns_name !== live.dnsName) {
+      if (this.readOnly === undefined && (config.tailnet_host !== live.host || config.tailnet_dns_name !== live.dnsName)) {
         await this.store.writeConfig(updated);
       }
       return { host: live.host, dnsName: live.dnsName, online: true, config: updated };
@@ -1419,7 +1425,7 @@ export class NectarService {
     const previous = { status: record.status, reason: record.liveness?.reason };
     record.status = liveness.state;
     record.liveness = liveness;
-    if (previous.status === liveness.state && previous.reason === liveness.reason) return record;
+    if (this.readOnly !== undefined || (previous.status === liveness.state && previous.reason === liveness.reason)) return record;
     await this.store.updateEnv(
       record.name,
       (current) => {
@@ -1630,6 +1636,7 @@ export class NectarService {
       expires_at: record.expires_at,
       expires_in: formatRemaining(record.expires_at),
       failure: record.failure ?? null,
+      ...this.touchNote(),
       ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
     };
   }
@@ -1658,7 +1665,7 @@ export class NectarService {
   // Touch re-arms the env's own TTL (SPEC §4.4), not the default; a busy lock
   // means a publish is mid-flight — skip, the env is active anyway.
   private async touchOnView(record: EnvRecord): Promise<void> {
-    if (record.status === "expired" || record.status === "cold") return;
+    if (this.readOnly !== undefined || record.status === "expired" || record.status === "cold") return;
     const touched = await this.touchRecord(record.name, new Date());
     if (touched !== undefined) {
       record.last_touched_at = touched.last_touched_at;
@@ -1714,6 +1721,7 @@ export class NectarService {
         packet_fields: this.packetFields(record),
         expires_at: record.expires_at,
         expires_in: formatRemaining(record.expires_at),
+        ...(touch ? this.touchNote() : {}),
         ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
       });
     }

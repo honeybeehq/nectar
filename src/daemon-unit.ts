@@ -11,7 +11,7 @@ import { resolveTailscale, type TailscaleLookup } from "./tailscale.js";
 
 export const LAUNCHD_LABEL = "com.honeybeehq.nectard";
 export const SYSTEMD_UNIT = "nectard.service";
-const LAUNCHD_SETTLE_MS = 5_000;
+const LAUNCHD_SETTLE_MS = 25_000;
 const LAUNCHD_RETRY_MS = 500;
 
 type UnitPlatform = "darwin" | "linux";

@@ -142,9 +142,8 @@ function meshWarning(outcome: ServeOutcome | undefined, fallback: string): strin
   return `tailscale serve failed: "${quoted}" — ${fallback}`;
 }
 
-function movedWarning(old: EnvRecord | undefined, tailnetPort: number): string[] {
-  const previous = old?.serve?.tailnet_port;
-  if (previous === undefined || previous === tailnetPort) return [];
+function movedWarning(previous: number | undefined, tailnetPort: number): string[] {
+  if (previous === undefined) return [];
   return [`tailscale serve :${previous} now holds an entry Nectar did not create; left it alone and moved this env to :${tailnetPort}, so its mesh URL changed`];
 }
 
@@ -802,7 +801,7 @@ export class NectarService {
     identity: MachineIdentity,
     old: EnvRecord | undefined,
     spawnCommand: (upstreamPort: number) => { pid: number; pgid: number; cmd: string },
-  ): Promise<{ upstreamPort: number; tailnetPort: number }> {
+  ): Promise<{ upstreamPort: number; tailnetPort: number; foreignPort?: number }> {
     return this.store.withLock(PORTS_LOCK, async () => {
       const live = await this.store.listEnvs();
       const others = live.filter((item) => item.name !== record.name);
@@ -820,7 +819,8 @@ export class NectarService {
       // entry stays claimable, or republish would lose its stable URL.
       const status = await serveStatus();
       for (const port of statusPorts(status)) reservedTailnet.add(port);
-      if (old?.serve?.tailnet_port !== undefined && !(await this.foreignServeAt(old.serve, status))) reservedTailnet.delete(old.serve.tailnet_port);
+      const foreignPort = old?.serve !== undefined && (await this.foreignServeAt(old.serve, status)) ? old.serve.tailnet_port : undefined;
+      if (old?.serve?.tailnet_port !== undefined && foreignPort === undefined) reservedTailnet.delete(old.serve.tailnet_port);
       const upstreamPort = await allocatePort({
         start: identity.config.upstream_port_start,
         end: identity.config.upstream_port_end,
@@ -844,7 +844,7 @@ export class NectarService {
       };
       record.urls.local = `http://127.0.0.1:${upstreamPort}`;
       await this.store.writeEnv(record);
-      return { upstreamPort, tailnetPort };
+      return { upstreamPort, tailnetPort, ...(foreignPort === undefined ? {} : { foreignPort }) };
     });
   }
 
@@ -855,7 +855,7 @@ export class NectarService {
     old: EnvRecord | undefined,
   ): Promise<PublishedWeb> {
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
-    const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
+    const { upstreamPort, tailnetPort, foreignPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
       const childEnv = scrubbedEnvironment({
         ...recipe.env,
         PORT: String(port),
@@ -864,7 +864,7 @@ export class NectarService {
       });
       return { ...spawnDetached(recipe.serve, record.worktree, childEnv, log), cmd: recipe.serve };
     });
-    const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`, ...movedWarning(old, tailnetPort)];
+    const warnings = [`portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`, ...movedWarning(foreignPort, tailnetPort)];
     await this.store.writeEnv(record);
 
     const readyUrl = await this.waitReady(upstreamPort, recipe.readyPath, recipe.readyTimeoutMs);
@@ -1353,11 +1353,11 @@ export class NectarService {
   ): Promise<{ warnings: string[] }> {
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
     const childEnv = scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree });
-    const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
+    const { upstreamPort, tailnetPort, foreignPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
       const command = serveSimCommand(deviceName, port);
       return { ...spawnDetached(command, record.worktree, childEnv, log), cmd: command };
     });
-    const warnings = movedWarning(old, tailnetPort);
+    const warnings = movedWarning(foreignPort, tailnetPort);
     await this.store.writeEnv(record);
     const readyUrl = await this.waitReady(upstreamPort, "/", readyTimeoutMs);
     if (readyUrl === undefined) {

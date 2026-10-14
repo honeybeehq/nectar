@@ -330,7 +330,7 @@ seconds for one to appear.
 
 `install` is safe to repeat and ends with the agent loaded or a clear `E_PLATFORM` error. On
 macOS an unchanged plist with a running agent is restarted in place (`launchctl kickstart -k`).
-Otherwise it writes the plist, runs `launchctl bootout`, waits up to 5 s until `launchctl
+Otherwise it writes the plist, runs `launchctl bootout`, waits up to 25 s (launchd gives a job 20 s to exit) until `launchctl
 print` no longer finds the agent, then runs `launchctl bootstrap`; launchd's transient
 "Bootstrap failed: 5: Input/output error" gets one more bootout and bootstrap before install
 fails, naming launchctl's error. On Linux `daemon-reload`, `enable` and `restart` are

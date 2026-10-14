@@ -273,14 +273,19 @@ async function agentLoaded(): Promise<boolean> {
   return (await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`])).exitCode === 0;
 }
 
-async function bootoutAgent(): Promise<void> {
+async function bootout(settleMs: number): Promise<{ unloaded: boolean; waited_ms: number }> {
+  const started = Date.now();
   await safely(launchctl(), ["bootout", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
-  const deadline = Date.now() + LAUNCHD_SETTLE_MS;
   while (await agentLoaded()) {
-    if (Date.now() >= deadline) {
-      throw new NectarError("E_PLATFORM", `launchctl bootout left ${LAUNCHD_LABEL} loaded after ${LAUNCHD_SETTLE_MS / 1_000}s; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL} and retry`);
-    }
+    if (Date.now() - started >= settleMs) return { unloaded: false, waited_ms: Date.now() - started };
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return { unloaded: true, waited_ms: Date.now() - started };
+}
+
+async function bootoutAgent(): Promise<void> {
+  if (!(await bootout(LAUNCHD_SETTLE_MS)).unloaded) {
+    throw new NectarError("E_PLATFORM", `launchctl bootout left ${LAUNCHD_LABEL} loaded after ${LAUNCHD_SETTLE_MS / 1_000}s; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL} and retry`);
   }
 }
 
@@ -296,12 +301,22 @@ async function bootstrapAgent(file: string): Promise<void> {
   throw new NectarError("E_PLATFORM", `launchctl bootstrap ${launchdDomain()} ${file} failed twice (${failure}); ${LAUNCHD_LABEL} is not loaded. Run nectar daemon install again`);
 }
 
-export async function uninstallUnit(paths: NectarPaths, platform: NodeJS.Platform = process.platform): Promise<Record<string, unknown>> {
+export async function uninstallUnit(
+  paths: NectarPaths,
+  platform: NodeJS.Platform = process.platform,
+  options: { settleMs?: number } = {},
+): Promise<Record<string, unknown>> {
   const kind = unitPlatform(platform);
   const file = unitPath(kind);
   const present = await exists(file);
+  const warnings: string[] = [];
+  let unload: { unloaded: boolean; waited_ms: number } | undefined;
   if (kind === "darwin") {
-    await safely(launchctl(), ["bootout", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
+    const settleMs = options.settleMs ?? LAUNCHD_SETTLE_MS;
+    unload = await bootout(settleMs);
+    if (!unload.unloaded) {
+      warnings.push(`launchctl print still finds ${LAUNCHD_LABEL} ${settleMs / 1_000}s after bootout; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL}`);
+    }
   } else {
     await safely(systemctl(), ["--user", "disable", "--now", SYSTEMD_UNIT]);
   }
@@ -309,7 +324,7 @@ export async function uninstallUnit(paths: NectarPaths, platform: NodeJS.Platfor
     if (error.code !== "ENOENT") throw error;
   });
   if (kind === "linux") await safely(systemctl(), ["--user", "daemon-reload"]);
-  return { removed: present, platform: kind, unit: file, envs_kept: true, nectar_home: paths.root };
+  return { removed: present, platform: kind, unit: file, ...(unload ?? {}), envs_kept: true, nectar_home: paths.root, warnings };
 }
 
 interface ManagerState {

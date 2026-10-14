@@ -557,7 +557,25 @@ exit 0`,
       print,
       print,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
+      print,
     ]);
+  });
+
+  it("uninstall waits until launchctl print no longer finds the agent and reports it", async () => {
+    const { home, calls, file } = await fakeLaunchd({ loaded: true, unloadPrints: 3 });
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "<plist>installed</plist>");
+    const removed = await uninstallUnit(getPaths(path.join(home, ".nectar")), "darwin");
+    expect(removed).toMatchObject({ removed: true, unloaded: true, warnings: [] });
+    expect(await launchctlCalls(calls, "print")).toHaveLength(4);
+  });
+
+  it("uninstall gives up waiting after its bound and says the agent is still loaded", async () => {
+    const { home } = await fakeLaunchd({ loaded: true, unloadPrints: 1_000 });
+    const removed = await uninstallUnit(getPaths(path.join(home, ".nectar")), "darwin", { settleMs: 300 });
+    expect(removed).toMatchObject({ unloaded: false });
+    expect((removed.waited_ms as number) >= 300).toBe(true);
+    expect(removed.warnings).toEqual([expect.stringContaining("still finds com.honeybeehq.nectard")]);
   });
 
   it("reinstalling over a loaded agent waits for bootout to finish before bootstrapping", async () => {

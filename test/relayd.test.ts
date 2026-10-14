@@ -323,3 +323,14 @@ describe("relayd config and rendering", () => {
     expect(relayd.logs).toContainEqual(expect.objectContaining({ event: "control_unbound" }));
   });
 });
+
+describe("relayd admin socket", () => {
+  it("will not start with its admin socket in a directory others can enter", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    const { tempDir } = await import("./helpers.js");
+    const shared = path.join(await tempDir("relayd-shared"), "run");
+    await mkdir(shared, { mode: 0o755 });
+    await chmod(shared, 0o755);
+    await expect(testRelayd({ admin_socket: path.join(shared, "admin.sock") })).rejects.toThrow(/mode 0700/);
+  });
+});

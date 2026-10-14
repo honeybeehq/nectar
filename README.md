@@ -47,11 +47,17 @@ Previews are tailnet-private by default. To share one on the internet, route it 
 relay (e.g. `nctr.site`):
 
 ```bash
-$ nectar expose acme--coupons-stack--web --to site
-  → https://acme-coupons-stack-e7f3.nctr.site   # password-gated, torn down on expiry
+$ nectar publish --public --json        # publish, then expose through the default target
+  → url: https://acme-coupons-stack-3f9a1c2e.nctr.site   # password-gated, torn down on expiry
+$ nectar expose acme--coupons-stack--web              # or expose an env that already serves
+$ nectar unexpose acme--coupons-stack--web
 ```
 
-Gated by default; add `--public` for an ungated link with an unguessable URL.
+The relay mints the name; `url` carries no secret and is what goes into proof, PRs and
+packets. The password is in `public.password` / `share_note`, listed under `secret`; send
+it only to the person who should open the preview. With `"control": "relayd"` the relay
+checks which tailnet node is calling and lets it manage only its own routes (DECISIONS D35,
+SPEC §4.7). `--gate none --public` is an ungated link, and only where the relay allows it.
 See [relay/](relay/) to run your own `<domain>.site` relay.
 
 ## Quick start

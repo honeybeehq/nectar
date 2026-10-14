@@ -861,3 +861,37 @@ nothing to explain it. A static site never needed the rest of its repo. A link i
 that leaves it would dangle on the target, so naming the link up front is the honest
 answer.
 
+## D35 — Public previews through `nectar-relayd`, the single owner of relay state
+
+**Chose:** a small Node service, `nectar-relayd`, on the relay host (src/relayd.ts,
+installed by relay/install-relayd.sh as a hardened system service). Publishers call its
+control port, the relay's Tailscale IPv4 on 8450, instead of running `nectar-relay` as
+root over Tailscale SSH. relayd identifies each caller with tailscaled WhoIs on the raw
+peer (the LocalAPI client of D32) and fails closed: no answer in 5 s, an error, no stable
+node ID or MagicDNS name, a caller on the relay itself, an unreadable allowlist or a node
+not on it is 403. It enforces the rules of design/public-and-cloud.md §1 itself: a
+stable-node-ID allowlist; an upstream on the caller's own MagicDNS name and a port in
+8443–8542; owner-checked PATCH, DELETE and rotate; names it mints (`<sanitized
+app-branch>-<8 hex>`, reserved words refused); ungated routes only for nodes on a
+separate list, empty by default; 30-day caps (7 ungated); relay-wide and per-node kill
+flags that remove routes and refuse new ones until lifted. It keeps state in one JSON
+file, renders Caddy's file-per-route import (D21) from it, and reloads Caddy by touching a
+stamp a systemd path unit watches, so relayd runs unprivileged. `nectar-relay` on the box
+becomes its admin client over a 0600 Unix socket and keeps `add`, so the Studio's
+Tailscale SSH path works until it moves. Clients: `control: "relayd"` targets,
+`nectar publish --public`, `expose --rotate`, expose/unexpose through nectard, a tokenless
+`url` with the secret fields named in `secret`, and gc's hourly sync, which PATCHes
+expiry, never recreates a route and marks it revoked on 404 or a tombstone. Slice 1
+keeps the basic-auth password gate; the verify listener (loopback 8451) exists for slice
+2's link token. (SPEC §4.7, §7, §9.1.)
+**Alternatives:** (a) keep root over Tailscale SSH and give every pool host an SSH rule;
+(b) a per-host API key file; (c) tags on pool hosts for identity; (d) let the caller pick
+the subdomain, as `nectar-relay add` did; (e) run relayd as root and call
+`systemctl reload caddy`; (f) a database instead of a state file.
+**Why:** (a) makes every pool host root on the public box, and it already fails from
+metal-1. (b) hands out secrets that Cells could read; WhoIs needs none. (c) tagging strips
+a node's user identity and breaks the user-based grants hive relies on; the ACL uses host
+aliases instead (Project design/relayd-acl-diff.md). (d) lets one host take over or
+squat another's URL and pick phishing names. (e) puts a tailnet-facing process at root;
+the path unit keeps the privilege in systemd. (f) one operator's few hundred routes fit
+in a file written atomically, like the route files themselves.

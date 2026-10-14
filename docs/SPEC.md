@@ -602,6 +602,79 @@ the error for a host that did not answer, and where the next web and postgres pu
 `ls`, `check` and placement also work from a Cell with a read-only home (placement then
 records nothing unless it runs in nectard, which is how Cells publish).
 
+### 4.7 Public previews through `nectar-relayd` (amendment · 2026-10-14, DECISIONS D35)
+
+`nectar publish --public` publishes (or reuses) the env and then exposes it through the
+machine's default exposure target. `nectar expose <env>` does the same for an env that
+already serves, and both go through `nectar-relayd` when the target says
+`"control": "relayd"`:
+
+```jsonc
+"exposures": {
+  "site": { "kind": "relay", "host": "trmd-vps01", "domain": "nctr.site",
+            "control": "relayd", "gate": "password", "default": true }
+}
+```
+
+`host` is the relay's tailnet name (or IP); `port` overrides the control port 8450. The
+default target is the one marked `default`, else the only one, else `site`.
+
+**relayd** runs on the relay host and is the single owner of relay state: routes, owner
+stable node IDs, minted names, generations, view times and the kill flags, in
+`state.json` (0600). It renders one Caddy route file per route into the routes directory
+Caddy imports (D21), then asks for a reload. It has three listeners:
+
+- **control**, the node's Tailscale IPv4 on 8450, never a wildcard. Every request is
+  identified with tailscaled WhoIs on the raw peer address before the body is read
+  (src/localapi.ts). A failed, late or malformed WhoIs, a caller on the relay itself, an
+  unreadable allowlist, or a stable node ID not on `allow` is 403. API: `PUT /routes`,
+  `PATCH /routes/<sub>`, `DELETE /routes/<sub>`, `POST /routes/<sub>/rotate`,
+  `GET /routes?mine=1`.
+- **verify**, 127.0.0.1:8451, for Caddy `forward_auth` in slice 2. In slice 1 it answers
+  204 for a live route's host and 404 otherwise; nothing points at it yet.
+- **admin**, a Unix socket (0600 in a 0700 directory), used only by `nectar-relay` on
+  the box: `ls`, `rm <sub>`, `disable-all [--node <name|id>]`, `enable-all [--node …]`,
+  `prune`, `health`, and the old `add` so the Tailscale SSH control path keeps working.
+
+Authorization, all on the relay: (1) the caller's stable node ID is on `allow`;
+(2) the upstream is `https://<the caller's own MagicDNS name>:<8443–8542>`, with no
+userinfo, path or other host, and relayd stores the URL it rebuilt, not the caller's
+string; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
+socket can always remove); (4) the caller sends `name` (`<app>-<branch>`) and relayd
+sanitizes it to one DNS label of at most 54 characters, refuses reserved names (`www`,
+`api`, `app`, `auth`, `login`, `admin`, `mail`, … also as the first word) and appends 8
+random hex characters; a body naming its own `sub` is refused; (5) `gate: "none"` only
+for nodes on `ungated` (empty by default). Kill flags (relay-wide or per node) remove the
+routes they cover and refuse every PUT until `enable-all`. Hard caps: 30 days from
+creation for a gated route, 7 days ungated; a PATCH past the cap is clamped. relayd
+prunes expired routes hourly and at start; `nectar-relay prune` from cron asks again.
+Routes removed by `rm`, a kill flag or expiry leave a tombstone for 30 days, so
+`GET /routes?mine=1` reports them `revoked` with the reason. Quotas: 50 live routes per
+node, 200 per relay (429).
+
+**Gate (slice 1).** The password gate stays: Caddy `basic_auth` user `reviewer` with a
+bcrypt hash from `caddy hash-password`, given the password on stdin. relayd mints a
+16-character password unless the caller sends one (12–128 characters), returns it once
+and stores only the hash. The route strips `Authorization` before proxying, so the
+password never reaches the dev server.
+
+**Results.** `url` is the tokenless `https://<sub>.<domain>`; it is what goes into
+`packet_fields.public_url`, proof, PRs and transcripts. `share_url` is what goes to the
+person who should open the preview; in slice 1 it equals `url`, and the password travels
+in `password`, `credentials` and `share_note`. The result lists those fields in `secret`
+(for `publish --public`: `share_url` and `public.*`). A second `expose` of a live route
+updates it in place (`reused: true`, the password unchanged); `--rotate` mints a new
+password and bumps the generation.
+
+**Sync.** Every `gc` (nectard's hourly pass, or `nectar gc`) asks each relayd target for
+`GET /routes?mine=1` once. A route still listed gets `PATCH` with the env's current
+expiry when it differs by a minute or more (never for `--ttl` exposures, which are
+fixed); PATCH never recreates a route. A route the relay reports revoked, or no longer
+lists, or a PATCH answered 404, marks the exposure `revoked_at`/`revoked_reason` and
+clears `urls.public`; gc does not try again, and `unexpose` then only clears the record.
+The result's `exposures` lists `patched`, `unchanged`, `revoked`, `unreachable` or
+`skipped` per env. Stop, expiry and `rm` still delete the route at once.
+
 ## 5. Recipes — `nectar.toml`
 
 Checked into the repo root. Names the repo's own commands; nectar adds no build logic.
@@ -1274,7 +1347,7 @@ plus (added post-v0 review, 2026-07-19):
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
                [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--fresh] [--dry-run]
-               [--host <node> | --local] [--json]
+               [--host <node> | --local] [--public] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable; a failed web republish leaves the old serve
     # running (§6.1). --name overrides the app name for any source; a different source
@@ -1289,6 +1362,17 @@ nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch 
     # route); the result's ref is nectar://<node>/<env> and its URLs are the node's.
     # Without --host, a configured pool (§4.6) may place web and static publishes on another
     # node; the result then carries placed_on and placement_reason. --local stays here.
+    # --public also exposes the env, gated, through the default exposure target (§4.7);
+    # the result adds url, share_url, public {target, gate, expires_at, password, …} and
+    # secret. With --host the target node exposes it with its own config and relayd sees
+    # that node as the owner. A failed exposure is an error that names the published ref.
+
+nectar expose <env|ref> [--to <target>] [--gate password|none] [--password <p>]
+              [--public] [--ttl <d>] [--expose-interactive] [--rotate] [--json]
+nectar unexpose <env|ref> [--json]
+    # Put a serving env on the internet through a relay (§4.7, D21). --gate none needs
+    # --public; iOS streams need --expose-interactive. --rotate (relayd) replaces the gate
+    # password of a live route. Both go through nectard from a Cell.
 
 nectar pool ls | add <hosts…> [--prefer first-healthy|least-loaded] [--for web,static]
           | rm <hosts…> | check [--json]
@@ -1343,6 +1427,7 @@ nectar rm <env|ref> [--force]  # stop + delete worktree/packs/evidence/record (u
 nectar gc [--dry-run] [--json]
     # Enforce §10: expire → stop; cold → delete worktrees; reap old records; prune pack
     # store to quota (LRU). Prints a reap report. Safe to run concurrently (per-env locks).
+    # Also syncs relayd exposures (§4.7): exposures[] of {env, action, reason, expires_at}.
 
 nectar evidence add <env> <file...>   # copy files into evidence/, print refs
 nectar evidence ls <env> [--json]
@@ -1468,6 +1553,11 @@ hive integration surface. No hive API calls, no harness detection.
   machines you trust that much. The ACL should limit 8441 to pool hosts and operator
   devices as a second layer. `tailscale serve` is not put in front of it, because that
   would hide the peer address WhoIs needs; WireGuard already encrypts the hop.
+- **8450** on the relay host is nectar-relayd's control port (§4.7). It binds the relay's
+  Tailscale IPv4 only, identifies every caller with WhoIs and serves only listed stable
+  node IDs; each node manages only routes to its own MagicDNS name and preview ports.
+  The ACL should let only pool hosts reach it and let the relay reach only 8443–8542 on
+  pool hosts (design/relayd-acl-diff.md in the Project).
 - Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
   a shared external node (`shared-node`, user `mbtz@`). Deploy rule (ops task, not code):
   ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`

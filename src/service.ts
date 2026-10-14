@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import { mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { currentBranch, installDependencies, prepareWorktree, removeWorktree, resolveCommit, resolveRepo, runGit, sameRepository, shortCommit } from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
@@ -22,7 +22,25 @@ import {
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import { appSlug, envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
-import { loadRecipe, selectMode } from "./recipe.js";
+import { loadRecipe, seedScenario, selectMode } from "./recipe.js";
+import {
+  assertDocker,
+  composeFile,
+  composeProject,
+  composeSpec,
+  composeUp,
+  depEnvironment,
+  depsDir,
+  DOCKER_HINT,
+  newPassword,
+  probeDocker,
+  readSecrets,
+  redactedDeps,
+  removeLabelled,
+  stopLabelled,
+  writePrivateJson,
+  type PostgresService,
+} from "./deps.js";
 import { assertRuntimes, missingCommands } from "./fallbacks.js";
 import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
@@ -85,6 +103,7 @@ import {
 import { ensureAxHelper, findAppPid } from "./ax.js";
 import { exposureSub, relayAdd, relayHealth, relayRm } from "./relay.js";
 import type {
+  DepRecord,
   DesktopRecipe,
   DevRecipe,
   EnvRecord,
@@ -119,6 +138,7 @@ interface PublishOptions {
   verify?: boolean;
   name?: string;
   dryRun?: boolean;
+  fresh?: boolean;
 }
 
 interface MachineIdentity {
@@ -220,7 +240,17 @@ function ownsLoopbackPort(serve: ServeRecord | undefined, port: number | undefin
 }
 
 function loopbackPorts(records: EnvRecord[]): Set<number> {
-  return new Set(records.flatMap((record) => [record.serve?.upstream_port, record.serve?.proxy_port]).filter((port): port is number => port !== undefined));
+  return new Set(
+    records
+      .flatMap((record) => [record.serve?.upstream_port, record.serve?.proxy_port, ...depPorts(record)])
+      .filter((port): port is number => port !== undefined),
+  );
+}
+
+function depPorts(record: EnvRecord): number[] {
+  return Object.values(record.deps ?? {})
+    .map((dep) => dep.port)
+    .filter((port): port is number => port !== undefined);
 }
 
 function hostAliases(value: string | undefined): Set<string> {
@@ -282,6 +312,10 @@ export class NectarService {
     const mode = selectMode(recipe, options.mode);
     if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, branch);
     if (mode === "web") assertRuntimes(recipe);
+    if (mode === "web" && Object.values(recipe.deps ?? {}).some((dep) => dep.kind === "postgres")) await assertDocker();
+    if (options.fresh === true && mode !== "web") {
+      throw new NectarError("E_USAGE", "--fresh recreates [deps] of web envs only");
+    }
     if (options.verify === true && mode !== "dev") {
       throw new NectarError("E_USAGE", "--verify is supported only with --mode dev");
     }
@@ -295,8 +329,11 @@ export class NectarService {
       ...(options.verify === undefined ? {} : { verify: options.verify }),
     };
     if (mode === "web") {
-      const web = await this.publishWeb(publishOptions);
-      return this.publishResult(web.record, this.packetFields(web.record), web.warnings, { mesh_error: web.meshError });
+      const web = await this.publishWeb({ ...publishOptions, fresh: options.fresh === true });
+      return this.publishResult(web.record, this.packetFields(web.record), web.warnings, {
+        mesh_error: web.meshError,
+        deps: redactedDeps(web.record.deps),
+      });
     }
     if (mode === "ios") return this.publishIos(publishOptions);
     if (mode === "dev") return this.publishDev(publishOptions);
@@ -350,6 +387,8 @@ export class NectarService {
             ready_path: web.readyPath,
             requires: web.requires ?? [],
             missing: missingCommands(recipe),
+            deps: recipe.deps ?? null,
+            seed: seedScenario(recipe) ?? null,
           }),
     };
   }
@@ -492,6 +531,7 @@ export class NectarService {
       ...(old?.install_hash === undefined ? {} : { install_hash: old.install_hash }),
       ...(old?.pinned === undefined ? {} : { pinned: old.pinned }),
       ...(old?.last_opened_at === undefined ? {} : { last_opened_at: old.last_opened_at }),
+      ...(old?.deps === undefined ? {} : { deps: old.deps }),
     };
   }
 
@@ -676,6 +716,7 @@ export class NectarService {
     worktree?: string;
     packet?: string;
     site?: StaticSite;
+    fresh?: boolean;
   }): Promise<PublishedWeb> {
     if (options.recipe.web === undefined) throw new NectarError("E_NO_RECIPE", "Recipe does not declare [web]");
     const name = envName(options.recipe.name, options.branch, "web");
@@ -722,10 +763,12 @@ export class NectarService {
         stageWarnings = await this.stageStatic(record, site);
       }
       try {
-        const web = site === undefined ? (await loadRecipe(record.worktree)).web : options.recipe.web;
+        const loaded = site === undefined ? await loadRecipe(record.worktree) : options.recipe;
+        const web = loaded.web;
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
-        if (web.build !== undefined) await this.runBuild(record, web.build);
-        const published = await this.startWeb(record, web, initial.identity, initial.old);
+        const depEnv = site === undefined ? await this.provisionDeps(record, loaded, options.fresh === true) : {};
+        if (web.build !== undefined) await this.runBuild(record, web.build, depEnv);
+        const published = await this.startWeb(record, web, initial.identity, initial.old, depEnv);
         return { ...published, warnings: [...published.warnings, ...stageWarnings] };
       } catch (error) {
         await this.rollbackRuntime(record, error);
@@ -735,7 +778,7 @@ export class NectarService {
   }
 
   private async republishWeb(
-    options: { repo: string; branch: string; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite },
+    options: { repo: string; branch: string; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite; fresh?: boolean },
     old: EnvRecord,
   ): Promise<PublishedWeb> {
     const identity = await this.identity();
@@ -745,11 +788,14 @@ export class NectarService {
     const record = this.nextRecord({ ...options, mode: "web" }, old.name, destination, identity, old);
     const warnings: string[] = [];
     let web: WebRecipe | undefined;
+    let depEnv: Record<string, string> = {};
     try {
       if (site === undefined) {
         await this.discardWorktree(record.repo, destination);
         await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist);
-        web = (await loadRecipe(record.worktree)).web;
+        const loaded = await loadRecipe(record.worktree);
+        web = loaded.web;
+        if (web !== undefined) depEnv = await this.provisionDeps(record, loaded, options.fresh === true);
       } else {
         const staged = await stageStaticSite(site, record.worktree);
         record.commit = staged.hash;
@@ -760,7 +806,7 @@ export class NectarService {
         web = options.recipe.web;
       }
       if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
-      if (web.build !== undefined) await this.runBuild(record, web.build);
+      if (web.build !== undefined) await this.runBuild(record, web.build, depEnv);
     } catch (error) {
       if (site === undefined) await this.discardWorktree(record.repo, destination).catch(() => undefined);
       const failure = asNectarError(error);
@@ -774,7 +820,7 @@ export class NectarService {
     await this.store.writeEnv(record);
     if (site === undefined && old.worktree !== destination) await this.discardWorktree(record.repo, old.worktree);
     try {
-      const published = await this.startWeb(record, web, identity, old);
+      const published = await this.startWeb(record, web, identity, old, depEnv);
       return { ...published, warnings: [...published.warnings, ...warnings] };
     } catch (error) {
       await this.rollbackRuntime(record, error);
@@ -787,11 +833,11 @@ export class NectarService {
     await trashPaths([worktree], this.paths.root);
   }
 
-  private async runBuild(record: EnvRecord, build: string): Promise<void> {
+  private async runBuild(record: EnvRecord, build: string, depEnv: Record<string, string>): Promise<void> {
     const result = await runShell(
       build,
       record.worktree,
-      scrubbedEnvironment({ NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree }),
+      scrubbedEnvironment({ ...depEnv, NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree }),
       15 * 60_000,
     );
     if (result.exitCode !== 0) {
@@ -799,6 +845,129 @@ export class NectarService {
         log_tail: [...result.stdout.split("\n"), ...result.stderr.split("\n")].filter(Boolean).slice(-40),
       });
     }
+  }
+
+  private async provisionDeps(record: EnvRecord, recipe: Recipe, fresh: boolean): Promise<Record<string, string>> {
+    const wanted = Object.entries(recipe.deps ?? {});
+    const previous = fresh ? {} : (record.deps ?? {});
+    const hadPostgres = Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres");
+    const postgres = wanted.flatMap(([name, dep]) => (dep.kind === "postgres" ? [{ name, recipe: dep }] : []));
+    const directory = depsDir(this.paths.work, record.name);
+    if (wanted.length === 0) {
+      if (record.deps === undefined) return {};
+      await this.releaseDeps(record);
+      await this.persistDeps(record);
+      return {};
+    }
+    if (postgres.length > 0) await assertDocker();
+    if (hadPostgres && (fresh || postgres.length === 0)) await removeLabelled(record.name, this.paths.root);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const now = new Date().toISOString();
+    const next: Record<string, DepRecord> = {};
+    let created = false;
+    for (const [name, dep] of wanted) {
+      if (dep.kind !== "sqlite") continue;
+      const file = path.join(directory, name, path.basename(dep.path));
+      const prior = previous[name];
+      if (prior?.kind !== "sqlite" || prior.file !== file || !existsSync(file)) {
+        created = true;
+        await mkdir(path.dirname(file), { recursive: true });
+        await Promise.all(["", "-wal", "-shm", "-journal"].map(async (suffix) => rm(`${file}${suffix}`, { force: true })));
+        const source = path.join(record.worktree, dep.path);
+        if (existsSync(source)) await copyFile(source, file);
+      }
+      next[name] = { kind: "sqlite", env: dep.env, file, created_at: prior?.created_at ?? now };
+    }
+    const secrets = fresh ? {} : await readSecrets(directory);
+    const services: Record<string, PostgresService> = {};
+    let createdPostgres = false;
+    await this.store.withLock(PORTS_LOCK, async () => {
+      const config = await this.store.readConfig();
+      const reserved = loopbackPorts((await this.store.listEnvs()).filter((item) => item.name !== record.name));
+      reserved.add(config.pack_server_port);
+      for (const port of [record.serve?.upstream_port, record.serve?.proxy_port]) if (port !== undefined) reserved.add(port);
+      for (const { name, recipe: dep } of postgres) {
+        const prior = previous[name]?.kind === "postgres" ? previous[name] : undefined;
+        if (prior === undefined) createdPostgres = true;
+        const port =
+          prior?.port ??
+          (await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved }));
+        reserved.add(port);
+        const password = secrets[name] ?? newPassword();
+        secrets[name] = password;
+        services[name] = { recipe: dep, port, password };
+        next[name] = {
+          kind: "postgres",
+          env: dep.env,
+          image: dep.image,
+          project: composeProject(record.name),
+          port,
+          database: dep.database,
+          user: dep.user,
+          created_at: prior?.created_at ?? now,
+        };
+      }
+      record.deps = next;
+      await this.persistDeps(record);
+    });
+    await writePrivateJson(path.join(directory, "secrets.json"), secrets);
+    if (postgres.length > 0) {
+      const file = composeFile(this.paths.work, record.name);
+      await writePrivateJson(file, composeSpec(record.name, this.paths.root, services));
+      try {
+        await composeUp(file, composeProject(record.name));
+      } catch (error) {
+        if (createdPostgres) await removeLabelled(record.name, this.paths.root).catch(() => undefined);
+        throw error;
+      }
+    }
+    const depEnv = depEnvironment(next, secrets);
+    const seed = seedScenario(recipe);
+    if ((created || createdPostgres) && seed !== undefined) await this.runSeed(record, seed, depEnv);
+    return depEnv;
+  }
+
+  // A republish keeps the previous record on disk while the old serve runs, so only
+  // the deps field is patched into it; a fresh publish owns the on-disk record.
+  private async persistDeps(record: EnvRecord): Promise<void> {
+    const onDisk = await this.store.maybeEnv(record.name);
+    if (onDisk === undefined || onDisk.published_at === record.published_at) {
+      await this.store.writeEnv(record);
+      return;
+    }
+    if (record.deps === undefined) delete onDisk.deps;
+    else onDisk.deps = record.deps;
+    await this.store.writeEnv(onDisk);
+  }
+
+  private async runSeed(record: EnvRecord, seed: { name: string; seed: string }, depEnv: Record<string, string>): Promise<void> {
+    const result = await runShell(
+      seed.seed,
+      record.worktree,
+      scrubbedEnvironment({ ...depEnv, NECTAR_ENV: record.name, NECTAR_ENV_DIR: record.worktree, NECTAR_SCENARIO: seed.name }),
+      15 * 60_000,
+    );
+    if (result.exitCode !== 0) {
+      throw new NectarError("E_SEED", `Seed for scenario '${seed.name}' failed: ${seed.seed}`, {
+        log_tail: [...result.stdout.split("\n"), ...result.stderr.split("\n")].filter(Boolean).slice(-40),
+      });
+    }
+  }
+
+  private async depEnv(record: EnvRecord): Promise<Record<string, string>> {
+    if (record.deps === undefined) return {};
+    return depEnvironment(record.deps, await readSecrets(depsDir(this.paths.work, record.name)));
+  }
+
+  private async stopDeps(record: EnvRecord): Promise<void> {
+    if (Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres")) await stopLabelled(record.name, this.paths.root);
+  }
+
+  private async releaseDeps(record: EnvRecord): Promise<void> {
+    if (record.deps === undefined) return;
+    if (Object.values(record.deps).some((dep) => dep.kind === "postgres")) await removeLabelled(record.name, this.paths.root);
+    await trashPaths([depsDir(this.paths.work, record.name)], this.paths.root);
+    delete record.deps;
   }
 
   // Env locks are per-env, so two bees publishing different envs race the port
@@ -817,6 +986,7 @@ export class NectarService {
       const others = live.filter((item) => item.name !== record.name);
       const reservedUpstream = loopbackPorts(others);
       reservedUpstream.add(identity.config.pack_server_port);
+      for (const port of depPorts(record)) reservedUpstream.add(port);
       const proxyPort = old?.serve?.proxy_port;
       if (proxyPort !== undefined) reservedUpstream.add(proxyPort);
       const reservedTailnet = new Set(
@@ -863,11 +1033,13 @@ export class NectarService {
     recipe: WebRecipe,
     identity: MachineIdentity,
     old: EnvRecord | undefined,
+    depEnv: Record<string, string>,
   ): Promise<PublishedWeb> {
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
     const { upstreamPort, tailnetPort, foreignPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
       const childEnv = scrubbedEnvironment({
         ...recipe.env,
+        ...depEnv,
         PORT: String(port),
         NECTAR_ENV: record.name,
         NECTAR_ENV_DIR: record.worktree,
@@ -1468,9 +1640,17 @@ export class NectarService {
         await this.store.writeEnv(record);
         return { revived: false, reason: "E_PORTS" };
       }
+      if (Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres")) {
+        try {
+          await composeUp(composeFile(this.paths.work, record.name), composeProject(record.name));
+        } catch (error) {
+          return fail("E_DEPS", asNectarError(error).message);
+        }
+      }
       const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
       const childEnv = scrubbedEnvironment({
         ...recipe?.env,
+        ...(await this.depEnv(record)),
         PORT: String(serve.upstream_port),
         NECTAR_ENV: record.name,
         NECTAR_ENV_DIR: record.worktree,
@@ -1633,6 +1813,7 @@ export class NectarService {
       pgid: record.serve?.pgid ?? null,
       ports: { upstream: record.serve?.upstream_port ?? null, tailnet: record.serve?.tailnet_port ?? null },
       liveness: record.liveness ?? null,
+      deps: redactedDeps(record.deps),
       expires_at: record.expires_at,
       expires_in: formatRemaining(record.expires_at),
       failure: record.failure ?? null,
@@ -2074,6 +2255,7 @@ export class NectarService {
     const record = await this.store.withLock(validateEnvName(name), async () => {
       const current = await this.store.readEnv(name);
       await this.stopRuntime(current);
+      await this.stopDeps(current);
       // A stopped env's public URL would 502; take it down with the serve.
       await this.tearDownExposure(current).catch(() => undefined);
       if (current.mode === "dev") {
@@ -2103,6 +2285,7 @@ export class NectarService {
       }
       await this.stopRuntime(record);
       await this.releaseSim(record);
+      await this.releaseDeps(record);
       const targets = [
         path.join(this.paths.packs, record.name),
         path.join(this.paths.evidence, record.name),
@@ -2258,6 +2441,7 @@ export class NectarService {
             await this.store.writeEnv(record);
           } else if (currentAction === "expire") {
             await this.stopRuntime(record);
+            await this.stopDeps(record);
             if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
             delete record.liveness;
@@ -2268,6 +2452,7 @@ export class NectarService {
             if (record.mode === "dev") delete record.serve;
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
+            await this.releaseDeps(record);
             if (!record.borrowed_worktree) await trashPaths([record.worktree], this.paths.root);
             delete record.liveness;
             record.status = "cold";
@@ -2278,6 +2463,7 @@ export class NectarService {
             await this.stopRuntime(record);
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
+            await this.releaseDeps(record);
             const targets = [
               path.join(this.paths.packs, record.name),
               path.join(this.paths.evidence, record.name),
@@ -2616,6 +2802,19 @@ export class NectarService {
         });
       }
     }
+    const depsUsers = (await this.store.listEnvs())
+      .filter((record) => Object.values(record.deps ?? {}).some((dep) => dep.kind === "postgres"))
+      .map((record) => record.name);
+    const docker = await probeDocker();
+    checks.push({
+      name: "docker",
+      status: docker.ok ? "pass" : depsUsers.length > 0 ? "fail" : "warn",
+      message: docker.ok
+        ? `${docker.message}; [deps] postgres can run here`
+        : `${docker.message}; ${depsUsers.length > 0 ? `envs with [deps] postgres cannot start: ${depsUsers.join(", ")}` : "publishing an app with [deps] postgres will fail with E_PLATFORM"}`,
+      binary: docker.binary,
+      ...(docker.ok ? {} : { hint: DOCKER_HINT }),
+    });
     checks.push({
       name: "tailnet-acl",
       status: "warn",

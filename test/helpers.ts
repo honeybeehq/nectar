@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { vi } from "vitest";
 import { runCommand } from "../src/commands.js";
 import type { EnvRecord, Mode } from "../src/types.js";
@@ -191,4 +191,97 @@ if (args[0] === "status") {
   await chmod(binary, 0o755);
   vi.stubEnv("NECTAR_TAILSCALE_BIN", binary);
   return { binary, log, state };
+}
+
+export interface FakeDockerState {
+  containers: Array<{ id: string; name: string; labels: Record<string, string>; running: boolean }>;
+  volumes: Array<{ name: string; labels: Record<string, string> }>;
+  networks: Array<{ id: string; name: string; labels: Record<string, string> }>;
+}
+
+export async function fakeDocker(directory: string, seed: FakeDockerState = { containers: [], volumes: [], networks: [] }): Promise<{
+  binary: string;
+  log: string;
+  stateFile: string;
+  read: () => Promise<FakeDockerState>;
+}> {
+  const log = path.join(directory, "docker.log");
+  const stateFile = path.join(directory, "docker-state.json");
+  await writeFile(stateFile, JSON.stringify(seed));
+  const binary = path.join(directory, "docker");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, args.join(" ") + "\\n");
+if (process.env.FAKE_DOCKER_DOWN) {
+  process.stderr.write("permission denied while trying to connect to the docker API at unix:///var/run/docker.sock\\n");
+  process.exit(1);
+}
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, "utf8"));
+const save = () => fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+const filters = () => {
+  const wanted = [];
+  for (let i = 0; i < args.length; i += 1) if (args[i] === "--filter") wanted.push(args[i + 1].replace(/^label=/, ""));
+  return (item) => wanted.every((filter) => {
+    const at = filter.indexOf("=");
+    return at < 0 ? filter in item.labels : item.labels[filter.slice(0, at)] === filter.slice(at + 1);
+  });
+};
+const print = (items) => { if (items.length) process.stdout.write(items.join("\\n") + "\\n"); };
+const [command, sub] = args;
+if (command === "version") { process.stdout.write("27.5.1\\n"); process.exit(0); }
+if (command === "compose" && sub === "version") { process.stdout.write("Docker Compose version v2.37.1\\n"); process.exit(0); }
+if (command === "compose") {
+  const project = args[args.indexOf("-p") + 1];
+  const spec = JSON.parse(fs.readFileSync(args[args.indexOf("-f") + 1], "utf8"));
+  if (process.env.FAKE_DOCKER_UP_FAIL) { process.stderr.write("container " + project + "-db-1 is unhealthy\\n"); process.exit(1); }
+  for (const [name, net] of Object.entries(spec.networks ?? {})) {
+    if (!state.networks.some((item) => item.name === project + "_" + name)) state.networks.push({ id: "net" + state.networks.length + project, name: project + "_" + name, labels: net.labels ?? {} });
+  }
+  for (const [name, volume] of Object.entries(spec.volumes ?? {})) {
+    if (!state.volumes.some((item) => item.name === project + "_" + name)) state.volumes.push({ name: project + "_" + name, labels: volume.labels ?? {} });
+  }
+  for (const [name, service] of Object.entries(spec.services)) {
+    const containerName = project + "-" + name + "-1";
+    const existing = state.containers.find((item) => item.name === containerName);
+    if (existing) existing.running = true;
+    else state.containers.push({ id: "c" + Math.random().toString(16).slice(2, 10), name: containerName, labels: service.labels ?? {}, running: true });
+  }
+  save();
+  process.exit(0);
+}
+if (command === "ps") {
+  const all = args.includes("-a");
+  print(state.containers.filter((item) => all || item.running).filter(filters()).map((item) => item.id));
+  process.exit(0);
+}
+if (command === "stop") {
+  for (const id of args.slice(1)) { const found = state.containers.find((item) => item.id === id); if (found) found.running = false; }
+  save();
+  process.exit(0);
+}
+if (command === "rm") {
+  const ids = args.slice(1).filter((arg) => !arg.startsWith("-"));
+  state.containers = state.containers.filter((item) => !ids.includes(item.id));
+  save();
+  process.exit(0);
+}
+if (command === "volume" || command === "network") {
+  const key = command === "volume" ? "volumes" : "networks";
+  if (sub === "ls") { print(state[key].filter(filters()).map((item) => item.id ?? item.name)); process.exit(0); }
+  if (sub === "rm") {
+    const ids = args.slice(2);
+    state[key] = state[key].filter((item) => !ids.includes(item.id ?? item.name));
+    save();
+    process.exit(0);
+  }
+}
+process.stderr.write("fake docker: unsupported " + args.join(" ") + "\\n");
+process.exit(2);
+`,
+  );
+  await chmod(binary, 0o755);
+  return { binary, log, stateFile, read: async () => JSON.parse(await readFile(stateFile, "utf8")) as FakeDockerState };
 }

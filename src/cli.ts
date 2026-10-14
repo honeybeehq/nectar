@@ -84,10 +84,11 @@ program
   .option("--verify", "launch a dev env through readiness, then return it to warm")
   .option("--name <app>", "app name for the env (default: the recipe name, or the directory or file name)")
   .option("--dry-run", "print the detected recipe source, build and serve commands without publishing")
+  .option("--fresh", "drop and recreate the env's [deps] databases (and re-run the seed)")
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
@@ -103,6 +104,7 @@ program
           verify: options.verify,
           name: options.name,
           dry_run: options.dryRun,
+          fresh: options.fresh,
         };
         return routed("publish", args, async (service) => service.publish({
           repo: source,
@@ -114,6 +116,7 @@ program
           ...(options.verify === undefined ? {} : { verify: options.verify }),
           ...(options.name === undefined ? {} : { name: options.name }),
           ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+          ...(options.fresh === undefined ? {} : { fresh: options.fresh }),
         }));
       }),
   );

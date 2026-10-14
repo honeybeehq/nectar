@@ -49,6 +49,27 @@ export interface IosRecipe {
   readyTimeoutMs: number;
 }
 
+export interface PostgresDepRecipe {
+  kind: "postgres";
+  image: string;
+  env: string;
+  database: string;
+  user: string;
+}
+
+export interface SqliteDepRecipe {
+  kind: "sqlite";
+  path: string;
+  env: string;
+}
+
+export type DepRecipe = PostgresDepRecipe | SqliteDepRecipe;
+
+export interface ScenarioRecipe {
+  seed?: string;
+  default: boolean;
+}
+
 export interface Recipe {
   name: string;
   source: "nectar.toml" | "package.json" | "requirements.txt" | "pyproject.toml" | "Gemfile" | "static";
@@ -57,6 +78,20 @@ export interface Recipe {
   desktop?: DesktopRecipe;
   ios?: IosRecipe;
   dev?: DevRecipe;
+  deps?: Record<string, DepRecipe>;
+  scenarios?: Record<string, ScenarioRecipe>;
+}
+
+export interface DepRecord {
+  kind: "postgres" | "sqlite";
+  env: string;
+  created_at: string;
+  image?: string;
+  project?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  file?: string;
 }
 
 export interface ServeRecord {
@@ -184,6 +219,7 @@ export interface EnvRecord {
   testpack?: TestpackRecord;
   failure?: PublishFailure;
   exposure?: ExposureRecord;
+  deps?: Record<string, DepRecord>;
 }
 
 export interface MachineConfig {

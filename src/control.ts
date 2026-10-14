@@ -58,7 +58,7 @@ type ArgSpec = Record<string, "string" | "boolean">;
 
 const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
-    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean" },
+    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean" },
     required: ["path"],
   },
   ls: { spec: { mode: "string", status: "string" }, required: [] },
@@ -163,6 +163,7 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
         verify: flag("verify"),
         name: text("name"),
         dryRun: flag("dry_run"),
+        fresh: flag("fresh"),
       };
       return service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)));
     }

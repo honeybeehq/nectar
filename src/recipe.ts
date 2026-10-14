@@ -6,7 +6,7 @@ import { parseDuration } from "./duration.js";
 import { NectarError } from "./errors.js";
 import { detectPython, detectRails, type FallbackHost } from "./fallbacks.js";
 import { appSlug } from "./refs.js";
-import type { DesktopRecipe, DevRecipe, IosRecipe, Mode, Recipe, WebRecipe } from "./types.js";
+import type { DepRecipe, DesktopRecipe, DevRecipe, IosRecipe, Mode, Recipe, ScenarioRecipe, WebRecipe } from "./types.js";
 
 type TomlTable = Record<string, unknown>;
 
@@ -137,6 +137,102 @@ function parseIos(value: unknown): IosRecipe | undefined {
   };
 }
 
+const DEP_NAME = /^[a-z][a-z0-9_-]*$/;
+const ENV_VAR = /^[A-Z_][A-Z0-9_]*$/;
+const SQL_NAME = /^[a-z_][a-z0-9_]*$/;
+const IMAGE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DEFAULT_POSTGRES_TAG = "17";
+
+function optionalMatch(value: unknown, fallback: string, pattern: RegExp, label: string): string {
+  if (value === undefined) return fallback;
+  const text = requiredString(value, label);
+  if (!pattern.test(text)) throw new NectarError("E_NO_RECIPE", `${label} '${text}' must match ${pattern.source}`);
+  return text;
+}
+
+function parseDep(name: string, value: unknown): DepRecipe {
+  const label = `[deps.${name}]`;
+  const dep = table(value, label);
+  if (dep.provision !== undefined || dep.teardown !== undefined) {
+    throw new NectarError("E_NO_RECIPE", `${label} provision/teardown commands are not implemented yet; use kind = "postgres:<version>" or "sqlite"`);
+  }
+  const kind = requiredString(dep.kind, `${label}.kind`);
+  if (kind === "sqlite") {
+    rejectUnknownKeys(dep, ["kind", "path", "env"], label);
+    const file = requiredString(dep.path, `${label}.path`);
+    if (path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) {
+      throw new NectarError("E_NO_RECIPE", `${label}.path must be a relative path inside the repository`);
+    }
+    return { kind: "sqlite", path: file, env: optionalMatch(dep.env, "DATABASE_PATH", ENV_VAR, `${label}.env`) };
+  }
+  if (kind === "postgres" || kind.startsWith("postgres:")) {
+    rejectUnknownKeys(dep, ["kind", "env", "database", "user"], label);
+    const tag = kind === "postgres" ? DEFAULT_POSTGRES_TAG : kind.slice("postgres:".length);
+    if (!IMAGE_TAG.test(tag)) throw new NectarError("E_NO_RECIPE", `${label}.kind has an invalid postgres version '${tag}'`);
+    return {
+      kind: "postgres",
+      image: `postgres:${tag}`,
+      env: optionalMatch(dep.env, "DATABASE_URL", ENV_VAR, `${label}.env`),
+      database: optionalMatch(dep.database, "app", SQL_NAME, `${label}.database`),
+      user: optionalMatch(dep.user, "nectar", SQL_NAME, `${label}.user`),
+    };
+  }
+  throw new NectarError("E_NO_RECIPE", `${label}.kind '${kind}' is not supported yet; use "postgres:<version>" or "sqlite"`);
+}
+
+function parseDeps(value: unknown): Record<string, DepRecipe> | undefined {
+  if (value === undefined) return undefined;
+  const deps = table(value, "[deps]");
+  if (deps.compose !== undefined) {
+    throw new NectarError("E_NO_RECIPE", '[deps].compose is not implemented yet; declare [deps.<name>] with kind = "postgres:<version>" or "sqlite"');
+  }
+  const parsed: Record<string, DepRecipe> = {};
+  const injected = new Set<string>();
+  for (const [name, item] of Object.entries(deps)) {
+    if (!DEP_NAME.test(name)) throw new NectarError("E_NO_RECIPE", `[deps.${name}] name must match ${DEP_NAME.source}`);
+    const dep = parseDep(name, item);
+    if (injected.has(dep.env)) throw new NectarError("E_NO_RECIPE", `Two [deps] entries inject ${dep.env}; give one of them another env`);
+    injected.add(dep.env);
+    parsed[name] = dep;
+  }
+  return parsed;
+}
+
+function parseScenarios(value: unknown): Record<string, ScenarioRecipe> | undefined {
+  if (value === undefined) return undefined;
+  const scenarios = table(value, "[scenarios]");
+  const parsed: Record<string, ScenarioRecipe> = {};
+  for (const [name, item] of Object.entries(scenarios)) {
+    const label = `[scenarios.${name}]`;
+    if (!DEP_NAME.test(name)) throw new NectarError("E_NO_RECIPE", `${label} name must match ${DEP_NAME.source}`);
+    const scenario = table(item, label);
+    for (const deferred of ["entry", "login"]) {
+      if (scenario[deferred] !== undefined) {
+        throw new NectarError("E_NO_RECIPE", `${label}.${deferred} is not implemented yet and would be silently ignored; only seed and default are`);
+      }
+    }
+    rejectUnknownKeys(scenario, ["seed", "default"], label);
+    if (scenario.default !== undefined && typeof scenario.default !== "boolean") {
+      throw new NectarError("E_NO_RECIPE", `${label}.default must be a boolean`);
+    }
+    parsed[name] = {
+      ...(scenario.seed === undefined ? {} : { seed: requiredString(scenario.seed, `${label}.seed`) }),
+      default: scenario.default === true,
+    };
+  }
+  if (Object.values(parsed).filter((scenario) => scenario.default).length > 1) {
+    throw new NectarError("E_NO_RECIPE", "At most one [scenarios.<name>] may set default = true");
+  }
+  return parsed;
+}
+
+export function seedScenario(recipe: Recipe): { name: string; seed: string } | undefined {
+  const entries = Object.entries(recipe.scenarios ?? {});
+  const chosen = entries.find(([, scenario]) => scenario.default) ?? (entries.length === 1 ? entries[0] : undefined);
+  if (chosen?.[1].seed === undefined) return undefined;
+  return { name: chosen[0], seed: chosen[1].seed };
+}
+
 export async function loadRecipe(repo: string, host?: FallbackHost): Promise<Recipe> {
   const toml = await maybeRead(path.join(repo, "nectar.toml"));
   const fallbackName = appSlug(path.basename(repo));
@@ -155,12 +251,14 @@ export async function loadRecipe(repo: string, host?: FallbackHost): Promise<Rec
         throw new NectarError("E_NO_RECIPE", `[${section}] is deferred to v0.1 and would be silently ignored; remove it from nectar.toml`);
       }
     }
-    rejectUnknownKeys(value, ["name", "web", "desktop", "ios", "dev"], "nectar.toml");
+    rejectUnknownKeys(value, ["name", "web", "desktop", "ios", "dev", "deps", "scenarios"], "nectar.toml");
     const name = value.name === undefined ? fallbackName : appSlug(requiredString(value.name, "name"));
     const web = parseWeb(value.web);
     const desktop = parseDesktop(value.desktop);
     const ios = parseIos(value.ios);
     const dev = parseDev(value.dev);
+    const deps = parseDeps(value.deps);
+    const scenarios = parseScenarios(value.scenarios);
     return {
       name,
       source: "nectar.toml",
@@ -168,6 +266,8 @@ export async function loadRecipe(repo: string, host?: FallbackHost): Promise<Rec
       ...(desktop === undefined ? {} : { desktop }),
       ...(ios === undefined ? {} : { ios }),
       ...(dev === undefined ? {} : { dev }),
+      ...(deps === undefined ? {} : { deps }),
+      ...(scenarios === undefined ? {} : { scenarios }),
     };
   }
 

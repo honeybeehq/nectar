@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import { realpathSync } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { runCommand, scrubbedEnvironment, type CommandResult } from "./commands.js";
 import { NectarError } from "./errors.js";
+import type { BranchSource } from "./types.js";
 
 const PINNED: Array<[string, string]> = [
   ["core.hooksPath", "/dev/null"],
@@ -96,6 +98,71 @@ export async function currentBranch(repo: string): Promise<string> {
   const branch = await git(["branch", "--show-current"], repo);
   if (!branch) throw new NectarError("E_CHECKOUT", "Detached HEAD requires --branch <name>");
   return branch;
+}
+
+export interface BranchSlot {
+  branch: string;
+  source: BranchSource;
+  commit?: string;
+}
+
+export async function resolveBranch(repo: string, explicit?: string): Promise<BranchSlot> {
+  if (explicit !== undefined) return { branch: explicit, source: "flag" };
+  const current = await git(["branch", "--show-current"], repo);
+  if (current) return { branch: current, source: "head" };
+  const commit = await git(["rev-parse", "--verify", "HEAD^{commit}"], repo);
+  const listed = await git(
+    ["for-each-ref", "--contains", commit, "--format=%(refname)%00%(objectname)%00%(symref)", "refs/heads", "refs/remotes"],
+    repo,
+  );
+  const candidates = listed
+    .split("\n")
+    .map((line) => line.split("\0"))
+    .filter(([ref, , symref]) => ref !== undefined && ref !== "" && !symref)
+    .map(([ref = "", object]) => {
+      const local = ref.startsWith("refs/heads/");
+      const branch = local ? ref.slice("refs/heads/".length) : ref.split("/").slice(3).join("/");
+      return { branch, rank: (object === commit ? 0 : 2) + (local ? 0 : 1) };
+    })
+    .filter((candidate) => candidate.branch !== "" && candidate.branch !== "HEAD")
+    .sort((a, b) => a.rank - b.rank || (a.branch < b.branch ? -1 : a.branch > b.branch ? 1 : 0));
+  const chosen = candidates[0];
+  if (chosen !== undefined) return { branch: chosen.branch, source: "contains", commit };
+  return { branch: `detached-${commit.slice(0, 8)}`, source: "detached", commit };
+}
+
+export function normalizeRemote(url: string, repo: string): string {
+  const raw = url.trim().replace(/\/+$/, "");
+  const hosted = (host: string, location: string): string =>
+    `${host.toLowerCase()}/${location.replace(/^\/+/, "").replace(/^~\/?/, "").replace(/\.git$/i, "").replace(/\/+$/, "")}`;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/]*@)?([^/:]*)(?::\d+)?(\/.*)?$/i.exec(raw);
+  let local = raw;
+  if (scheme !== null) {
+    if (scheme[1]?.toLowerCase() !== "file") return hosted(scheme[2] ?? "", scheme[3] ?? "");
+    local = decodeURIComponent(scheme[3] ?? "/");
+  } else {
+    const scp = /^(?:[^@/:]+@)?([^/:]+):(.*)$/.exec(raw);
+    if (scp !== null && !raw.startsWith(".")) return hosted(scp[1] ?? "", scp[2] ?? "");
+  }
+  const resolved = path.resolve(repo, local.replace(/\/\.git$/, "") || "/");
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+export interface SourceIdentity {
+  origin?: string;
+  roots: string[];
+}
+
+export async function sourceIdentity(repo: string, ref: string): Promise<SourceIdentity> {
+  if (ref.startsWith("-")) throw new NectarError("E_CHECKOUT", `Ref '${ref}' is not a valid ref name`);
+  const remote = await runGit(["config", "--get", "remote.origin.url"], repo);
+  const roots = (await git(["rev-list", "--max-parents=0", `${ref}^{commit}`, "--"], repo)).split("\n").filter(Boolean).sort();
+  const url = remote.exitCode === 0 ? remote.stdout.trim() : "";
+  return { ...(url ? { origin: normalizeRemote(url, repo) } : {}), roots };
 }
 
 export async function resolveCommit(repo: string, branch: string): Promise<string> {

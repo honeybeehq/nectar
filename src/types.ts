@@ -188,6 +188,8 @@ export interface TestpackRecord {
   bundle_id?: string;
 }
 
+export type BranchSource = "flag" | "head" | "contains" | "detached";
+
 export interface EnvRecord {
   eid: string;
   name: string;
@@ -195,7 +197,10 @@ export interface EnvRecord {
   app: string;
   repo: string;
   branch: string;
+  branch_source?: BranchSource;
   commit: string;
+  origin?: string;
+  roots?: string[];
   worktree: string;
   borrowed_worktree: boolean;
   status: EnvStatus;

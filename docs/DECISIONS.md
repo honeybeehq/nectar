@@ -472,6 +472,34 @@ needs two ports per env and a reviewer-visible URL swap, which open question 6 a
 deferred. Only web envs stage: dev, desktop and iOS republish in place, and stopped or
 crashed envs have nothing to keep serving.
 
+**Amendment · 2026-10-14 (cross-Cell republish and detached HEAD):** each Honeybee Cell is
+its own clone at its own path, usually with a detached HEAD, so D26 refused to republish
+`<app>--<branch>--web` from a second Cell or after a Cell move, and publish without
+`--branch` failed with `E_CHECKOUT`. **Chose:** (1) with a detached HEAD and no `--branch`,
+the branch slot is a local branch whose tip is HEAD, else a remote-tracking branch whose
+tip is HEAD, else a local branch containing HEAD, else a remote-tracking branch containing
+HEAD (ties by name), else `detached-<8-hex sha>`. Only local refs are read; nothing is
+fetched. The checkout is HEAD's commit, not the tip of the chosen branch. The plan, the
+result and the record carry `branch_source` (`flag`, `head`, `contains`, `detached`).
+(2) A git source also matches the recorded one when both have the same normalized
+`remote.origin.url` (host and path for URLs, credentials, port and `.git` dropped; real
+path for local remotes) and share a root commit, and either the branch is the recorded one
+or the recorded `repo` no longer exists. Records keep `origin` and `roots` from the publish,
+so an evicted Cell can still be matched. Nectar's old slot belongs to the old clone, so a
+republish from another clone checks out a fresh slot and trashes the old one.
+**Alternatives:** (a) read a branch name Honeybee records for the Cell; (b) match on origin
+URL alone; (c) treat any source as replaceable once the recorded path is gone; (d) clone
+into nectard's work dir so slots never belong to a Cell repo. **Why:** Honeybee exposes no
+branch to a Cell: `HIVE_*` carries bee ids and the space name, and the Cell's `cell.json`
+has the origin and sha but no branch, so (a) has nothing to read. The origin URL is plain
+repo config that any repo can set, so (b) and (c) let an unrelated repo take an env by
+naming the same origin. A shared root commit needs the same history, which a different
+project cannot fake. `git config --get` and `rev-list` run through the hardened `runGit`
+and execute nothing from the repo's config. (d) remains the D29 follow-up. A record from
+before this amendment has no `origin`, so once its `repo` is gone it still needs
+`nectar rm <env> --force`. A Cell whose HEAD is past every branch gets a new
+`detached-<sha>` env for each commit; pass `--branch` to keep one URL.
+
 ## D27 — `doctor --fix` removes only what it can prove is Nectar's
 
 **Chose:** classify every Serve entry in Nectar's tailnet range as owned, orphan, foreign or

@@ -4,7 +4,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { currentBranch, installDependencies, prepareWorktree, removeWorktree, resolveCommit, resolveRepo, runGit, sameRepository, shortCommit } from "./git.js";
+import {
+  currentBranch,
+  installDependencies,
+  prepareWorktree,
+  removeWorktree,
+  resolveBranch,
+  resolveCommit,
+  resolveRepo,
+  runGit,
+  sameRepository,
+  shortCommit,
+  sourceIdentity,
+  type BranchSlot,
+} from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
 import {
   currentPublisher,
@@ -331,11 +344,12 @@ export class NectarService {
     const site = await this.staticCandidate(options);
     if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
     const repo = await resolveRepo(options.repo ?? process.cwd());
-    const branch = options.branch ?? (await currentBranch(repo));
+    const slot = await resolveBranch(repo, options.branch);
+    const branch = slot.branch;
     const loaded = await loadRecipe(repo);
     const recipe = options.name === undefined ? loaded : { ...loaded, name: appSlug(options.name) };
     const mode = selectMode(recipe, options.mode);
-    if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, branch);
+    if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, slot);
     if (mode === "web") assertRuntimes(recipe);
     if (mode === "web" && Object.values(recipe.deps ?? {}).some((dep) => dep.kind === "postgres")) await assertDocker();
     if (options.fresh === true && mode !== "web") {
@@ -347,6 +361,7 @@ export class NectarService {
     const publishOptions = {
       repo,
       branch,
+      slot,
       recipe,
       ttlMs,
       ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
@@ -394,12 +409,14 @@ export class NectarService {
     }
   }
 
-  private recipePlan(recipe: Recipe, mode: Mode, repo: string, branch: string): Record<string, unknown> {
+  private recipePlan(recipe: Recipe, mode: Mode, repo: string, slot: BranchSlot): Record<string, unknown> {
     const web = mode === "web" ? recipe.web : undefined;
     return {
       dry_run: true,
       repo,
-      name: envName(recipe.name, branch, mode),
+      name: envName(recipe.name, slot.branch, mode),
+      branch: slot.branch,
+      branch_source: slot.source,
       mode,
       source: recipe.source,
       stack: recipe.detected?.stack ?? recipe.source,
@@ -483,6 +500,7 @@ export class NectarService {
   private async initialRecord(options: {
     repo: string;
     branch: string;
+    slot?: BranchSlot;
     recipe: Recipe;
     mode: Mode;
     ttlMs: number;
@@ -491,7 +509,7 @@ export class NectarService {
   }): Promise<{ record: EnvRecord; old?: EnvRecord; identity: MachineIdentity }> {
     const name = envName(options.recipe.name, options.branch, options.mode);
     const old = await this.store.maybeEnv(name);
-    if (old !== undefined) await this.assertSameSource(old, options.repo, options.recipe.source === "static");
+    if (old !== undefined) await this.assertSameSource(old, options.repo, options.recipe.source === "static", options.branch, options.slot);
     const identity = await this.identity();
     const slot = path.join(this.paths.work, name);
     const owned = old !== undefined && !old.borrowed_worktree && old.worktree === `${slot}.alt` ? old.worktree : slot;
@@ -503,12 +521,15 @@ export class NectarService {
     if (options.worktree === undefined) {
       const other = owned === slot ? `${slot}.alt` : slot;
       if (existsSync(other)) await this.discardWorktree(options.repo, other);
+      if (options.recipe.source !== "static" && existsSync(owned) && !(await this.checkedOutFrom(owned, options.repo))) {
+        await this.discardWorktree(options.repo, owned);
+      }
     }
     return { record, ...(old === undefined ? {} : { old }), identity };
   }
 
-  private async assertSameSource(old: EnvRecord, repo: string, isStatic: boolean): Promise<void> {
-    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await this.sameGitSource(old, repo)) return;
+  private async assertSameSource(old: EnvRecord, repo: string, isStatic: boolean, branch: string, slot?: BranchSlot): Promise<void> {
+    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await this.sameGitSource(old, repo, branch, slot?.commit ?? branch)) return;
     throw new NectarError(
       "E_USAGE",
       `Env '${old.name}' is published from ${old.repo}, not ${repo}; pass --name <other> to publish this one beside it, or run nectar rm ${old.name} --force first`,
@@ -516,13 +537,32 @@ export class NectarService {
     );
   }
 
-  private async sameGitSource(old: EnvRecord, repo: string): Promise<boolean> {
+  private async sameGitSource(old: EnvRecord, repo: string, branch: string, ref: string): Promise<boolean> {
     if (await sameRepository(old.repo, repo)) return true;
-    return !old.borrowed_worktree && existsSync(path.join(old.worktree, ".git")) && sameRepository(old.worktree, repo);
+    if (!old.borrowed_worktree && existsSync(path.join(old.worktree, ".git")) && (await sameRepository(old.worktree, repo))) return true;
+    return this.sameUpstream(old, repo, branch, ref);
+  }
+
+  private async sameUpstream(old: EnvRecord, repo: string, branch: string, ref: string): Promise<boolean> {
+    const gone = !existsSync(old.repo);
+    if (old.branch !== branch && !gone) return false;
+    const recorded =
+      old.roots !== undefined
+        ? { origin: old.origin, roots: old.roots }
+        : gone
+          ? undefined
+          : await sourceIdentity(old.repo, "HEAD").catch(() => undefined);
+    if (recorded?.origin === undefined || recorded.roots.length === 0) return false;
+    const fresh = await sourceIdentity(repo, ref).catch(() => undefined);
+    return fresh?.origin === recorded.origin && fresh.roots.some((root) => recorded.roots.includes(root));
+  }
+
+  private async checkedOutFrom(worktree: string, repo: string): Promise<boolean> {
+    return existsSync(path.join(worktree, ".git")) && sameRepository(worktree, repo);
   }
 
   private nextRecord(
-    options: { repo: string; branch: string; recipe: Recipe; mode: Mode; ttlMs: number; worktree?: string; packet?: string },
+    options: { repo: string; branch: string; slot?: BranchSlot; recipe: Recipe; mode: Mode; ttlMs: number; worktree?: string; packet?: string },
     name: string,
     destination: string,
     identity: MachineIdentity,
@@ -536,6 +576,7 @@ export class NectarService {
       app: options.recipe.name,
       repo: options.repo,
       branch: options.branch,
+      ...(options.slot === undefined ? {} : { branch_source: options.slot.source }),
       commit: old?.commit ?? "unknown",
       worktree: destination,
       borrowed_worktree: options.worktree !== undefined,
@@ -565,9 +606,10 @@ export class NectarService {
     old: EnvRecord | undefined,
     borrowed: string | undefined,
     cacheAllowlist: string[],
+    pinned?: string,
   ): Promise<EnvRecord> {
     try {
-      await this.checkoutInto(record, old, borrowed, cacheAllowlist);
+      await this.checkoutInto(record, old, borrowed, cacheAllowlist, pinned);
       await this.store.writeEnv(record);
       return record;
     } catch (error) {
@@ -582,8 +624,13 @@ export class NectarService {
     old: EnvRecord | undefined,
     borrowed: string | undefined,
     cacheAllowlist: string[],
+    pinned?: string,
   ): Promise<void> {
-    const commit = await resolveCommit(record.repo, record.branch);
+    const commit = pinned ?? (await resolveCommit(record.repo, record.branch));
+    const identity = await sourceIdentity(record.repo, commit);
+    if (identity.origin === undefined) delete record.origin;
+    else record.origin = identity.origin;
+    record.roots = identity.roots;
     const checkout = await prepareWorktree({
       repo: record.repo,
       branch: record.branch,
@@ -754,6 +801,7 @@ export class NectarService {
   private async publishWeb(options: {
     repo: string;
     branch: string;
+    slot?: BranchSlot;
     recipe: Recipe;
     ttlMs: number;
     worktree?: string;
@@ -774,7 +822,7 @@ export class NectarService {
           );
         }
       }
-      if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined);
+      if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined, options.branch, options.slot);
       const records = await this.store.listEnvs();
       // The quota counts live web envs only — not ios streams, not silently-dead
       // servers a bee could never free by "running gc".
@@ -801,7 +849,7 @@ export class NectarService {
       let record = initial.record;
       let stageWarnings: string[] = [];
       if (site === undefined) {
-        record = await this.checkout(record, initial.old, options.worktree, initial.identity.config.worktree_cache_allowlist);
+        record = await this.checkout(record, initial.old, options.worktree, initial.identity.config.worktree_cache_allowlist, options.slot?.commit);
       } else {
         stageWarnings = await this.stageStatic(record, site);
       }
@@ -821,7 +869,7 @@ export class NectarService {
   }
 
   private async republishWeb(
-    options: { repo: string; branch: string; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite; fresh?: boolean },
+    options: { repo: string; branch: string; slot?: BranchSlot; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite; fresh?: boolean },
     old: EnvRecord,
   ): Promise<PublishedWeb> {
     const identity = await this.identity();
@@ -835,7 +883,7 @@ export class NectarService {
     try {
       if (site === undefined) {
         await this.discardWorktree(record.repo, destination);
-        await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist);
+        await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist, options.slot?.commit);
         const loaded = await loadRecipe(record.worktree);
         web = loaded.web;
         if (web !== undefined) depEnv = await this.provisionDeps(record, loaded, options.fresh === true);
@@ -1146,6 +1194,7 @@ export class NectarService {
   private async publishDev(options: {
     repo: string;
     branch: string;
+    slot?: BranchSlot;
     recipe: Recipe;
     ttlMs: number;
     worktree?: string;
@@ -1161,6 +1210,7 @@ export class NectarService {
         initial.old,
         options.worktree,
         initial.identity.config.worktree_cache_allowlist,
+        options.slot?.commit,
       );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
@@ -1270,6 +1320,7 @@ export class NectarService {
   private async publishDesktop(options: {
     repo: string;
     branch: string;
+    slot?: BranchSlot;
     recipe: Recipe;
     ttlMs: number;
     worktree?: string;
@@ -1297,6 +1348,7 @@ export class NectarService {
         initial.old,
         options.worktree,
         initial.identity.config.worktree_cache_allowlist,
+        options.slot?.commit,
       );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
@@ -1448,6 +1500,7 @@ export class NectarService {
   private async publishIos(options: {
     repo: string;
     branch: string;
+    slot?: BranchSlot;
     recipe: Recipe;
     ttlMs: number;
     worktree?: string;
@@ -1478,6 +1531,7 @@ export class NectarService {
         initial.old,
         options.worktree,
         initial.identity.config.worktree_cache_allowlist,
+        options.slot?.commit,
       );
       try {
         const branchRecipe = await loadRecipe(record.worktree);
@@ -1628,6 +1682,7 @@ export class NectarService {
       env: record.name,
       mode: record.mode,
       branch: record.branch,
+      ...(record.branch_source === undefined ? {} : { branch_source: record.branch_source }),
       commit: record.commit,
       ref: record.ref,
       urls: record.urls,

@@ -161,6 +161,70 @@ describe("fixture-backed web publish", () => {
     expect(back.urls).toEqual(published.urls);
   });
 
+  it("derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor", async () => {
+    const { service } = await harness();
+    const files = (body: string): Record<string, string> => ({
+      "package.json": JSON.stringify({ name: "cells", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('process.env.VALHALL_HEM_TOKEN ?? "scrubbed"', JSON.stringify(body)),
+    });
+    const upstream = await initGitRepo(files("upstream"));
+    const root = await tempDir("cells");
+    const origin = path.join(root, "origin.git");
+    const run = async (cwd: string, ...args: string[]): Promise<string> => {
+      const result = await runCommand("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd });
+      if (result.exitCode !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    };
+    await run(root, "clone", "-q", "--bare", upstream, origin);
+    const cell = async (name: string): Promise<string> => {
+      const dir = path.join(root, name);
+      await run(root, "clone", "-q", origin, dir);
+      await run(dir, "checkout", "-q", "--detach");
+      return dir;
+    };
+    const a = await cell("a");
+    const b = await cell("b");
+
+    expect(await service.publish({ repo: a, dryRun: true })).toMatchObject({ name: "cells--main--web", branch: "main", branch_source: "contains" });
+    expect(await service.publish({ repo: a, branch: "review", dryRun: true })).toMatchObject({ name: "cells--review--web", branch_source: "flag" });
+    const first = await service.publish({ repo: a, ttl: "1h" });
+    track(service, first.env as string);
+    expect(first).toMatchObject({ env: "cells--main--web", branch: "main", branch_source: "contains" });
+    expect((await service.show("cells--main--web")).env).toMatchObject({ origin, repo: a });
+
+    await rm(a, { recursive: true, force: true });
+    const second = await service.publish({ repo: b, ttl: "1h" });
+    expect(second).toMatchObject({ env: "cells--main--web", urls: first.urls });
+    expect((await service.show("cells--main--web")).env).toMatchObject({ repo: b, status: "serving" });
+    expect(await fetch((second.urls as { local: string }).local).then(async (response) => response.text())).toBe("upstream");
+
+    const impostor = await initGitRepo(files("impostor"));
+    await run(impostor, "remote", "add", "origin", origin);
+    await run(impostor, "checkout", "-q", "--detach");
+    await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE", details: { existing_repo: b } });
+    await rm(b, { recursive: true, force: true });
+    await expect(service.publish({ repo: impostor, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE" });
+    expect(await fetch((second.urls as { local: string }).local).then(async (response) => response.text())).toBe("upstream");
+
+    const c = await cell("c");
+    await writeFile(path.join(c, "extra.txt"), "x\n");
+    await run(c, "add", "extra.txt");
+    await run(c, "commit", "-qm", "unpushed");
+    const head = await run(c, "rev-parse", "HEAD");
+    expect(await service.publish({ repo: c, dryRun: true })).toMatchObject({ branch: `detached-${head.slice(0, 8)}`, branch_source: "detached" });
+    const detached = await service.publish({ repo: c, ttl: "1h" });
+    track(service, detached.env as string);
+    expect(detached).toMatchObject({ env: `cells--detached-${head.slice(0, 8)}--web`, commit: head.slice(0, 8), branch_source: "detached" });
+    await run(c, "checkout", "-q", "-b", "ahead");
+    await writeFile(path.join(c, "later.txt"), "y\n");
+    await run(c, "add", "later.txt");
+    await run(c, "commit", "-qm", "later");
+    await run(c, "checkout", "-q", "--detach", head);
+    const ahead = await service.publish({ repo: c, ttl: "1h" });
+    track(service, ahead.env as string);
+    expect(ahead).toMatchObject({ env: "cells--ahead--web", branch: "ahead", commit: head.slice(0, 8), branch_source: "contains" });
+  });
+
   it("keeps the previous publish serving when a republish fails to install or check out", async () => {
     const { service } = await harness();
     const repo = await initGitRepo({

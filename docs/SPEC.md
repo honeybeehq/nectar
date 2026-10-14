@@ -50,11 +50,19 @@ Agents of any harness call it directly; the packet carries only strings.
   another source into an existing name is `E_USAGE` naming that source and suggesting
   `--name`, and the existing env is untouched. A git worktree of the same repository
   (same `--git-common-dir` as the recorded `repo` or as Nectar's own worktree of the env)
-  counts as the same source, so the recorded worktree may be removed afterwards.
+  counts as the same source, so the recorded worktree may be removed afterwards. So does
+  another clone of the same repository (a second Cell, or the same Cell after a move): same
+  normalized `remote.origin.url` and a shared root commit, with the recorded branch or with
+  the recorded `repo` gone. A different repository that only names the same origin is
+  refused (DECISIONS D26 amendment).
 - **app** — the repo's short name, from `--name`, else the recipe (`name` in `nectar.toml`,
   `package.json`, `[project].name`), else the repo directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
-  lowercased, `[a-z0-9-]` only.
+  lowercased, `[a-z0-9-]` only. The branch is `--branch`, else the checked-out branch. A
+  detached HEAD takes a branch whose tip is HEAD, else a branch containing HEAD (local
+  before remote-tracking, then by name), else `detached-<8-hex sha>`, and publishes HEAD's
+  commit. `branch_source` in the plan, result and record says which (`flag`, `head`,
+  `contains`, `detached`).
 - **mode** — `web | desktop | cli | backend | ios`. Matches the packet `kind` vocabulary
   except `code`: a `code` packet is precisely one with **no** nectar env. (`ios` does not
   exist in the desk contract's kind vocabulary yet — coordination item, see §6.5 and open

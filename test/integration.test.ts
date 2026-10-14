@@ -646,6 +646,49 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     await expect(service.store.readEnv(env)).rejects.toMatchObject({ code: "E_NOT_FOUND" });
   });
 
+  it("defaults to a 7 day TTL, lists the expiry, and keeps viewed envs through gc", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-ttl", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+    });
+    const day = 24 * 60 * 60_000;
+    const published = await service.publish({ repo });
+    const viewed = published.env as string;
+    track(service, viewed);
+    const lifetime = new Date(published.expires_at as string).getTime() - Date.now();
+    expect(lifetime).toBeGreaterThan(7 * day - 60_000);
+    expect(lifetime).toBeLessThanOrEqual(7 * day);
+    expect((await service.list()).envs).toEqual([
+      expect.objectContaining({ name: viewed, expires_at: published.expires_at, expires_in: "7d" }),
+    ]);
+
+    expect((await runCommand("git", ["branch", "agent/ignored"], { cwd: repo })).exitCode).toBe(0);
+    const ignored = (await service.publish({ repo, branch: "agent/ignored", ttl: "1m" })).env as string;
+    track(service, ignored);
+    for (const env of [viewed, ignored]) {
+      const record = await service.store.readEnv(env);
+      record.published_at = new Date(Date.now() - 2 * day).toISOString();
+      record.last_touched_at = record.published_at;
+      record.expires_at = new Date(Date.now() - 60_000).toISOString();
+      await service.store.writeEnv(record);
+    }
+
+    const shown = (await service.show(viewed)).env as { expires_at: string };
+    expect(new Date(shown.expires_at).getTime() - Date.now()).toBeGreaterThan(7 * day - 60_000);
+    expect((await service.store.readEnv(viewed)).expires_at).toBe(shown.expires_at);
+
+    expect((await service.gc()).transitions).toEqual([{ env: ignored, action: "expire" }]);
+    expect((await service.store.readEnv(viewed)).status).toBe("serving");
+    expect((await service.store.readEnv(ignored)).status).toBe("expired");
+
+    const rearmed = await service.touch(ignored);
+    expect(new Date(rearmed.expires_at as string).getTime() - Date.now()).toBeLessThanOrEqual(60_000);
+    const extended = await service.touch(ignored, "2d");
+    expect(new Date(extended.expires_at as string).getTime() - Date.now()).toBeGreaterThan(2 * day - 60_000);
+    expect((await service.store.readEnv(ignored)).ttl_ms).toBe(2 * day);
+  });
+
   it("gc skips a busy env instead of aborting, and implicit touches keep the publish TTL", async () => {
     const { service } = await harness();
     const repo = await initGitRepo({
@@ -656,7 +699,7 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     const env = published.env as string;
     track(service, env);
 
-    // A desk resolve touches the env but re-arms its own 1 m TTL — not 72 h.
+    // A desk resolve touches the env but re-arms its own 1 m TTL — not the 7 d default.
     await service.resolve(env);
     const touched = await service.store.readEnv(env);
     expect(new Date(touched.expires_at).getTime() - Date.now()).toBeLessThan(10 * 60_000);

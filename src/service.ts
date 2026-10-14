@@ -75,7 +75,7 @@ import type {
   WebRecipe,
 } from "./types.js";
 
-const DEFAULT_TTL = 72 * 60 * 60 * 1_000;
+const DEFAULT_TTL = "7d";
 
 // Machine-wide lock name for the allocate→spawn→record window; env names always
 // carry a --<mode> suffix, so this can never collide with a real env's lock.
@@ -148,7 +148,7 @@ export class NectarService {
   async publish(options: PublishOptions): Promise<Record<string, unknown>> {
     // Validate caller input before touching the repo — a bad --ttl is a usage
     // error, not a checkout problem.
-    const ttlMs = parseDuration(options.ttl ?? "72h", "ttl");
+    const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
     const site = await this.staticCandidate(options);
     if (site !== undefined) return this.publishStatic(site, options, ttlMs);
     if (options.name !== undefined) throw new NectarError("E_USAGE", "--name applies only to static sites; set name in nectar.toml");
@@ -1140,6 +1140,7 @@ export class NectarService {
         mode: record.mode,
         status: record.status,
         mesh_url: record.urls.mesh,
+        expires_at: record.expires_at,
         expires_in: formatRemaining(record.expires_at),
         publisher_bee: record.publisher.hive_bee ?? null,
         liveness: record.liveness ?? null,
@@ -1154,6 +1155,7 @@ export class NectarService {
       input = parsed.env;
     }
     const record = await this.refreshLiveness(await this.store.readEnv(validateEnvName(input)));
+    await this.touchOnView(record);
     return {
       env: record,
       ...(record.status === "crashed" || record.status === "unhealthy" ? { log_tail: await logTail(this.paths, record.name) } : {}),
@@ -1181,6 +1183,24 @@ export class NectarService {
     }
   }
 
+  // Touch re-arms the env's own TTL (SPEC §4.4), not the default; a busy lock
+  // means a publish is mid-flight — skip, the env is active anyway.
+  private async touchOnView(record: EnvRecord): Promise<void> {
+    const now = new Date();
+    const touched = await this.store.updateEnv(
+      record.name,
+      (current) => {
+        current.last_touched_at = now.toISOString();
+        current.expires_at = expiresAt(now, current.ttl_ms ?? parseDuration(DEFAULT_TTL));
+      },
+      { bestEffort: true },
+    );
+    if (touched !== undefined) {
+      record.last_touched_at = touched.last_touched_at;
+      record.expires_at = touched.expires_at;
+    }
+  }
+
   private async localResolve(name: string, host: string, isSelf: boolean, touch = true): Promise<ResolveResult | MultiResolveResult> {
     const records = this.isQualified(name)
       ? [await this.store.readEnv(validateEnvName(name))]
@@ -1189,23 +1209,7 @@ export class NectarService {
     const resolutions: ResolveResult[] = [];
     for (const original of records) {
       const record = await this.refreshLiveness(original);
-      if (touch) {
-        const now = new Date();
-        // Touch re-arms the env's own TTL (SPEC §4.4), not the 72 h default; a
-        // busy lock means a publish is mid-flight — skip, the env is active anyway.
-        const touched = await this.store.updateEnv(
-          record.name,
-          (current) => {
-            current.last_touched_at = now.toISOString();
-            current.expires_at = expiresAt(now, current.ttl_ms ?? DEFAULT_TTL);
-          },
-          { bestEffort: true },
-        );
-        if (touched !== undefined) {
-          record.last_touched_at = touched.last_touched_at;
-          record.expires_at = touched.expires_at;
-        }
-      }
+      if (touch) await this.touchOnView(record);
       const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
       const commitState = await this.commitState(record);
       resolutions.push({
@@ -1545,11 +1549,13 @@ export class NectarService {
     }
   }
 
-  async touch(input: string, ttl = "72h"): Promise<Record<string, unknown>> {
-    const ttlMs = parseDuration(ttl, "ttl");
+  async touch(input: string, ttl?: string): Promise<Record<string, unknown>> {
+    const ttlMs = ttl === undefined ? undefined : parseDuration(ttl, "ttl");
     if (isRef(input)) {
       const parsed = parseRef(input);
-      if (!(await this.isLocalHost(parsed.host))) return this.remoteResult(parsed.host, ["touch", parsed.env, "--ttl", ttl, "--json"]);
+      if (!(await this.isLocalHost(parsed.host))) {
+        return this.remoteResult(parsed.host, ["touch", parsed.env, ...(ttl === undefined ? [] : ["--ttl", ttl]), "--json"]);
+      }
       input = parsed.env;
     }
     const names = this.isQualified(input)
@@ -1557,15 +1563,18 @@ export class NectarService {
       : (await this.store.listEnvs()).filter((record) => record.name.startsWith(`${validateEnvName(input)}--`)).map((record) => record.name);
     if (names.length === 0) throw new NectarError("E_NOT_FOUND", `Environment '${input}' was not found`);
     const now = new Date();
+    const expiries: Record<string, string> = {};
     for (const name of names) {
-      await this.store.updateEnv(name, (record) => {
+      const updated = await this.store.updateEnv(name, (record) => {
+        // An explicit --ttl re-arms with the requested TTL from here on.
+        if (ttlMs !== undefined) record.ttl_ms = ttlMs;
         record.last_touched_at = now.toISOString();
-        record.expires_at = expiresAt(now, ttlMs);
-        // An explicit touch re-arms with the requested TTL from here on.
-        record.ttl_ms = ttlMs;
+        record.expires_at = expiresAt(now, record.ttl_ms ?? parseDuration(DEFAULT_TTL));
       });
+      if (updated !== undefined) expiries[name] = updated.expires_at;
     }
-    return { envs: names, touched_at: now.toISOString(), expires_at: expiresAt(now, ttlMs) };
+    const unique = [...new Set(Object.values(expiries))];
+    return { envs: names, touched_at: now.toISOString(), expires_at: unique.length === 1 ? unique[0] : expiries };
   }
 
   async stop(name: string): Promise<Record<string, unknown>> {

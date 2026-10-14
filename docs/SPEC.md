@@ -210,9 +210,15 @@ only when status or reason changes (best-effort lock; a publish in flight wins).
 records from a failed publish or orphan cleanup have no `serve` block and stay `crashed`.
 `gc`'s dead-Serve-proxy check uses the same port retries before tearing down an env.
 
-TTL default **72 h**, per-publish `--ttl 12h|7d`. Any `nectar open` / `nectar touch` /
-desk render (desk calls `nectar touch` on view) resets the clock. Active review never gets
-reaped mid-session: `gc` skips envs touched in the last 6 h.
+TTL default **7 d** for every mode, per-publish `--ttl 12h|30d`. Viewing an env is
+touch-on-view: `nectar open`, `nectar resolve` and `nectar show <env>` (and desk render, which
+calls `nectar touch` or `resolve` on view) set `expires_at` to now + the env's own TTL, so a
+preview under review never runs out. `nectar ls` does not touch. HTTP requests to the
+preview URL do not touch yet: `tailscale serve` proxies straight to the upstream port, so
+Nectar never sees them (a supervisor-owned proxy is the planned hook). Active review never
+gets reaped mid-session: `gc` skips envs touched in the last 6 h. Dev envs keep their
+separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view moves only the record's
+expiry, never the process clock.
 
 ## 5. Recipes — `nectar.toml`
 
@@ -631,7 +637,7 @@ plus (added post-v0 review, 2026-07-19):
 
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
-               [--ttl 72h] [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
+               [--ttl 7d]  [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
@@ -639,10 +645,12 @@ nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch 
     # detected or forced with --mode static and publish as web envs (§6.1.1).
 
 nectar ls [--json] [--mode <m>] [--status <s>]
-    # This machine's envs: name, mode, status, urls.mesh, expires-in, publisher bee, liveness.
+    # This machine's envs: name, mode, status, urls.mesh, expires_at (ISO), expires_in,
+    # publisher bee, liveness. Listing does not touch.
 
 nectar show <env|ref> [--json]
     # Full record (incl. liveness) + last 40 log lines when status is crashed or unhealthy.
+    # Touches the env (TTL reset).
 
 nectar open <env|ref>
     # web → open urls.local when resolve.is_self, otherwise urls.mesh ·
@@ -654,11 +662,11 @@ nectar open <env|ref>
 nectar shell <env|ref> [--no-record] [--json]
 nectar resolve <ref> [--json]
     # ref → concrete consumables: { mode, is_self, urls, testpack_url, host, status, liveness }.
-    # Consumers prefer urls.local when is_self, urls.mesh otherwise.
+    # Consumers prefer urls.local when is_self, urls.mesh otherwise. Touches the env.
 
-nectar touch <env|ref> [--ttl 72h]
-    # Explicit touch re-arms with the given TTL; implicit touches (open/resolve)
-    # re-arm the env's own publish TTL, never the 72 h default.
+nectar touch <env|ref> [--ttl <duration>]
+    # Re-arms with the env's own TTL; --ttl replaces that TTL from here on. Implicit
+    # touches (open/resolve/show) re-arm the env's own TTL, never the 7 d default.
 nectar stop <env>            # stop serve process, keep everything; status → stopped
 nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash);
                              # a *serving*/*unhealthy* env refuses without --force (E_USAGE)
@@ -796,7 +804,7 @@ noted future step, out of scope here.
 remove tailscale-serve entry) → cold at expiry+24 h (delete worktree) → reap records at
 cold+14 d → prune pack store/evidence to quota. Grace: envs *touched after publish* within
 the last 6 h are never transitioned, so an open review can't be reaped underneath the
-reviewer (open/resolve/touch all bump `last_touched_at`). The publish stamp itself does not
+reviewer (open/resolve/show/touch all bump `last_touched_at`). The publish stamp itself does not
 count as a touch — otherwise `--ttl 1m` would silently mean six hours. A busy env (lock
 held by a live publish) is skipped and reported, never an abort of the sweep. Every non-dry
 run also removes Nectar-range Serve entries whose loopback proxy target is dead; if an env

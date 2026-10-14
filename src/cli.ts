@@ -53,7 +53,7 @@ program
   .description("publish a web, desktop, ios, or crystallized dev review environment, or a static HTML site")
   .addOption(new Option("--mode <mode>", "web, desktop, ios, dev, or static"))
   .option("--branch <branch>", "branch to publish")
-  .option("--ttl <duration>", "time to live", "72h")
+  .option("--ttl <duration>", "time to live (default 7d)")
   .option("--worktree <path>", "borrow an existing clean worktree")
   .option("--packet <hint>", "optional packet lineage hint")
   .option("--verify", "launch a dev env through readiness, then return it to warm")
@@ -61,13 +61,13 @@ program
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl: string; worktree?: string; packet?: string; verify?: boolean; name?: string },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
         return new NectarService().publish({
           repo: target ?? globals.repo,
-          ttl: options.ttl,
+          ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
           ...(options.mode === undefined ? {} : { mode: options.mode }),
           ...(options.branch === undefined ? {} : { branch: options.branch }),
           ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
@@ -116,8 +116,8 @@ program
 program
   .command("touch <env-or-ref>")
   .description("reset an environment's TTL")
-  .option("--ttl <duration>", "time to live", "72h")
-  .action(async (input: string, options: { ttl: string }) =>
+  .option("--ttl <duration>", "time to live (default: the env's own TTL)")
+  .action(async (input: string, options: { ttl?: string }) =>
     execute("touch", async () => new NectarService().touch(input, options.ttl)),
   );
 

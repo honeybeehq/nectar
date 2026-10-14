@@ -292,6 +292,10 @@ interface Diagnosis {
   proxyPresent: boolean;
 }
 
+function liveExposureUrl(record: EnvRecord | undefined): string | null {
+  return record?.exposure === undefined || record.exposure.revoked_at !== undefined ? null : record.exposure.url;
+}
+
 const SECRET_FIELDS = ["share_url", "share_note", "password", "credentials"];
 
 function shareNote(password: string): string {
@@ -452,6 +456,7 @@ export class NectarService {
     const details = Object.fromEntries(Object.entries(exposed).filter(([key]) => !["env", "url", "share_url", "packet_fields", "secret"].includes(key)));
     return {
       ...result,
+      ...(typeof result.urls === "object" && result.urls !== null ? { urls: { ...result.urls, public: exposed.url } } : {}),
       url: exposed.url,
       share_url: exposed.share_url,
       public: { target: to, ...details },
@@ -994,7 +999,7 @@ export class NectarService {
       // Republish keeps the same stable mesh URL, so a live exposure stays valid — the
       // relay route already points at it; carry it across so packet_fields keeps the
       // public_url and gc still knows to tear it down.
-      urls: { local: null, mesh: null, public: old?.exposure?.url ?? null },
+      urls: { local: null, mesh: null, public: liveExposureUrl(old) },
       ...(old?.exposure === undefined ? {} : { exposure: old.exposure }),
       ref: formatRef(identity.host, name),
       published_at: now.toISOString(),
@@ -1905,7 +1910,7 @@ export class NectarService {
           testpack_ref: record.ref,
           dev_ref: null,
           shell_recipe: null,
-          public_url: record.exposure?.url ?? null,
+          public_url: liveExposureUrl(record),
         };
         return this.publishResult(record, packetFields, embeddedWeb?.warnings ?? [], {
           sha256: packResult.sha256,
@@ -2214,7 +2219,7 @@ export class NectarService {
   }
 
   private packetFields(record: EnvRecord): PacketFields {
-    return packetFieldsFor(record.mode, record.ref, record.urls, record.exposure?.url ?? null);
+    return packetFieldsFor(record.mode, record.ref, record.urls, liveExposureUrl(record));
   }
 
   private publishResult(
@@ -2997,8 +3002,8 @@ export class NectarService {
     const config = await this.store.readConfig();
     const target = config.exposures?.[record.exposure.target];
     if (target !== undefined && record.exposure.revoked_at === undefined) {
-      if (record.exposure.control === "relayd" || usesRelayd(target)) await relaydDelete(target, record.exposure.sub);
-      else await relayRm(target, record.exposure.sub);
+      if (record.exposure.control === "relayd") await relaydDelete(target, record.exposure.sub);
+      else if (!usesRelayd(target)) await relayRm(target, record.exposure.sub);
     }
     delete record.exposure;
     record.urls.public = null;

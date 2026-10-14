@@ -208,6 +208,7 @@ describe("expose through relayd", () => {
     expect(published.secret).toEqual(["share_url", "public.share_note", "public.password", "public.credentials"]);
     expect(details.share_note).toContain(details.password);
     expect((published.packet_fields as { public_url: string }).public_url).toBe(url);
+    expect((published.urls as { public: string }).public).toBe(url);
     const visible = JSON.stringify({ url, packet_fields: published.packet_fields, urls: published.urls, record: (await service.show(env)).env });
     expect(visible).not.toContain(details.password);
     expect(url).not.toMatch(/[@?#]/);
@@ -247,6 +248,10 @@ describe("expose through relayd", () => {
     const revoked = await service.show(env);
     expect((revoked.env as { exposure: { revoked_at?: string }; urls: { public: unknown } }).exposure.revoked_at).toBeDefined();
     expect((revoked.env as { urls: { public: unknown } }).urls.public).toBeNull();
+    expect(((await service.resolve(env)) as { packet_fields: { public_url: unknown } }).packet_fields.public_url).toBeNull();
+    const republished = await service.publish({ repo, ttl: "1h" });
+    expect((republished.packet_fields as { public_url: unknown }).public_url).toBeNull();
+    expect((republished.urls as { public: unknown }).public).toBeNull();
     expect((await service.gc()).exposures).toEqual([]);
     expect(relay.logs.filter((event) => event.event === "control" && event.method === "PUT")).toHaveLength(1);
     expect(await service.unexpose(env)).toMatchObject({ unexposed: true, already_revoked: true });

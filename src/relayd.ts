@@ -991,8 +991,12 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
       else server.listen(args[0], done);
     });
 
-  await mkdir(path.dirname(config.admin_socket), { recursive: true, mode: 0o700 });
-  await chmod(path.dirname(config.admin_socket), 0o700);
+  const adminDir = path.dirname(config.admin_socket);
+  await mkdir(adminDir, { recursive: true, mode: 0o700 });
+  const adminInfo = await lstat(adminDir);
+  if (!adminInfo.isDirectory() || adminInfo.uid !== process.getuid?.() || (adminInfo.mode & 0o077) !== 0) {
+    throw new Error(`relayd keeps its admin socket only in a directory it owns with mode 0700; ${adminDir} is not`);
+  }
   const alive = await new Promise<boolean>((resolve) => {
     const probe = net.connect(config.admin_socket);
     probe.once("connect", () => {

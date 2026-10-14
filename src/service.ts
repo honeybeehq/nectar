@@ -191,6 +191,11 @@ interface PublishShape {
   uncommitted?: string;
 }
 
+interface Shipment {
+  archive: Buffer;
+  payload: Record<string, unknown>;
+}
+
 interface PlacementDecision {
   host: string | undefined;
   reason: string;
@@ -392,7 +397,15 @@ export class NectarService {
     if (placement === undefined) return this.publishHere(options, ttlMs);
     const placed = { placed_on: placement.host ?? (await this.identity()).host, placement_reason: placement.reason };
     if (placement.host === undefined) return { ...(await this.publishHere(options, ttlMs)), ...placed };
-    const result = await this.publishRemote(placement.host, options);
+    let shipment: Shipment;
+    try {
+      shipment = await this.shipment(options);
+    } catch (error) {
+      if (!(error instanceof NectarError)) throw error;
+      const refusal = { placed_on: (await this.identity()).host, placement_reason: `not shipped to ${placement.host}: ${error.message}; published on this host` };
+      return { ...(await this.publishHere(options, ttlMs)), ...refusal };
+    }
+    const result = await this.ship(placement.host, shipment);
     if (options.dryRun !== true && placement.key !== undefined && this.readOnly === undefined && typeof result.env === "string") {
       const key = placement.key;
       const entry = { host: placement.host, env: result.env, at: new Date().toISOString() };
@@ -646,6 +659,14 @@ export class NectarService {
   }
 
   private async publishRemote(host: string, options: PublishOptions): Promise<Record<string, unknown>> {
+    return this.ship(host, await this.shipment(options));
+  }
+
+  private async ship(host: string, shipment: Shipment): Promise<Record<string, unknown>> {
+    return (await callRemote(host, "publish", { args: shipment.payload, caller: this.remoteCaller() }, shipment.archive)) as Record<string, unknown>;
+  }
+
+  private async shipment(options: PublishOptions): Promise<Shipment> {
     if (options.worktree !== undefined) throw new NectarError("E_USAGE", "--worktree does not apply with --host; the target checks out its own copy");
     const common = {
       name: options.name,
@@ -697,8 +718,7 @@ export class NectarService {
     }
     const archive = await promisify(zlib.gzip)(tar);
     if (archive.length > MAX_ARCHIVE_BYTES) throw new NectarError("E_USAGE", `The source is ${archive.length} bytes compressed; --host takes at most ${MAX_ARCHIVE_BYTES}`);
-    const payload = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined));
-    return (await callRemote(host, "publish", { args: payload, caller: this.remoteCaller() }, archive)) as Record<string, unknown>;
+    return { archive, payload: Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined)) };
   }
 
   private async shippedCommit(repo: string, branch: string, site: StaticSite | undefined): Promise<string> {

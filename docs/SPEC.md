@@ -615,11 +615,18 @@ on this node, exactly as before. A malformed `pool` is `E_USAGE` on publish.
    order. A host on an older nectard that reports no fields is usable and sorts last by load.
 6. The publish goes to the chosen host as `publish --host <host>` would. No usable host:
    it publishes here.
+7. If building what would ship is refused before anything is sent (a symlink that is
+   absolute or leads outside what is shipped, an uncommitted page, `--worktree`, an
+   archive over the size limit, §4.5), it publishes here instead, and the reason is
+   `not shipped to <host>: <the refusal>; published on this host`, so it names each
+   offending link. Placement never turns a publish that works here into a failure.
+   An explicit `--host` keeps the refusal as `E_USAGE`, since the user asked for that host.
 
 The result, and the `--dry-run` plan, carry `placed_on` (the node) and `placement_reason`
 (for example `pool: metal-3, because it is the least loaded (load 0.12 per CPU, 2 serving
 envs); skipped netcup-4 (mesh denied: …)`). A dry run asks the chosen host for its plan and
-records nothing. `--local` publishes here and is `E_USAGE` together with `--host`.
+records nothing; it builds the same archive first, so a refusal shows as the same local
+placement. `--local` publishes here and is `E_USAGE` together with `--host`.
 
 `nectar pool ls` shows the pool and the recorded placements. `nectar pool add <hosts…>
 [--prefer first-healthy|least-loaded] [--for web,static]` and `nectar pool rm <hosts…>`

@@ -112,7 +112,8 @@ Remote `show` and `ls` leave out paths, bee ids, commands and database credentia
 
 `--host` ships committed files only: in a repo, commit first. Build output that git ignores
 (`dist/`) ships as files. A static site inside a repo ships only its own directory, and a
-symlink in it that leads outside is refused, with the link named.
+symlink in it that leads outside is refused, with the link named. Without `--host`, a pool
+publish that would be refused this way stays on this machine, and `placement_reason` says why.
 
 To move web previews off a busy machine by default, give it a pool of nodes whose
 listeners are on. Web and static publishes without `--host` then go to a healthy pool host;

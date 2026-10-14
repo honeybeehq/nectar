@@ -356,6 +356,48 @@ describe("pool placement edges", () => {
     expect(await envs(b)).toEqual([]);
   });
 
+  it("keeps a static page with a leaking symlink here, naming the link, places it once the link is gone, and refuses it with --host", async () => {
+    const { a, b } = await mesh();
+    await setPool(a, { hosts: ["nodeb"] });
+    const { dir, git } = await repo({ "site/index.html": "<h1>kit</h1>", "content/skill.md": "x" }, "kit");
+    await symlink("../content/skill.md", path.join(dir, "site", "skill.md"));
+    await git("add", "-A");
+    await git("commit", "-qm", "leak");
+    const client = new NectarService(a);
+    const site = path.join(dir, "site");
+    const plan = await client.publish({ repo: site, dryRun: true });
+    expect(plan).toMatchObject({ dry_run: true, name: "site--main--web", placed_on: "nodea" });
+    expect(plan.placement_reason).toMatch(/^not shipped to nodeb: Symlink 'site\/skill.md' \(-> \.\.\/content\/skill.md\) points outside site; .*; published on this host$/);
+    const published = await client.publish({ repo: site });
+    await track(a, published.env as string);
+    expect(published).toMatchObject({ env: "site--main--web", ref: "nectar://nodea/site--main--web", placed_on: "nodea", placement_reason: plan.placement_reason });
+    expect(await envs(a)).toEqual(["site--main--web"]);
+    expect(await envs(b)).toEqual([]);
+    const refused = await client.publish({ repo: site, host: "nodeb", dryRun: true }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: "E_USAGE", details: { refused: "symlink", links: ["site/skill.md"] } });
+    await client.remove("site--main--web", true);
+
+    await git("rm", "-q", "site/skill.md");
+    await git("commit", "-qm", "no leak");
+    const placed = await client.publish({ repo: site, dryRun: true });
+    expect(placed).toMatchObject({ placed_on: "nodeb" });
+    expect(placed.placement_reason).toContain("first healthy pool host");
+  });
+
+  it("keeps a recipe publish with a symlink leaving the repo here and refuses it with --host", async () => {
+    const { a } = await mesh();
+    await setPool(a, { hosts: ["nodeb"] });
+    const { dir, git } = await repo({ "package.json": JSON.stringify({ name: "linky", scripts: { dev: "vite" } }), "index.html": "<h1>app</h1>" }, "linky");
+    await symlink("../../elsewhere", path.join(dir, "shared"));
+    await git("add", "-A");
+    await git("commit", "-qm", "link");
+    const client = new NectarService(a);
+    const plan = await client.publish({ repo: dir, dryRun: true });
+    expect(plan).toMatchObject({ dry_run: true, placed_on: "nodea" });
+    expect(plan.placement_reason).toContain("not shipped to nodeb: Symlink 'shared' (-> ../../elsewhere) points outside the repo");
+    await expect(client.publish({ repo: dir, host: "nodeb", dryRun: true })).rejects.toMatchObject({ code: "E_USAGE", details: { links: ["shared"] } });
+  });
+
   it("re-places an env whose host left the pool even while that host still answers", async () => {
     const { a, b, c } = await mesh();
     await setPool(a, { hosts: ["nodeb", "nodec"] });

@@ -885,3 +885,16 @@ nothing to explain it. A static site never needed the rest of its repo. A link i
 that leaves it would dangle on the target, so naming the link up front is the honest
 answer.
 
+**Amendment (2026-10-14, placement never fails on what it would ship).** With a pool and
+no `--host`, a publish whose archive the publisher refuses before sending (a leaking or
+absolute symlink, an uncommitted page, anything else that shipping step refuses) stays on
+this node: `placed_on` is this host and `placement_reason` is `not shipped to <host>: <the
+refusal>`, naming the links. Static and recipe publishes alike, and `--dry-run` shows the
+same. An explicit `--host` still refuses with `E_USAGE`.
+**Alternatives:** (a) refuse the placed publish too, as the previous amendment did;
+(b) skip the refused links and ship the rest.
+**Why:** (a) the user did not ask for another node, and a local publish of the same tree
+works (a local static publish skips symlinks with a warning), so placement would turn a
+working publish into a failure; this matches the uncommitted-page rule. (b) see (c)
+above: a page that breaks on the target with nothing to explain it.
+

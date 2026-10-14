@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NectarService } from "../src/service.js";
 import { exposureSub } from "../src/relay.js";
-import { fakeExecutable, initGitRepo, record, tempDir } from "./helpers.js";
+import { fakeExecutable, initGitRepo, record, tempDir, testRelayd, type TestRelayd } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -152,5 +152,120 @@ describe("expose / unexpose", () => {
     await service.stop(env);
     expect(await readFile(relayLog, "utf8")).toMatch(/^rm fixture-life-main-/m);
     expect(((await service.show(env)).env as { exposure?: unknown }).exposure).toBeUndefined();
+  });
+});
+
+describe("expose through relayd", () => {
+  const FIXTURE = { nodeId: "nFIXTURE1CNTRL", dnsName: "fixture.tailtest.ts.net" };
+  const relays: TestRelayd[] = [];
+
+  afterEach(async () => {
+    for (const relay of relays.splice(0)) await relay.relayd.close();
+  });
+
+  async function relaydHarness(): Promise<{ service: NectarService; relay: TestRelayd; state: string; repo: string }> {
+    const relay = await testRelayd({ allow: [{ node_id: FIXTURE.nodeId, name: "fixture" }] }, { now: () => Date.now() });
+    relays.push(relay);
+    relay.as(FIXTURE);
+    const state = await tempDir("expose-relayd-state");
+    const dir = await tempDir("expose-relayd-bin");
+    const ts = await fakeTailscaleWithRelay(dir);
+    await writeFile(
+      path.join(state, "nectar.json"),
+      JSON.stringify({
+        upstream_port_start: 4800,
+        upstream_port_end: 4899,
+        pack_server_port: 4798,
+        tailnet_port_start: 8500,
+        tailnet_port_end: 8540,
+        exposures: { site: { kind: "relay", host: "127.0.0.1", port: relay.relayd.control?.port, domain: "nctr.site", control: "relayd", gate: "password", default: true } },
+      }),
+    );
+    vi.stubEnv("NECTAR_HOME", state);
+    vi.stubEnv("NECTAR_TAILSCALE_BIN", ts.binary);
+    vi.stubEnv("FAKE_TS_LOG", ts.log);
+    vi.stubEnv("FAKE_RELAY_LOG", ts.relayLog);
+    const service = new NectarService(state);
+    services.push({ service, envs: [] });
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-rel", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": webServer,
+    });
+    return { service, relay, state, repo };
+  }
+
+  it("publish --public creates a relay-minted, owner-checked route and keeps the secret out of url", async () => {
+    const { service, relay, repo } = await relaydHarness();
+    const published = await service.publish({ repo, ttl: "1h", public: true });
+    const env = published.env as string;
+    services.find((item) => item.service === service)?.envs.push(env);
+    const url = published.url as string;
+    const sub = /^https:\/\/([a-z0-9-]+)\.nctr\.site$/.exec(url)?.[1] ?? "";
+    expect(sub).toMatch(/^fixture-rel-main-[0-9a-f]{8}$/);
+    const details = published.public as { password: string; share_note: string; gate: string; target: string };
+    expect(details).toMatchObject({ target: "site", gate: "password" });
+    expect(published.share_url).toBe(url);
+    expect(published.secret).toEqual(["share_url", "public.share_note", "public.password", "public.credentials"]);
+    expect(details.share_note).toContain(details.password);
+    expect((published.packet_fields as { public_url: string }).public_url).toBe(url);
+    const visible = JSON.stringify({ url, packet_fields: published.packet_fields, urls: published.urls, record: (await service.show(env)).env });
+    expect(visible).not.toContain(details.password);
+    expect(url).not.toMatch(/[@?#]/);
+    expect(relay.relayd.state().routes[sub]).toMatchObject({ owner: { node_id: FIXTURE.nodeId }, upstream: expect.stringMatching(/^https:\/\/fixture\.tailtest\.ts\.net:85\d\d$/) as string });
+    expect(await readFile(path.join(relay.routesDir, `${sub}.caddy`), "utf8")).toContain(`@${sub} host ${sub}.nctr.site`);
+
+    const again = await service.expose(env, {});
+    expect(again).toMatchObject({ url, reused: true, password_unchanged: true });
+    expect(again.password).toBeUndefined();
+    const rotated = await service.expose(env, { rotate: true });
+    expect(rotated).toMatchObject({ url, reused: true });
+    expect(rotated.password).not.toBe(details.password);
+
+    expect(await service.unexpose(env)).toMatchObject({ env, unexposed: true, was: url });
+    expect(relay.relayd.state().routes[sub]).toBeUndefined();
+  });
+
+  it("nectard's hourly sync PATCHes the expiry, never recreates, and marks a removed route revoked", async () => {
+    const { service, relay, repo } = await relaydHarness();
+    const published = await service.publish({ repo, ttl: "1h" });
+    const env = published.env as string;
+    services.find((item) => item.service === service)?.envs.push(env);
+    const exposed = await service.expose(env, {});
+    const sub = /^https:\/\/([a-z0-9-]+)\./.exec(exposed.url as string)?.[1] ?? "";
+
+    await service.touch(env, "3h");
+    const synced = await service.gc();
+    expect(synced.exposures).toEqual([expect.objectContaining({ env, action: "patched" })]);
+    const record = (await service.show(env)).env as { expires_at: string; exposure: { expires_at: string } };
+    expect(Math.abs(Date.parse(record.exposure.expires_at) - Date.parse(record.expires_at))).toBeLessThan(1_000);
+    expect(relay.relayd.state().routes[sub]?.expires_at).toBe(Math.floor(Date.parse(record.expires_at) / 1000) * 1000);
+    expect((await service.gc()).exposures).toEqual([expect.objectContaining({ env, action: "unchanged" })]);
+
+    await relay.admin("DELETE", `/admin/routes/${sub}`);
+    expect((await service.gc()).exposures).toEqual([expect.objectContaining({ env, action: "revoked", reason: "admin" })]);
+    expect(relay.relayd.state().routes).toEqual({});
+    const revoked = await service.show(env);
+    expect((revoked.env as { exposure: { revoked_at?: string }; urls: { public: unknown } }).exposure.revoked_at).toBeDefined();
+    expect((revoked.env as { urls: { public: unknown } }).urls.public).toBeNull();
+    expect((await service.gc()).exposures).toEqual([]);
+    expect(relay.logs.filter((event) => event.event === "control" && event.method === "PUT")).toHaveLength(1);
+    expect(await service.unexpose(env)).toMatchObject({ unexposed: true, already_revoked: true });
+  });
+
+  it("reports the relay's refusals: kill switch and another node's route", async () => {
+    const { service, relay, repo } = await relaydHarness();
+    const published = await service.publish({ repo, ttl: "1h" });
+    const env = published.env as string;
+    services.find((item) => item.service === service)?.envs.push(env);
+    await relay.admin("POST", "/admin/kill", {});
+    await expect(service.expose(env, {})).rejects.toMatchObject({ code: "E_FORBIDDEN", details: { relay_code: "E_KILLED" } });
+    await expect(service.publish({ repo, ttl: "1h", public: true })).rejects.toMatchObject({ code: "E_FORBIDDEN", message: expect.stringContaining("but exposing it publicly failed") as string });
+    await relay.admin("DELETE", "/admin/kill", {});
+    const exposed = await service.expose(env, {});
+    const sub = /^https:\/\/([a-z0-9-]+)\./.exec(exposed.url as string)?.[1] ?? "";
+    relay.as({ nodeId: "nOTHER1CNTRL", dnsName: "other.tailtest.ts.net" });
+    await relay.rewrite({ allow: [{ node_id: FIXTURE.nodeId }, { node_id: "nOTHER1CNTRL" }] });
+    await expect(service.unexpose(env)).rejects.toMatchObject({ code: "E_FORBIDDEN", details: { rule: "not_owner" } });
+    expect(relay.relayd.state().routes[sub]).toBeDefined();
   });
 });

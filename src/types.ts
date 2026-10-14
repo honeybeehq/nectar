@@ -130,10 +130,12 @@ export interface ExposureTarget {
   user?: string; // ssh user on that VM (default: root)
   domain?: string; // relay: the wildcard domain, e.g. "nctr.site"
   gate?: "password" | "none"; // default gate for this target
-  // How nectar reaches the relay to run nectar-relay. Default is Tailscale SSH (no key
-  // management — the zero-credential path), which needs a tailnet ACL ssh rule to the
-  // relay. "ssh" uses the system ssh client for hosts where a key is already set up.
-  control?: "tailscale-ssh" | "ssh";
+  // How nectar reaches the relay. "relayd" talks to nectar-relayd's control port on the
+  // relay's tailnet address (D35). The others run nectar-relay over Tailscale SSH (the
+  // default) or the system ssh client, and stay only for relays without relayd.
+  control?: "tailscale-ssh" | "ssh" | "relayd";
+  port?: number; // relayd: the control port (default 8450)
+  default?: boolean; // the target `publish --public` uses
 }
 
 // What an env currently has exposed (on the env record, for unexpose/gc/resolve).
@@ -144,6 +146,11 @@ export interface ExposureRecord {
   url: string; // https://<sub>.<domain>
   gate: "password" | "none";
   expires_at: string;
+  control?: "relayd";
+  fixed_ttl?: boolean;
+  cap_at?: string;
+  revoked_at?: string;
+  revoked_reason?: string;
 }
 
 export interface PublishFailure {

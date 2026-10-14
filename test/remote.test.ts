@@ -580,6 +580,11 @@ describe("peer redaction", () => {
     expect(shown).toMatchObject({ env: { name: env.name, publisher: { via: "nectard" }, deps: { db: { kind: "postgres" } }, failure: { code: "E_SERVE_TIMEOUT" } }, ports: { tailnet: 8443 } });
     expect(published).toMatchObject({ warnings: ["skipped 1 symlink(s) while copying $NECTAR_HOME/inbox/k/app", "see <path>, <path>, <path> and https://x.ts.net:8443/a"] });
   });
+
+  it("hands a --host --public publish's url, share_url and secret details back to the publishing node", () => {
+    const exposed = { url: "https://app-main-01020304.nctr.site", share_url: "https://app-main-01020304.nctr.site", public: { target: "site", gate: "password", password: "pw-for-the-publisher" }, secret: ["share_url", "public.password"] };
+    expect(peerView("publish", { env: "app--main--web", ...exposed }, "/srv/nectar")).toMatchObject(exposed);
+  });
 });
 
 describe("tailnet listener startup", () => {

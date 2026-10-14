@@ -4,6 +4,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { vi } from "vitest";
 import { runCommand } from "../src/commands.js";
 import type { EnvRecord, Mode } from "../src/types.js";
+import type { Relayd, RelaydDeps } from "../src/relayd.js";
 
 const createdTempDirs: string[] = [];
 
@@ -369,5 +370,101 @@ export async function fakeLocalApi(listen: { socket: string } | { tcp: true }, o
     requests,
     config: () => structuredClone(config ?? {}),
     close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+export interface TestPeer {
+  nodeId: string;
+  dnsName: string;
+}
+
+export interface TestRelayd {
+  relayd: Relayd;
+  dir: string;
+  configFile: string;
+  routesDir: string;
+  config: Record<string, unknown>;
+  as: (peer: TestPeer | string | Error) => void;
+  call: (method: string, apiPath: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }>;
+  admin: (method: string, apiPath: string, body?: Record<string, unknown>) => Promise<{ status: number; body: Record<string, unknown> }>;
+  rewrite: (change: Record<string, unknown>) => Promise<void>;
+  logs: Array<Record<string, unknown>>;
+  clock: { now: number };
+}
+
+export const RELAY_SELF = { nodeId: "nRELAYSELF1", ip: "100.64.0.9" };
+
+export function testHash(password: string): string {
+  return `$2a$14$${Buffer.from(password).toString("hex").padEnd(40, "0")}`;
+}
+
+export async function testRelayd(config: Record<string, unknown> = {}, deps: Partial<RelaydDeps> = {}): Promise<TestRelayd> {
+  const { adminRequest, startRelayd } = await import("../src/relayd.js");
+  const http = await import("node:http");
+  const dir = await tempDir("relayd");
+  const routesDir = path.join(dir, "routes");
+  const full: Record<string, unknown> = {
+    domain: "nctr.site",
+    allow: [],
+    ungated: [],
+    state_dir: path.join(dir, "state"),
+    routes_dir: routesDir,
+    admin_socket: path.join(dir, "run", "admin.sock"),
+    control: { port: 0 },
+    verify: { port: 0 },
+    reload: { stamp: path.join(dir, "reload.stamp") },
+    ...config,
+  };
+  const configFile = path.join(dir, "relayd.json");
+  await writeFile(configFile, JSON.stringify(full));
+  let current: TestPeer | string | Error = "nobody";
+  const logs: Array<Record<string, unknown>> = [];
+  const clock = { now: Date.parse("2026-10-14T12:00:00Z") };
+  let counter = 0;
+  const relayd = await startRelayd(configFile, {
+    bind: "127.0.0.1",
+    whois: (address) => {
+      if (current instanceof Error) return Promise.reject(current);
+      if (typeof current === "string") return Promise.resolve({ reason: `${address} ${current}`, notFound: true });
+      const peer = current;
+      return Promise.resolve({
+        peer: { loginName: "op@example.com", displayName: "op", nodeName: peer.dnsName.split(".")[0] ?? "", dnsName: `${peer.dnsName}.`, nodeId: peer.nodeId, userId: 1, nodeUserId: 1, tailscaleIPs: ["100.64.0.2"], tags: [] },
+      });
+    },
+    status: () => Promise.resolve({ ok: true, endpoint: { kind: "socket", socket: "/fake", source: "env" }, status: { BackendState: "Running", Self: { ID: RELAY_SELF.nodeId, TailscaleIPs: [RELAY_SELF.ip] } } }),
+    hash: (secret) => Promise.resolve(testHash(secret)),
+    now: () => clock.now,
+    log: (event) => logs.push(event),
+    random: (bytes) => Buffer.from(Array.from({ length: bytes }, () => (counter += 1) % 256)),
+    ...deps,
+  });
+  const call = (method: string, apiPath: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> =>
+    new Promise((resolve, reject) => {
+      const payload = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
+      const request = http.request({ host: "127.0.0.1", port: relayd.control?.port, method, path: apiPath, headers: { "content-type": "application/json" } }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> }));
+      });
+      request.on("error", reject);
+      request.end(payload);
+    });
+  return {
+    relayd,
+    dir,
+    configFile,
+    routesDir: String(full.routes_dir),
+    config: full,
+    as: (peer) => {
+      current = peer;
+    },
+    call,
+    admin: (method, apiPath, body) => adminRequest(relayd.admin, method, apiPath, body),
+    rewrite: async (change) => {
+      Object.assign(full, change);
+      await writeFile(configFile, JSON.stringify(full));
+    },
+    logs,
+    clock,
   };
 }

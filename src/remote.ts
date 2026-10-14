@@ -152,7 +152,7 @@ const ARG_SPECS: Record<RemoteOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
     spec: {
       kind: "string", source: "string", dir: "string", entry: "string", commit: "string", branch: "string", mode: "string",
-      ttl: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", path: "string",
+      ttl: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", path: "string", public: "boolean",
     },
     required: ["kind", "source", "dir", "branch"],
   },
@@ -291,6 +291,7 @@ async function receive(
       name: text("name"),
       dryRun: flag("dry_run"),
       fresh: flag("fresh"),
+      public: flag("public"),
       received: true,
     };
     return service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)));
@@ -379,7 +380,7 @@ export function peerView(op: RemoteOp, result: unknown, root: string): unknown {
         return { ...pick(result, ["dry_run", "name", "mode", "stack", "build", "serve", "ready_path", "requires", "missing", "seed"]), deps: depKinds(result.deps) };
       }
       return {
-        ...pick(result, ["eid", "env", "mode", "branch", "commit", "ref", "urls", "packet_fields", "expires_at"]),
+        ...pick(result, ["eid", "env", "mode", "branch", "commit", "ref", "urls", "packet_fields", "expires_at", "url", "share_url", "public", "secret"]),
         warnings: scrub(result.warnings ?? [], root),
         mesh_error: scrub(result.mesh_error ?? null, root),
         deps: depKinds(result.deps),

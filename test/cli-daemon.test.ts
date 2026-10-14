@@ -132,7 +132,7 @@ describe("CLI with a read-only NECTAR_HOME", () => {
     expect(await inCell("show", "robind--static--web")).toMatchObject({ ok: true, result: { env: { publisher: { via: "nectard" } } } });
     expect(await inCell("resolve", "robind--static--web")).toMatchObject({ ok: true, result: { env: "robind--static--web" } });
     expect(await inCell("rm", "robind--static--web", "--force")).toMatchObject({ ok: true, result: { removed: true } });
-    expect(await inCell("expose", "routed--static--web", "--to", "site")).toMatchObject({ ok: false, error: { code: "E_DAEMON" } });
+    expect(await inCell("expose", "routed--static--web", "--to", "site")).toMatchObject({ ok: false, error: { code: "E_EXPOSE", message: expect.stringContaining("No exposure target 'site'") as string } });
     expect(await inCell("rm", "routed--static--web", "--force")).toMatchObject({ ok: true });
   });
 });

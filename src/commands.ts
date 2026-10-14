@@ -9,6 +9,16 @@ export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  signal?: NodeJS.Signals | null;
+}
+
+export class CommandTimeout extends Error {
+  constructor(
+    readonly file: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`${file} timed out after ${timeoutMs}ms`);
+  }
 }
 
 export interface RunOptions {
@@ -49,13 +59,13 @@ export async function runCommand(file: string, args: string[], options: RunOptio
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       if (timer !== undefined) clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`${file} timed out after ${options.timeoutMs}ms`));
+        reject(new CommandTimeout(file, options.timeoutMs ?? 0));
         return;
       }
-      resolve({ exitCode: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
+      resolve({ exitCode: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString(), signal });
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
     else child.stdin?.end();

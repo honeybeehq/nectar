@@ -21,7 +21,8 @@ import {
 import { NectarError } from "../src/errors.js";
 import { getPaths } from "../src/paths.js";
 import { runCommand, stopProcessGroup } from "../src/commands.js";
-import { tempDir } from "./helpers.js";
+import { traceTailscale } from "../src/tailscale.js";
+import { fakeExecutable, tempDir } from "./helpers.js";
 
 const servers: ControlServer[] = [];
 const pgids: number[] = [];
@@ -30,6 +31,7 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await server.close();
   for (const pgid of pgids.splice(0)) await stopProcessGroup(pgid);
   vi.unstubAllEnvs();
+  traceTailscale(undefined);
 });
 
 async function setup(): Promise<{ home: string; socket: string; cell: string; site: string }> {
@@ -130,6 +132,68 @@ describe("nectard control socket", () => {
     expect(touched.envs).toEqual([result.env]);
     await expect(callDaemon(socket, "rm", { nectar_home: home, caller: {}, args: { env: result.env } })).rejects.toMatchObject({ code: "E_USAGE" });
     expect(await callDaemon(socket, "rm", { nectar_home: home, caller: {}, args: { env: result.env, force: true } })).toMatchObject({ removed: true });
+  });
+
+  it("gets a mesh URL from a tailscale CLI that refuses to act as the CLI inside nectard's launchd job", async () => {
+    const { home, socket, cell, site } = await setup();
+    const fakes = await tempDir("control-tailscale");
+    const appCli = await fakeExecutable(
+      fakes,
+      "Tailscale",
+      `if [ -n "$XPC_SERVICE_NAME" ] && [ "$XPC_SERVICE_NAME" != "0" ]; then echo "started as the app for $XPC_SERVICE_NAME, not as the CLI" >&2; exit 1; fi
+case "$1 $2" in
+  "status --json") printf '{"BackendState":"Running","Self":{"DNSName":"mini03.tailtest.ts.net."}}\\n' ;;
+  "serve status") printf '{}\\n' ;;
+esac
+exit 0`,
+    );
+    vi.stubEnv("NECTAR_TAILSCALE_BIN", appCli);
+    vi.stubEnv("XPC_SERVICE_NAME", "com.honeybeehq.nectard");
+    vi.stubEnv("XPC_FLAGS", "0x0");
+    const result = (await callDaemon(socket, "publish", { nectar_home: home, caller: { cell }, args: { path: site, name: "launchd" } })) as {
+      env: string;
+      urls: { mesh: string | null };
+      mesh_error: string | null;
+      via: string;
+    };
+    const record = JSON.parse(await readFile(path.join(home, "envs", `${result.env}.json`), "utf8")) as { serve: { pgid: number } };
+    pgids.push(record.serve.pgid);
+    expect(result.urls.mesh).toMatch(/^https:\/\/mini03\.tailtest\.ts\.net:\d+$/);
+    expect(result).toMatchObject({ mesh_error: null, via: "nectard" });
+  });
+
+  it("names the real tailscale failure in the publish warning and logs the call as one JSON line", async () => {
+    const { home, socket, cell, site } = await setup();
+    const fakes = await tempDir("control-tailscale");
+    const broken = await fakeExecutable(fakes, "tailscale", `echo "failed to connect to local Tailscale service; is Tailscale running?" >&2\nexit 1`);
+    vi.stubEnv("NECTAR_TAILSCALE_BIN", broken);
+    const events: Array<Record<string, unknown>> = [];
+    traceTailscale((event) => events.push(event));
+    const result = (await callDaemon(socket, "publish", { nectar_home: home, caller: { cell }, args: { path: site, name: "broken" } })) as {
+      env: string;
+      urls: { mesh: string | null };
+      warnings: string[];
+      mesh_error: string | null;
+    };
+    const record = JSON.parse(await readFile(path.join(home, "envs", `${result.env}.json`), "utf8")) as { serve: { pgid: number } };
+    pgids.push(record.serve.pgid);
+    const cause = `tailscale status --json via ${broken} (env) exited 1: "failed to connect to local Tailscale service; is Tailscale running?"`;
+    expect(result.urls.mesh).toBeNull();
+    expect(result.mesh_error).toBe(cause);
+    expect(result.warnings).toContainEqual(expect.stringContaining(`tailscale unavailable: ${cause} — mesh URL unavailable`));
+    expect(result.warnings.join("\n")).not.toContain("logged out");
+    expect(events[0]).toMatchObject({
+      event: "tailscale",
+      ok: false,
+      binary: broken,
+      source: "env",
+      argv: ["status", "--json"],
+      exit_code: 1,
+      signal: null,
+      stderr: "failed to connect to local Tailscale service; is Tailscale running?",
+      cause,
+    });
+    expect(typeof events[0]?.duration_ms).toBe("number");
   });
 
   it("refuses sources outside the home and the Cell, through symlinks, and inside Nectar's own state", async () => {

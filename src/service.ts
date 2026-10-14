@@ -77,7 +77,7 @@ import {
   statusPorts,
   stopServe,
   TAILSCALE_FALLBACKS,
-  tailnetIdentity,
+  tailnetStatus,
   type ServeOutcome,
 } from "./tailscale.js";
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
@@ -159,6 +159,7 @@ interface MachineIdentity {
   host: string;
   dnsName?: string;
   online: boolean;
+  offline?: string;
   config: MachineConfig;
 }
 
@@ -168,8 +169,8 @@ interface PublishedWeb {
   meshError: string | null;
 }
 
-function meshWarning(outcome: ServeOutcome | undefined, fallback: string): string {
-  if (outcome === undefined) return `tailscale unavailable or logged out — ${fallback}`;
+function meshWarning(outcome: ServeOutcome | undefined, fallback: string, offline: string | undefined): string {
+  if (outcome === undefined) return `tailscale unavailable: ${offline ?? "no tailnet DNS name recorded"} — ${fallback}`;
   const quoted = outcome.message.replace(/\s*\n\s*/g, " ") || "no output";
   if (serveDenied(outcome.message)) {
     return `tailscale serve was denied: "${quoted}" — ${fallback}. This user is not a Tailscale operator; run once: ${OPERATOR_HINT} (Nectar never runs sudo)`;
@@ -319,7 +320,8 @@ export class NectarService {
 
   private async identity(): Promise<MachineIdentity> {
     const config = await this.store.readConfig();
-    const live = await tailnetIdentity();
+    const status = await tailnetStatus();
+    const live = status.identity;
     if (live !== undefined) {
       const updated = { ...config, tailnet_host: live.host, tailnet_dns_name: live.dnsName };
       // Rewriting on every call races doctor's pack-server registration writes.
@@ -333,6 +335,7 @@ export class NectarService {
       host: fallback.toLowerCase().replace(/[^a-z0-9-]/g, "-"),
       ...(config.tailnet_dns_name === undefined ? {} : { dnsName: config.tailnet_dns_name }),
       online: false,
+      offline: status.reason,
       config,
     };
   }
@@ -1166,13 +1169,13 @@ export class NectarService {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
-      warnings.push(meshWarning(mesh, `mesh URL unavailable; preview_url fell back to ${record.urls.local}`));
+      warnings.push(meshWarning(mesh, `mesh URL unavailable; preview_url fell back to ${record.urls.local}`, identity.offline));
     }
     record.status = "serving";
     delete record.failure;
     delete record.liveness;
     await this.store.writeEnv(record);
-    return { record, warnings, meshError: mesh === undefined || mesh.ok ? null : mesh.message };
+    return { record, warnings, meshError: mesh === undefined ? (identity.offline ?? null) : mesh.ok ? null : mesh.message };
   }
 
   private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {
@@ -1663,7 +1666,7 @@ export class NectarService {
       record.urls.mesh = `https://${identity.dnsName}:${tailnetPort}`;
     } else {
       record.urls.mesh = null;
-      warnings.push(meshWarning(mesh, `stream URL fell back to ${record.urls.local}`));
+      warnings.push(meshWarning(mesh, `stream URL fell back to ${record.urls.local}`, identity.offline));
     }
     await this.store.writeEnv(record);
     return { warnings };
@@ -2725,7 +2728,8 @@ export class NectarService {
 
   private async diagnose(noDaemon = false): Promise<Diagnosis> {
     const config = await this.store.readConfig();
-    const identity = await tailnetIdentity();
+    const tailnet = await tailnetStatus();
+    const identity = tailnet.identity;
     const status = await serveStatus();
     const checks: DoctorCheck[] = [];
     const portlessBin = process.env.NECTAR_PORTLESS_BIN ?? "portless";
@@ -2771,7 +2775,7 @@ export class NectarService {
         tailscale.source === "none"
           ? `No tailscale CLI found in NECTAR_TAILSCALE_BIN, PATH, ${TAILSCALE_FALLBACKS.join(", ")}; publishes will be local-only`
           : identity === undefined
-            ? `Tailscale CLI ${tailscale.path} (${tailscale.source}) reports Tailscale down or logged out; publishes will be local-only`
+            ? `Tailscale is not usable: ${tailnet.reason}; publishes will be local-only`
             : `Tailscale is up as ${identity.dnsName} via ${tailscale.path} (${tailscale.source})`,
       binary: tailscale.source === "none" ? null : tailscale.path,
       binary_source: tailscale.source,

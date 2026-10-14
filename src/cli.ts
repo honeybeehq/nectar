@@ -9,6 +9,8 @@ import { installUnit, uninstallUnit, unitStatus } from "./daemon-unit.js";
 import { parseDuration } from "./duration.js";
 import { callDaemon, callerFromEnv, homeWritable, isControlOp, selectRoute, startControlServer, type ControlOp } from "./control.js";
 import { getPaths } from "./paths.js";
+import { DEFAULT_CONFIG } from "./state.js";
+import { debugEnabled, traceTailscale } from "./tailscale.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
@@ -39,6 +41,10 @@ async function routed(command: ControlOp, args: Record<string, unknown>, local: 
 
 async function execute<T>(command: string, action: () => Promise<T>): Promise<void> {
   const json = program.opts<{ json?: boolean }>().json === true || jsonRequested;
+  if (debugEnabled()) {
+    const log = daemonLogger(getPaths(), DEFAULT_CONFIG.log_max_bytes, () => undefined);
+    traceTailscale((event) => log({ ...event, by: "cli", pid: process.pid }), { all: true });
+  }
   try {
     if (command !== "daemon" && !isControlOp(command)) await selectRoute(command, getPaths(), { direct: directRequested() });
     const result = await action();
@@ -241,6 +247,7 @@ daemon
       const config = await service.store.readConfig();
       const release = await claimPidFile(service.paths);
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
+      traceTailscale(log, { all: debugEnabled() });
       const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
       const control = await startControlServer(service.paths, { log }).catch((error: unknown) => {
         log({ event: "control_unavailable", message: asNectarError(error).message });

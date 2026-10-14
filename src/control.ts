@@ -165,7 +165,7 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
         dryRun: flag("dry_run"),
         fresh: flag("fresh"),
       };
-      return service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)));
+      return { ...(await service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)))), via: "nectard" };
     }
     case "ls":
       return service.list(Object.fromEntries(Object.entries({ mode: text("mode"), status: text("status") }).filter(([, value]) => value !== undefined)));

@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { runCommand } from "./commands.js";
+import { CommandTimeout, runCommand, type CommandResult } from "./commands.js";
 
 export interface TailnetIdentity {
   host: string;
@@ -74,17 +74,115 @@ export function tailscaleBinary(): string {
   return resolveTailscale().path;
 }
 
-export async function tailnetIdentity(): Promise<TailnetIdentity | undefined> {
+export type TailscaleTrace = (event: Record<string, unknown>) => void;
+
+let trace: { log: TailscaleTrace; all: boolean } | undefined;
+
+export function traceTailscale(log: TailscaleTrace | undefined, options: { all: boolean } = { all: false }): void {
+  trace = log === undefined ? undefined : { log, all: options.all };
+}
+
+export function debugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.NECTAR_DEBUG;
+  return value !== undefined && value !== "" && value !== "0";
+}
+
+export const STATUS_TIMEOUT_MS = 15_000;
+const SERVE_TIMEOUT_MS = 20_000;
+const EXCERPT_CHARS = 500;
+const LAUNCHD_JOB_ENV = ["XPC_SERVICE_NAME", "XPC_FLAGS"];
+
+function excerpt(text: string): string {
+  const flat = text.replace(/\s*\n\s*/g, " ").trim();
+  return flat.length > EXCERPT_CHARS ? `${flat.slice(0, EXCERPT_CHARS)}…` : flat;
+}
+
+export function tailscaleEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !LAUNCHD_JOB_ENV.includes(key)));
+}
+
+export interface TailscaleRun {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  cause: string;
+}
+
+export async function runTailscale(args: string[], timeoutMs: number, check: (stdout: string) => string | undefined = () => undefined): Promise<TailscaleRun> {
+  const binary = resolveTailscale();
+  const label = `tailscale ${args.join(" ")} via ${binary.path} (${binary.source})`;
+  const started = Date.now();
+  let result: CommandResult | undefined;
+  let failure: Error | undefined;
   try {
-    const result = await runCommand(tailscaleBinary(), ["status", "--json"], { timeoutMs: 5_000 });
-    if (result.exitCode !== 0) return undefined;
-    const status = JSON.parse(result.stdout) as { BackendState?: string; Self?: { DNSName?: string } };
-    const dnsName = status.Self?.DNSName?.replace(/\.$/, "");
-    if (status.BackendState !== "Running" || !dnsName) return undefined;
-    return { host: dnsName.split(".")[0] ?? os.hostname().split(".")[0] ?? "localhost", dnsName };
-  } catch {
-    return undefined;
+    result = await runCommand(binary.path, args, { timeoutMs, env: tailscaleEnvironment() });
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error(String(error));
   }
+  const durationMs = Date.now() - started;
+  const timedOut = failure instanceof CommandTimeout;
+  const signal = result?.signal ?? (timedOut ? "SIGKILL" : null);
+  const exitCode = result === undefined || signal !== null ? null : result.exitCode;
+  const stderr = excerpt(result?.stderr ?? "");
+  const unparsed = exitCode === 0 ? check(result?.stdout ?? "") : undefined;
+  const cause = timedOut
+    ? `${label} timed out after ${timeoutMs}ms`
+    : failure !== undefined
+      ? `${label} could not run: ${failure.message}`
+      : signal !== null
+        ? `${label} was killed by ${signal}`
+        : exitCode !== 0
+          ? `${label} exited ${exitCode}${stderr === "" ? "" : `: "${stderr}"`}`
+          : unparsed === undefined
+            ? ""
+            : `${label}: ${unparsed}`;
+  const ok = cause === "";
+  if (trace !== undefined && (trace.all || !ok)) {
+    trace.log({
+      event: "tailscale",
+      ok,
+      binary: binary.path,
+      source: binary.source,
+      argv: args,
+      exit_code: exitCode,
+      signal,
+      stderr,
+      duration_ms: durationMs,
+      ...(ok ? {} : { cause }),
+    });
+  }
+  return { ok, stdout: result?.stdout ?? "", stderr: result?.stderr ?? "", cause };
+}
+
+export type TailnetStatus = { identity: TailnetIdentity; reason?: undefined } | { identity?: undefined; reason: string };
+
+interface StatusJson {
+  BackendState?: string;
+  Self?: { DNSName?: string };
+}
+
+function parseStatus(stdout: string): StatusJson | string {
+  try {
+    return JSON.parse(stdout) as StatusJson;
+  } catch {
+    return `printed no status JSON: "${excerpt(stdout)}"`;
+  }
+}
+
+function statusProblem(stdout: string): string | undefined {
+  const status = parseStatus(stdout);
+  if (typeof status === "string") return status;
+  if (status.BackendState !== "Running") return `Tailscale is ${status.BackendState ?? "in no BackendState"}, not Running (logged out or stopped)`;
+  if (!status.Self?.DNSName) return "status JSON has no Self.DNSName";
+  return undefined;
+}
+
+export async function tailnetStatus(): Promise<TailnetStatus> {
+  const run = await runTailscale(["status", "--json"], STATUS_TIMEOUT_MS, statusProblem);
+  if (!run.ok) return { reason: run.cause };
+  const status = parseStatus(run.stdout) as StatusJson;
+  const dnsName = (status.Self?.DNSName ?? "").replace(/\.$/, "");
+  return { identity: { host: dnsName.split(".")[0] ?? os.hostname().split(".")[0] ?? "localhost", dnsName } };
 }
 
 export interface ServeOutcome {
@@ -98,17 +196,12 @@ export function serveDenied(message: string): boolean {
   return /access denied|serve config denied/i.test(message);
 }
 
+function outcome(run: TailscaleRun): ServeOutcome {
+  return { ok: run.ok, message: run.stderr.trim() || run.stdout.trim() || run.cause };
+}
+
 export async function serveWeb(tailnetPort: number, upstreamUrl: string): Promise<ServeOutcome> {
-  try {
-    const result = await runCommand(
-      tailscaleBinary(),
-      ["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl],
-      { timeoutMs: 10_000 },
-    );
-    return { ok: result.exitCode === 0, message: result.stderr.trim() || result.stdout.trim() };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
+  return outcome(await runTailscale(["serve", "--bg", "--yes", `--https=${tailnetPort}`, upstreamUrl], SERVE_TIMEOUT_MS));
 }
 
 export const TAILSCALE_SOCKETS = ["/var/run/tailscale/tailscaled.sock", "/run/tailscale/tailscaled.sock"];
@@ -141,28 +234,26 @@ export async function probeServeRights(socket = process.env.NECTAR_TAILSCALE_SOC
   });
 }
 
-export async function servePackStore(target: string): Promise<{ ok: boolean; message: string }> {
-  const result = await runCommand(tailscaleBinary(), ["serve", "--bg", "--yes", "--https=8440", target], { timeoutMs: 10_000 });
-  return { ok: result.exitCode === 0, message: result.stderr.trim() || result.stdout.trim() };
+export async function servePackStore(target: string): Promise<ServeOutcome> {
+  return outcome(await runTailscale(["serve", "--bg", "--yes", "--https=8440", target], SERVE_TIMEOUT_MS));
 }
 
 export async function stopServe(tailnetPort: number): Promise<boolean> {
+  return (await runTailscale(["serve", `--https=${tailnetPort}`, "off"], SERVE_TIMEOUT_MS)).ok;
+}
+
+function jsonProblem(stdout: string): string | undefined {
   try {
-    const result = await runCommand(tailscaleBinary(), ["serve", `--https=${tailnetPort}`, "off"], { timeoutMs: 10_000 });
-    return result.exitCode === 0;
+    JSON.parse(stdout);
+    return undefined;
   } catch {
-    return false;
+    return `printed no JSON: "${excerpt(stdout)}"`;
   }
 }
 
 export async function serveStatus(): Promise<unknown> {
-  try {
-    const result = await runCommand(tailscaleBinary(), ["serve", "status", "--json"], { timeoutMs: 5_000 });
-    if (result.exitCode !== 0) return undefined;
-    return JSON.parse(result.stdout) as unknown;
-  } catch {
-    return undefined;
-  }
+  const run = await runTailscale(["serve", "status", "--json"], STATUS_TIMEOUT_MS, jsonProblem);
+  return run.ok ? (JSON.parse(run.stdout) as unknown) : undefined;
 }
 
 function scalarStrings(value: unknown): string[] {

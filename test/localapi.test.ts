@@ -319,6 +319,22 @@ describe("LocalAPI discovery bounds", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("kills a listing child that never returns, records the timeout, and lets the process go on", async () => {
+    const home = await homeWithContainer();
+    const bin = await tempDir("ls-bin");
+    const ls = await fakeExecutable(bin, "ls", `echo "$$" > "$(dirname "$0")/pid"\nexec sleep 30`);
+    const options = { env: { NECTAR_TEST_LS_BIN: ls }, platform: "darwin" as const, home, macsysDir: "/nonexistent", sockets: [], lsof: () => Promise.resolve(""), stepTimeoutMs: 300 };
+    const started = Date.now();
+    const found = await discoverLocalApi(options);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(found.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "timeout" });
+    const pid = Number((await readFile(path.join(bin, "pid"), "utf8")).trim());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
+    const again = await discoverLocalApi(options);
+    expect(again.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "timeout" });
+  });
+
   it("lists the group container in a child process that it can abandon", async () => {
     const home = await homeWithContainer();
     await writeFile(path.join(home, "Library", "Group Containers", container, `sameuserproof-50009-${TOKEN}`), "");

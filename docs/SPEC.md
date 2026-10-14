@@ -548,7 +548,7 @@ steps: [{step, outcome, ms, found, note?}], running, won: {step, endpoint} | nul
 next_discovery_in_ms}`, and the tailscale message names the steps, e.g. `(service
 discovery: macsys found 1 (answered), lsof none, group-container skipped, socket
 none)`. For tests and Linux rehearsal only: `NECTAR_TEST_DISCOVERY_PLATFORM=darwin`,
-`NECTAR_TEST_LSOF_BIN`, `NECTAR_TEST_MACSYS_DIR` and `NECTAR_TEST_DISCOVERY_HANG=<step,…>`
+`NECTAR_TEST_LSOF_BIN`, `NECTAR_TEST_LS_BIN`, `NECTAR_TEST_MACSYS_DIR` and `NECTAR_TEST_DISCOVERY_HANG=<step,…>`
 (those steps never return). The token
 goes in an HTTP basic-auth header and is never logged, shown or stored. A port that answers 401
 counts as stale and the next endpoint is tried. Serve changes read `serve-config` with its

@@ -73,9 +73,9 @@ const LS_ERRORS: Array<[RegExp, string]> = [
   [/Not a directory/, "ENOTDIR"],
 ];
 
-function listInChild(directory: string, timeoutMs: number): Promise<string[]> {
+function listInChild(binary: string, directory: string, timeoutMs: number): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const child = spawn(existsSync("/bin/ls") ? "/bin/ls" : "ls", ["-1A", directory], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(binary, ["-1A", directory], { stdio: ["ignore", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
@@ -85,14 +85,17 @@ function listInChild(directory: string, timeoutMs: number): Promise<string[]> {
       child.unref();
       child.stdout.destroy();
       child.stderr.destroy();
-      reject(Object.assign(new Error(`listing ${directory} did not finish within ${timeoutMs}ms`), { code: "ETIMEDOUT" }));
     }, timeoutMs);
     child.once("error", (error) => {
       clearTimeout(timer);
       reject(error);
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       clearTimeout(timer);
+      if (signal !== null) {
+        reject(Object.assign(new Error(`ls was killed by ${signal}`), { code: `killed by ${signal}` }));
+        return;
+      }
       if (code === 0) {
         resolve(Buffer.concat(out).toString().split("\n").filter((name) => name !== ""));
         return;
@@ -248,7 +251,7 @@ export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<
   const platform = options.platform ?? ((env.NECTAR_TEST_DISCOVERY_PLATFORM || undefined) as NodeJS.Platform | undefined) ?? process.platform;
   const stepMs = options.stepTimeoutMs ?? DISCOVERY_STEP_TIMEOUT_MS;
   const fs: DiscoveryFs = {
-    readdir: (directory) => listInChild(directory, stepMs),
+    readdir: (directory) => listInChild(env.NECTAR_TEST_LS_BIN || (existsSync("/bin/ls") ? "/bin/ls" : "ls"), directory, stepMs),
     readlink: (file) => readlink(file),
     readFile: (file) => readFile(file, "utf8"),
     ...options.fs,

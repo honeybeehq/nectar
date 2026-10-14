@@ -129,6 +129,7 @@ without it; the daemon only calls the same code the CLI calls.
     shell-20260718T1204.cast
     smoke-20260718T1204.txt
   logs/<name>/serve.log     # dev-server stdout+stderr, rotated at 10 MB
+  inbox/<key>/<dir>/        # sources other nodes shipped with publish --host (§4.5); removed with their last env
   nectar.json               # machine config: port ranges, quotas, tailnet name cache
 ```
 
@@ -358,6 +359,60 @@ tailnet port range whose loopback target is dead, §10.2.)
   - On SIGTERM nectard stops accepting connections and waits up to 15 s for requests in
     flight before closing them, inside launchd's default 20 s exit timeout and systemd's 90 s. A publish cut off after that is left as an interrupted
     local publish would be (`rm --force` cleans it up).
+- **Tailnet listener (`publish --host`, D29 amendment · 2026-10-14).** Off unless
+  `remote.listen` is `true` in `nectar.json`; `nectar daemon install --remote` sets it and
+  `--no-remote` clears it. nectard then also serves the control API on this node's own
+  Tailscale IPv4 address (from tailscaled's LocalAPI status), port **8441**
+  (`NECTAR_REMOTE_PORT` overrides it, for tests). It never binds `0.0.0.0` or `::`. When
+  tailscale is down at start it logs `remote_unavailable` and retries every minute.
+  - Every request, `GET /v1/hello` included, is authenticated before its body is read:
+    nectard asks tailscaled `WhoIs(<peer ip>:<peer port>)` of the raw TCP peer through the
+    LocalAPI (`/localapi/v0/whois` on the tailscaled socket; `tailscale whois --json` where
+    there is no socket, as on the macOS app). No answer is `E_FORBIDDEN` (HTTP 403). So is
+    a caller on this node itself (its peer address is one of this node's Tailscale IPs,
+    or its WhoIs node is this node): local processes use the 0600 control socket, and any
+    user or container on the host could otherwise borrow the owner's identity here.
+    A request must arrive within 10 minutes (headers within 30 s), and at most 32
+    connections are open at once.
+  - Authorization reads `nectar.json` on every request. `remote.allow` absent: only the
+    node owner's own untagged nodes (WhoIs user = the user that owns this node). Present:
+    exactly the entries `{node_id: "<stable node ID>"}` or `{login: "<tailnet login>"}`
+    (a login never matches a tagged node). An empty list, a list that is not an array, or
+    a `nectar.json` that cannot be read refuses everyone (`E_FORBIDDEN`). A caller that is
+    not the node owner may `touch`, `stop` and `rm` only envs whose `publisher.node` is its
+    own stable node ID, and its `show`/`resolve` of someone else's env do not touch it
+    (`touched: false`). `remote.listen` turned off while nectard runs is `E_REMOTE`.
+  - Ops: `POST /v1/{ls,show,resolve,touch,stop,rm}` with `{args, caller: {hive_bee?,
+    hive_session?}}` (64 KiB cap). `target`/`env` must be an env name on this node; a
+    `nectar://` ref is `E_NOT_FOUND`, so nothing is relayed to a third node. There is no
+    `path`, `worktree`, `cell` or `nectar_home`.
+  - `POST /v1/publish`: the body is a gzip tar (at most 256 MiB compressed, 1 GiB and
+    100 000 entries unpacked), and `x-nectar-request` holds base64url JSON
+    `{args, caller}` with `args`: `kind` (`git` or `static`), `source` (a key only: the
+    repo's root commits for git, the site's path for static), `dir` (the source directory's name), `entry` (static single
+    file), `branch`, `commit`, `mode`, `ttl`, `packet`, `verify`, `name`, `dry_run`, `fresh`.
+    nectard unpacks into `inbox/<key>/<dir>`, where `key` hashes the caller's stable node
+    ID and `source`. So a repo republishes into the same copy from any checkout on that
+    node (another Cell, after a move), and each node has its own. The archive is refused
+    (`E_USAGE`, `refused: "archive"`) for an absolute path, a `..` component, a `.git`
+    component, a hard link, device or FIFO, a duplicate entry, a write through a symlink,
+    a symlink that is absolute, points outside the tree or into `.git`, or does not resolve
+    inside it, a bad checksum, a truncated stream, or a cap. Files are created `O_EXCL |
+    O_NOFOLLOW` with mode 0644 or 0755. A `static` tree publishes as a static site. A `git`
+    tree becomes one commit on `branch` in the inbox repository (`git init`, `add`,
+    `commit`, all with the §9.3 git hardening), which then publishes like a local repo.
+    The record's `publisher` is `{user, via: "tailnet", node, node_name, login?, hive_bee?,
+    hive_session?}`; `node`, `node_name` and `login` come from WhoIs, not the request.
+  - Replies are the CLI's envelope, redacted for the peer. `ls` drops `publisher_bee`.
+    `show` returns the record without `repo`, `worktree`, `serve` (command, pids),
+    `publisher` other than `via` and `node_name`, `install_hash`, `evidence` or
+    `packet_hint`, with `deps` as `{kind}` only, `failure` as `{code, failed_at}`, `ports`
+    as `{tailnet}` and no `log_tail`. `resolve` drops `log_tail`. `publish` returns `eid`,
+    `env`, `mode`, `branch`, `commit`, `ref`, `urls`, `packet_fields`, `expires_at`,
+    `warnings`, `mesh_error` and `deps` as `{kind}`. Error details are cut to `hint`,
+    `refused` and `node_id` (`publish` keeps `log_tail`). In messages, warnings and log
+    tails `NECTAR_HOME` reads `$NECTAR_HOME` and every other absolute path reads `<path>`.
+  - Logs: one `remote` event per request with the caller's node ID and login.
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
   touch, gc, tailscale, error), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
@@ -924,6 +979,18 @@ stream embeds), but the kind glyph and "open the simpack" affordance want the re
 Global flags: `--json` (envelope output, exact shape below), `--repo <path>` (default: cwd's
 repo), `--direct` (never use nectard, act on `NECTAR_HOME` in this process).
 
+Another node (D29 amendment): `publish --host <node>`, `ls --host <node>`, and `show`,
+`resolve`, `touch`, `stop`, `rm` with a `nectar://<node>/<env>` ref whose host is not this
+machine run against that node's tailnet listener (§4.5). The CLI finds the node's IPv4 in
+tailscaled's status by MagicDNS name, its first label or its host name; none is
+`E_NOT_FOUND`. These calls go through the local nectard like any other when it answers,
+and otherwise run in-process even when `NECTAR_HOME` is read-only, since they write
+nothing here. Only when `remote.ssh_fallback` is `true` in `nectar.json` does a node
+that cannot be reached fall back to `tailscale ssh <node> nectar …`. `publish --host`
+ships a tar: for a static site, the files a local static publish would copy; otherwise
+`git archive` of the branch's commit (`--branch`, else the current branch), so the target
+gets the committed tree and never `.git` or its config. `--worktree` does not apply.
+
 Route (D29): `publish`, `ls`, `show`, `resolve`, `touch`, `stop` and `rm` go through the
 local nectard (§4.5 control socket) when it answers for the same `NECTAR_HOME`.
 Otherwise they run in-process if `NECTAR_HOME` is writable (or can be created). If it is
@@ -963,6 +1030,12 @@ plus (added post-v0 review, 2026-07-19):
   back to a read-only view instead.)
   `error.hint` is `nectar daemon install`. The user runs it from a shell outside any
   Cell. An agent reports it as a blocker and does not install anything itself.
+- `E_REMOTE` (D29 amendment) — the node exists but nothing answers on its tailnet listener
+  (no nectard, an old one, or `remote.listen` off), or something other than nectard
+  answered. `error.hint` is `on <node>: nectar daemon install --remote`.
+- `E_FORBIDDEN` (D29 amendment) — the target's nectard refused this node: WhoIs failed,
+  `remote.allow` does not list it, its `nectar.json` is unreadable, or the env belongs to
+  another node. `error.node_id` is this node's stable ID, for the target's allowlist.
 - `E_DEPS` — a `[deps]` database did not come up healthy, or Docker refused a teardown
   step (§5.1); `log_tail` has Compose's output. `E_SEED` — the scenario seed exited non-zero.
 
@@ -970,7 +1043,8 @@ plus (added post-v0 review, 2026-07-19):
 
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
-               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--fresh] [--dry-run] [--json]
+               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--fresh] [--dry-run]
+               [--host <node>] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable; a failed web republish leaves the old serve
     # running (§6.1). --name overrides the app name for any source; a different source
@@ -981,8 +1055,10 @@ nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch 
     # Rails apps without a recipe publish through the §5 fallbacks (§6.1.2). --dry-run
     # prints the matched recipe source, stack, reason, build, serve, deps and seed; it changes
     # nothing. --fresh drops and recreates the env's [deps] databases and re-runs the seed (§5.1).
+    # --host <node> ships the source to that node's nectard and publishes there (§4.5, §7
+    # route); the result's ref is nectar://<node>/<env> and its URLs are the node's.
 
-nectar ls [--json] [--mode <m>] [--status <s>]
+nectar ls [--json] [--mode <m>] [--status <s>] [--host <node>]
     # This machine's envs: name, mode, status, urls.mesh, expires_at (ISO), expires_in,
     # publisher bee, liveness. Listing does not touch.
 
@@ -1024,8 +1100,8 @@ nectar touch <env|ref> [--ttl <duration>]
     # Result expires_at is one ISO string, or an env→ISO map when a bare env name
     # matched several modes whose expiries differ. Implicit touches skip expired/cold
     # envs (republish revives them); explicit touch still re-arms them.
-nectar stop <env>            # stop serve process, keep everything; status → stopped
-nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash);
+nectar stop <env|ref>        # stop serve process, keep everything; status → stopped
+nectar rm <env|ref> [--force]  # stop + delete worktree/packs/evidence/record (uses trash);
                              # a *serving*/*unhealthy* env refuses without --force (E_USAGE)
 nectar gc [--dry-run] [--json]
     # Enforce §10: expire → stop; cold → delete worktrees; reap old records; prune pack
@@ -1034,7 +1110,7 @@ nectar gc [--dry-run] [--json]
 nectar evidence add <env> <file...>   # copy files into evidence/, print refs
 nectar evidence ls <env> [--json]
 
-nectar daemon install | uninstall | status [--json]
+nectar daemon install [--remote | --no-remote] | uninstall | status [--json]
 nectar daemon run [--interval 30s] [--gc-interval 1h]
     # nectard (§4.5). install writes and starts the launchd agent / systemd --user unit;
     # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
@@ -1042,7 +1118,8 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # reports unloaded and waited_ms (a warning if it is still loaded);
     # run is the foreground supervisor the unit starts. status adds socket (the control
     # socket path) and control (nectard's hello: api, pid, nectar_home, ops; null when
-    # nothing answers there).
+    # nothing answers there) and remote ({listen, port}). install --remote turns on the
+    # tailnet listener (remote.listen in nectar.json); --no-remote turns it off.
 
 nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # Checks (§10.5): portless on PATH + proxy up · tailscale up (names the CLI
@@ -1134,6 +1211,13 @@ hive integration surface. No hive API calls, no harness detection.
 
 - Exposure = tailnet-only, on ports **8440** (pack store, read-only static) and
   **8443–8542** (web envs). Nothing binds public interfaces; funnel is never used.
+- **8441** is nectard's tailnet listener, only when `remote.listen` is on (§4.5). It binds
+  the node's Tailscale address only, identifies every caller with WhoIs, and serves only
+  the allowlist (default: the node owner's own untagged nodes). An allowed node can run
+  code here as the user, because a publish runs the shipped recipe, so list node IDs of
+  machines you trust that much. The ACL should limit 8441 to pool hosts and operator
+  devices as a second layer. `tailscale serve` is not put in front of it, because that
+  would hide the peer address WhoIs needs; WireGuard already encrypts the hop.
 - Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
   a shared external node (`shared-node`, user `mbtz@`). Deploy rule (ops task, not code):
   ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`
@@ -1202,6 +1286,13 @@ pointers. A test plants all of
 these in a repo and publishes, republishes and borrows it through nectard. Running a
 Cell's serves under the Cell's own sandbox profile is the hardening step if Cells ever
 hold less-trusted code.
+
+**Other nodes (D29 amendment).** `publish --host` runs the shipped recipe on the target as
+the user, exactly as a local publish of that tree would, so the allowlist (§4.5) is a
+code-execution grant. The target never fetches, clones or reads git config from the
+caller: it unpacks a tar under the archive rules of §4.5 and makes its own repository,
+with the same git hardening. The caller sends only committed files (`git archive`) or a
+static site's files, never `.git`.
 
 ## 10. Resource limits, GC, failure modes
 

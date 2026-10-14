@@ -49,6 +49,7 @@ async function harness(): Promise<{
       pack_server_port: 4499,
       tailnet_port_start: 8600,
       tailnet_port_end: 8699,
+      remote: { ssh_fallback: true },
     }),
   );
   vi.stubEnv("NECTAR_HOME", state);
@@ -605,7 +606,9 @@ await writeFile(path.join(root, "testpack.json"), JSON.stringify({ testpack: 1, 
         status: "serving",
       };
       vi.stubEnv("FAKE_TS_SSH_RESPONSE", JSON.stringify({ ok: true, command: "resolve", result: remoteResult }));
-      const consumer = new NectarService(await tempDir("remote-consumer"));
+      const consumerHome = await tempDir("remote-consumer");
+      await writeFile(path.join(consumerHome, "nectar.json"), JSON.stringify({ remote: { ssh_fallback: true } }));
+      const consumer = new NectarService(consumerHome);
       services.push({ service: consumer, envs: [] });
       expect(await consumer.open(`nectar://remote/${desktopEnv}`)).toMatchObject({ cache_hit: false, sha256: desktop.testpack.sha256 });
       expect(await consumer.open(`nectar://remote/${desktopEnv}`)).toMatchObject({ cache_hit: true });

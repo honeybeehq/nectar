@@ -657,6 +657,49 @@ node keeps working when the tailnet listener is off. The client side is the same
 `callDaemon` with an `http://<node>:8441` base URL. WireGuard already encrypts the hop.
 Putting `tailscale serve` in front would hide the peer address that WhoIs needs.
 
+**Amendment · 2026-10-14: `publish --host` built (p2-remote-host).** What was built
+differs from the plan above in three places. (1) **An archive, not a git URL.** The
+caller ships a gzip tar: `git archive` of the branch's commit for a repo, the files a
+static publish copies for a static site. The target never fetches, so there is no URL
+scheme to restrict, and a commit that exists only in a Cell publishes without a push.
+The target unpacks into `inbox/<key>/<dir>` (key = hash of the caller's stable node ID and the repo's root
+commits, or a static site's path, so any checkout of a repo on that node republishes the
+same env) and, for git, makes one commit there with the hardened git (`init`,
+`add`, `commit`). That is the only git it runs on received content, and the publish then
+takes the normal local path. Archive defences: 256 MiB compressed, 1 GiB and 100 000
+entries unpacked; no absolute paths, `..`, `.git`, hard links, devices, FIFOs or
+duplicates; no write through a symlink; symlinks must be relative and must resolve inside
+the tree after unpacking; files are created `O_EXCL | O_NOFOLLOW`, 0644 or 0755. The tar
+is parsed in Node, so no archive name reaches a shell or a tar binary. (2) **The default
+allowlist is the node owner's own untagged nodes**, matched by WhoIs user ID, not a list
+of node IDs, so the fleet works without writing every node ID into every node.
+`remote.allow` replaces it with explicit `{node_id}` or `{login}` entries; a login never
+matches a tagged node, and an empty or malformed list or an unreadable `nectar.json`
+refuses everyone. (3) **Remote views are allowlisted, not denylisted**: `show` returns a
+reduced record (no `repo`, `worktree`, `serve`, Cell or bee ids, login, node ID, install
+hash, evidence, deps beyond `{kind}`, log tails), `ls` drops the bee, error details are cut
+to `hint`, `refused` and `node_id`, and in peer-facing text `NECTAR_HOME` reads
+`$NECTAR_HOME` and every other absolute path `<path>`. (4) **The node never serves
+itself over the tailnet.** The checker showed that a connection from the node's own
+Tailscale IP is WhoIs'd as the node, so any local user or host-network container would
+get the owner's rights and bypass the 0600 socket. A peer address in the node's own
+Tailscale IPs, or a WhoIs node equal to the node itself, is `E_FORBIDDEN`. A non-owner's
+`show`/`resolve` of another node's env does not extend its lifetime. Requests must arrive
+within 10 minutes and at most 32 connections are open.
+As planned: the listener is off unless `remote.listen` (`nectar daemon install --remote`),
+binds only the node's Tailscale IPv4 on 8441, never a wildcard, and WhoIs runs on the raw
+peer through the LocalAPI (`tailscale whois --json` where there is no tailscaled socket)
+before the body is read; a failed WhoIs is `E_FORBIDDEN`. `publisher.node`,
+`node_name` and `login` come from WhoIs. A non-owner may `touch`, `stop` and `rm` only
+its own envs. A ref passed to the listener is refused, so nothing is relayed onward. The
+client finds the node's address in tailscaled's status and needs no MagicDNS, which
+Cells may not have; resolve/show/ls/touch/stop/rm of another node's ref use the listener
+and fall back to `tailscale ssh` only when `remote.ssh_fallback` is set. New codes:
+`E_REMOTE` (nothing answers on the node's listener; hint `nectar daemon install --remote`)
+and `E_FORBIDDEN`. **Not built:** a `{git: {url}}` source, per-node rate limits, and
+inbox cleanup for envs gc only cools (rm and gc reap remove the inbox with the last env
+that uses it). (SPEC §4.2, §4.5, §7, §9.1, §9.3.)
+
 ## D30 — `[deps]` v1: generated Compose per env, torn down by label
 
 **Chose:** build D16's `kind` sugar first, for `postgres:<tag>` and `sqlite`. Nectar writes

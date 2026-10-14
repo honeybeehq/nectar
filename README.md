@@ -93,6 +93,23 @@ and the hint `nectar daemon install`, which the user runs outside any Cell.
 nectard copies or checks out the Cell's source into its own work dir, so the preview
 outlives the Cell.
 
+To publish on another machine, turn on nectard's tailnet listener there (once, from a
+login shell on that machine), then publish from anywhere, a Cell included:
+
+```bash
+nectar daemon install --remote                # on the target: listen on its tailnet IP, port 8441
+nectar publish --host metal-1 --json          # from any node: ships the committed tree (or static dir)
+nectar resolve nectar://metal-1/app--main--web
+nectar ls --host metal-1
+nectar rm nectar://metal-1/app--main--web --force
+```
+
+The target asks Tailscale who is calling (WhoIs) and by default serves only your own
+nodes; `remote.allow` in its `nectar.json` lists stable node IDs or logins instead, and an
+empty list refuses everyone (`E_FORBIDDEN`). A node without the listener gives `E_REMOTE`.
+Remote `show` and `ls` leave out paths, bee ids, commands and database credentials
+(SPEC §4.5).
+
 Then, in any repo with a `dev` script (or a `nectar.toml`):
 
 ```bash
@@ -145,7 +162,7 @@ per-machine and tailnet-first; every preview is disposable and carries a TTL.
 
 ## Status
 
-**Built and tested.** Web / desktop / iOS publish, cross-machine resolve & open, atomic
+**Built and tested.** Web / desktop / iOS publish, `publish --host` and cross-machine resolve & open, atomic
 file state, garbage collection, `doctor`, and public exposure (`expose`/`unexpose` via the
 nctr.site relay) and per-env Postgres/SQLite `[deps]` are implemented and covered by unit +
 fixture-backed integration tests.

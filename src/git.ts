@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
@@ -188,6 +189,41 @@ export async function resolveCommit(repo: string, branch: string): Promise<strin
   // be argument-smuggled into git as an option.
   if (branch.startsWith("-")) throw new NectarError("E_CHECKOUT", `Branch '${branch}' is not a valid ref name`);
   return git(["rev-parse", `${branch}^{commit}`], repo);
+}
+
+export async function archiveCommit(repo: string, commit: string, maxBytes: number): Promise<Buffer> {
+  if (!/^[0-9a-f]{7,64}$/.test(commit)) throw new NectarError("E_CHECKOUT", `'${commit}' is not a commit id`);
+  const env = isolatedEnvironment([...PINNED, ...(await repoOverrides(repo))]);
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["--no-pager", "archive", "--format=tar", commit], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    const errors: Buffer[] = [];
+    let size = 0;
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        child.kill("SIGKILL");
+        reject(new NectarError("E_USAGE", `git archive of ${repo} is larger than ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(Buffer.concat(chunks));
+      else reject(new NectarError("E_CHECKOUT", Buffer.concat(errors).toString().trim() || `git archive ${commit} failed`));
+    });
+  });
+}
+
+export async function commitTree(repo: string, branch: string, message: string): Promise<void> {
+  if (branch.startsWith("-")) throw new NectarError("E_CHECKOUT", `Branch '${branch}' is not a valid ref name`);
+  if (!(await maybeFile(path.join(repo, ".git")))) await git(["init", "-q"], repo);
+  await git(["check-ref-format", "--branch", branch], repo);
+  await git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], repo);
+  await git(["add", "-A", "-f", "--", "."], repo);
+  await git(["-c", "user.name=nectar", "-c", "user.email=nectar@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "--no-verify", "-m", message], repo);
 }
 
 export async function shortCommit(repo: string): Promise<string> {

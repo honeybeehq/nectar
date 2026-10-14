@@ -174,6 +174,18 @@ export async function assertDocker(): Promise<void> {
   });
 }
 
+export async function assertProjectOwned(project: string, home: string): Promise<void> {
+  const filter = ["--filter", `label=com.docker.compose.project=${project}`, "--format", `{{.Label "${HOME_LABEL}"}}`];
+  const homes = [...(await listed(["ps", "-a", ...filter])), ...(await listed(["volume", "ls", ...filter]))];
+  const foreign = homes.filter((owner) => owner !== home);
+  if (foreign.length > 0) {
+    throw new NectarError(
+      "E_DEPS",
+      `Compose project ${project} already holds containers or volumes that are not this Nectar home's (${[...new Set(foreign.map((owner) => owner || "no dev.nectar.home label"))].join(", ")}); Nectar leaves them alone. Publish with --name to use another project`,
+    );
+  }
+}
+
 export async function composeUp(file: string, project: string): Promise<void> {
   const result = await docker(
     ["compose", "-p", project, "-f", file, "up", "-d", "--wait", "--wait-timeout", String(UP_TIMEOUT_S)],
@@ -186,8 +198,14 @@ export async function composeUp(file: string, project: string): Promise<void> {
   }
 }
 
-function labelFilters(env: string, home: string): string[] {
-  return ["--filter", `label=${ENV_LABEL}=${env}`, "--filter", `label=${HOME_LABEL}=${home}`];
+function labelFilters(env: string, home: string, dep?: string): string[] {
+  return [
+    "--filter",
+    `label=${ENV_LABEL}=${env}`,
+    "--filter",
+    `label=${HOME_LABEL}=${home}`,
+    ...(dep === undefined ? [] : ["--filter", `label=${DEP_LABEL}=${dep}`]),
+  ];
 }
 
 async function listed(args: string[]): Promise<string[]> {
@@ -219,17 +237,31 @@ export async function stopLabelled(env: string, home: string): Promise<string[]>
   return running;
 }
 
-export async function removeLabelled(env: string, home: string): Promise<Labelled> {
-  const filters = labelFilters(env, home);
+export async function removeLabelled(env: string, home: string, deps?: string[]): Promise<Labelled> {
+  if (deps !== undefined) {
+    const removed: Labelled = { containers: [], volumes: [], networks: [] };
+    for (const dep of deps) {
+      const one = await removeMatching(labelFilters(env, home, dep), false);
+      removed.containers.push(...one.containers);
+      removed.volumes.push(...one.volumes);
+    }
+    return removed;
+  }
+  return removeMatching(labelFilters(env, home), true);
+}
+
+async function removeMatching(filters: string[], withNetworks: boolean): Promise<Labelled> {
   let containers: string[];
   try {
     containers = await listed(["ps", "-a", "-q", ...filters]);
   } catch (error) {
-    if (missingBinary(error)) return { containers: [], volumes: [], networks: [] };
-    throw error;
+    if (!missingBinary(error)) throw error;
+    throw new NectarError("E_PLATFORM", `No '${dockerBinary()}' binary to remove this env's labelled containers and volumes; set NECTAR_DOCKER_BIN or PATH and retry`, {
+      hint: DOCKER_HINT,
+    });
   }
   if (containers.length > 0) await act(["rm", "-f", "-v", ...containers]);
-  const networks = await listed(["network", "ls", "-q", ...filters]);
+  const networks = withNetworks ? await listed(["network", "ls", "-q", ...filters]) : [];
   if (networks.length > 0) await act(["network", "rm", ...networks]);
   const volumes = (await listed(["volume", "ls", "-q", ...filters])).filter((name) => name.startsWith("nectar-"));
   if (volumes.length > 0) await act(["volume", "rm", ...volumes]);

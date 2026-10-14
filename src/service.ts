@@ -37,6 +37,7 @@ import {
   readSecrets,
   redactedDeps,
   removeLabelled,
+  assertProjectOwned,
   stopLabelled,
   writePrivateJson,
   type PostgresService,
@@ -880,7 +881,8 @@ export class NectarService {
     }
     const secrets = fresh ? {} : await readSecrets(directory);
     const services: Record<string, PostgresService> = {};
-    let createdPostgres = false;
+    const before = record.deps;
+    const newPostgres: string[] = [];
     await this.store.withLock(PORTS_LOCK, async () => {
       const config = await this.store.readConfig();
       const reserved = loopbackPorts((await this.store.listEnvs()).filter((item) => item.name !== record.name));
@@ -888,7 +890,7 @@ export class NectarService {
       for (const port of [record.serve?.upstream_port, record.serve?.proxy_port]) if (port !== undefined) reserved.add(port);
       for (const { name, recipe: dep } of postgres) {
         const prior = previous[name]?.kind === "postgres" ? previous[name] : undefined;
-        if (prior === undefined) createdPostgres = true;
+        if (prior === undefined) newPostgres.push(name);
         const port =
           prior?.port ??
           (await allocatePort({ start: config.upstream_port_start, end: config.upstream_port_end, reserved }));
@@ -915,15 +917,19 @@ export class NectarService {
       const file = composeFile(this.paths.work, record.name);
       await writePrivateJson(file, composeSpec(record.name, this.paths.root, services));
       try {
+        await assertProjectOwned(composeProject(record.name), this.paths.root);
         await composeUp(file, composeProject(record.name));
       } catch (error) {
-        if (createdPostgres) await removeLabelled(record.name, this.paths.root).catch(() => undefined);
+        if (newPostgres.length > 0) await removeLabelled(record.name, this.paths.root, newPostgres).catch(() => undefined);
+        if (fresh || before === undefined) delete record.deps;
+        else record.deps = before;
+        await this.persistDeps(record);
         throw error;
       }
     }
     const depEnv = depEnvironment(next, secrets);
     const seed = seedScenario(recipe);
-    if ((created || createdPostgres) && seed !== undefined) await this.runSeed(record, seed, depEnv);
+    if ((created || newPostgres.length > 0) && seed !== undefined) await this.runSeed(record, seed, depEnv);
     return depEnv;
   }
 

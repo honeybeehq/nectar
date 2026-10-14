@@ -611,7 +611,8 @@ Putting `tailscale serve` in front would hide the peer address that WhoIs needs.
 one Compose file per env (project `nectar-<env>`, a named volume, a healthcheck, a Nectar
 loopback port) and runs `docker compose up -d --wait`. Every container, volume and network
 is labelled `dev.nectar.env=<env>` and `dev.nectar.home=<NECTAR_HOME>`. Stop and teardown
-list by those labels and act only on the IDs they listed. The password is generated per env
+list by those labels and act only on the IDs they listed. A Compose project that already
+holds anything without this home's label is refused, not adopted. The password is generated per env
 and kept in a 0600 file beside the compose file. A missing Docker, or one the user cannot
 reach, is `E_PLATFORM` before any work. A scenario `seed` runs when deps are created and on
 `--fresh`. (SPEC §5.1.)

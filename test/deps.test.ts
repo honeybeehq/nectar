@@ -299,6 +299,41 @@ describe("[deps] lifecycle with a fake docker", () => {
     expect(await docker.read()).toEqual(FOREIGN);
   });
 
+  it("keeps the existing database when adding a dep fails on republish", async () => {
+    const { service, docker } = await harness();
+    const repo = await depsRepo(path.join(await tempDir("deps-seeds"), "seeds.log"));
+    const first = await service.publish({ repo, ttl: "1h" });
+    const env = first.env as string;
+    track(service, env);
+    const before = await docker.read();
+    await writeFile(path.join(repo, "nectar.toml"), `${await readFile(path.join(repo, "nectar.toml"), "utf8")}\n[deps.analytics]\nkind = "postgres:16"\nenv = "ANALYTICS_URL"\n`);
+    await runCommand("git", ["commit", "-qam", "add analytics"], { cwd: repo });
+    vi.stubEnv("FAKE_DOCKER_UP_FAIL", "1");
+    await expect(service.publish({ repo, ttl: "1h" })).rejects.toMatchObject({ code: "E_DEPS", details: { still_serving: expect.any(String) as string } });
+    expect((await docker.read()).volumes).toEqual(before.volumes);
+    expect((await docker.read()).containers.map((item) => item.id)).toEqual(before.containers.map((item) => item.id));
+    const record = await service.store.readEnv(env);
+    expect(Object.keys(record.deps ?? {})).toEqual(["db"]);
+    expect((await body(record.urls.local ?? "")).url).toBe((await body((first.urls as { local: string }).local)).url);
+    await service.remove(env, true);
+  });
+
+  it("refuses a compose project that holds another Nectar home's containers and leaves them alone", async () => {
+    const { service, docker } = await harness();
+    const state = await docker.read();
+    state.containers.push({
+      id: "twin-home",
+      name: "nectar-shop--main--web-db-1",
+      labels: { "com.docker.compose.project": "nectar-shop--main--web", "dev.nectar.env": "shop--main--web", "dev.nectar.home": "/other/home" },
+      running: true,
+    });
+    await writeFile(docker.stateFile, JSON.stringify(state));
+    const repo = await depsRepo(path.join(await tempDir("deps-seeds"), "seeds.log"));
+    await expect(service.publish({ repo, ttl: "1h" })).rejects.toThrow("not this Nectar home's (/other/home)");
+    expect(await docker.read()).toEqual(state);
+    expect(await readFile(docker.log, "utf8")).not.toMatch(/ up -d/);
+  });
+
   it("copies a sqlite file per env, keeps it on republish, and re-copies on --fresh", async () => {
     const { service, state } = await harness();
     const repo = await initGitRepo({

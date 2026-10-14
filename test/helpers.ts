@@ -230,6 +230,8 @@ const filters = () => {
   });
 };
 const print = (items) => { if (items.length) process.stdout.write(items.join("\\n") + "\\n"); };
+const formatAt = args.indexOf("--format");
+const show = (item) => formatAt < 0 ? (item.id ?? item.name) : args[formatAt + 1].replace(/\\{\\{\\.Label "([^"]+)"\\}\\}/g, (_, key) => item.labels[key] ?? "");
 const [command, sub] = args;
 if (command === "version") { process.stdout.write("27.5.1\\n"); process.exit(0); }
 if (command === "compose" && sub === "version") { process.stdout.write("Docker Compose version v2.37.1\\n"); process.exit(0); }
@@ -241,20 +243,20 @@ if (command === "compose") {
     if (!state.networks.some((item) => item.name === project + "_" + name)) state.networks.push({ id: "net" + state.networks.length + project, name: project + "_" + name, labels: net.labels ?? {} });
   }
   for (const [name, volume] of Object.entries(spec.volumes ?? {})) {
-    if (!state.volumes.some((item) => item.name === project + "_" + name)) state.volumes.push({ name: project + "_" + name, labels: volume.labels ?? {} });
+    if (!state.volumes.some((item) => item.name === project + "_" + name)) state.volumes.push({ name: project + "_" + name, labels: { ...volume.labels, "com.docker.compose.project": project } });
   }
   for (const [name, service] of Object.entries(spec.services)) {
     const containerName = project + "-" + name + "-1";
     const existing = state.containers.find((item) => item.name === containerName);
     if (existing) existing.running = true;
-    else state.containers.push({ id: "c" + Math.random().toString(16).slice(2, 10), name: containerName, labels: service.labels ?? {}, running: true });
+    else state.containers.push({ id: "c" + Math.random().toString(16).slice(2, 10), name: containerName, labels: { ...service.labels, "com.docker.compose.project": project }, running: true });
   }
   save();
   process.exit(0);
 }
 if (command === "ps") {
   const all = args.includes("-a");
-  print(state.containers.filter((item) => all || item.running).filter(filters()).map((item) => item.id));
+  print(state.containers.filter((item) => all || item.running).filter(filters()).map(show));
   process.exit(0);
 }
 if (command === "stop") {
@@ -270,7 +272,7 @@ if (command === "rm") {
 }
 if (command === "volume" || command === "network") {
   const key = command === "volume" ? "volumes" : "networks";
-  if (sub === "ls") { print(state[key].filter(filters()).map((item) => item.id ?? item.name)); process.exit(0); }
+  if (sub === "ls") { print(state[key].filter(filters()).map(show)); process.exit(0); }
   if (sub === "rm") {
     const ids = args.slice(2);
     state[key] = state[key].filter((item) => !ids.includes(item.id ?? item.name));

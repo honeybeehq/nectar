@@ -487,15 +487,24 @@ from the published branch, as for `[web]`.
   seed. A live republish's old serve can briefly see the database disappear while that
   happens. `stop` and gc expire stop the containers. gc cold, reap and `rm` remove the
   containers, the network and the volume, and trash the deps dir. A publish whose new
-  database never turns healthy removes what it created and fails `E_DEPS`. An existing
-  database is never removed for a failed republish.
+  database never turns healthy removes only the deps it was creating (by their
+  `dev.nectar.dep` label), restores the previous deps record and fails `E_DEPS`. A failed
+  republish never removes an existing database, except two explicit cases: `--fresh`, and a
+  republish whose recipe dropped every postgres dep, which removes them before its build.
+  Without a docker binary, `rm` and gc cold fail `E_PLATFORM` rather than forget containers
+  they could not remove.
 - **Only Nectar's own.** Every container, volume and network carries `dev.nectar.env=<env>`
   and `dev.nectar.home=<NECTAR_HOME>`. Teardown lists by both labels (`docker ps -a`,
   `network ls`, `volume ls` with `--filter label=…`) and removes only what it listed. Volumes
-  must also be named `nectar-…`. It never uses `compose down` or any prune.
+  must also be named `nectar-…`. It never uses `compose down` or any prune. The project name
+  does not include the home, so before `compose up` Nectar lists everything carrying
+  `com.docker.compose.project=nectar-<env>`. If any of it lacks this home's label, for
+  example the same env name under another user's `NECTAR_HOME`, the publish fails `E_DEPS`
+  without touching it. `--name` picks another project.
 - **Seed.** The default scenario's `seed` (or the only scenario's) runs in the worktree with
   the dep vars and `NECTAR_SCENARIO`, once when a dep is created and again on `--fresh`.
-  A failing seed fails the publish `E_SEED` with its log tail.
+  A failing seed fails the publish `E_SEED` with its log tail. It is not retried by a later
+  plain republish, because the database already exists; use `--fresh` to seed again.
 - **Docker access.** nectard and the CLI run as the user, so the user must be able to reach
   the Docker daemon: membership in the `docker` group (root-equivalent) or rootless Docker
   with `DOCKER_HOST`. `NECTAR_DOCKER_BIN` picks the binary (default `docker`). Without

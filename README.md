@@ -58,7 +58,9 @@ See [relay/](relay/) to run your own `<domain>.site` relay.
 
 ```bash
 pnpm install && pnpm build && pnpm link --global
-nectar doctor --fix          # check deps, ports, and serve entries
+nectar doctor                # check nectard, gc, dead envs, serve entries, PATH tools, the pack store
+nectar doctor --fix --dry-run  # list the repairs it would make
+nectar doctor --fix          # run gc, remove orphaned Nectar serve entries, install nectard, restart the pack store
 nectar daemon install        # optional: nectard revives crashed previews, restores them after reboot, runs gc hourly
 ```
 
@@ -66,6 +68,9 @@ Nectar finds the `tailscale` CLI on `PATH`, inside the Mac app
 (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) or in the Homebrew and standalone
 locations. Set `NECTAR_TAILSCALE_BIN` to choose one; `nectar doctor` shows which it used.
 
+`doctor --fix` only removes what it can prove is Nectar's: a `tailscale serve` entry goes only
+when it is in Nectar's tailnet range, points at a Nectar upstream port and nothing answers
+there. Entries pointing elsewhere, and Portless, are reported and left alone (SPEC §10.5).
 `nectar daemon uninstall` stops and removes nectard again (envs keep running);
 `nectar daemon status` shows whether it is installed and running. On Linux it is a
 `systemd --user` unit: run `loginctl enable-linger $USER` once so it starts at boot without

@@ -200,7 +200,10 @@ Every read re-probes an env whose status is `serving`, `unhealthy` or `crashed` 
 still has a `serve` block (`src/liveness.ts` `probeLiveness`, reusable by `nectard`):
 
 - `upstream_port` answers on loopback → `serving` (`reason: port_open`), even when the
-  record said `crashed` or the recorded PID is gone.
+  record said `crashed` or the recorded PID is gone. Exception: an env nectard gave up on
+  (`failure.code` `E_PORTS` or `E_CRASH_LOOP`) keeps `crashed` and its failure; the probe
+  result is shown in `liveness` but never written back, because whatever answers on that port
+  is not the env's process. `ls` rows carry `failure` (the code, or `null`).
 - PID or its process group alive, port silent after retries (300/600/1200 ms timeouts with
   150 ms backoff, ≈2.4 s budget) → `unhealthy` (`port_unresponsive`). Still holds its port,
   counts toward quota, needs `rm --force`.
@@ -211,7 +214,8 @@ The result is stored on the record as `liveness: { state, reason, checked_at, pi
 port_open }` and returned by `ls` (per row), `show` and `resolve`. The record is rewritten
 only when status or reason changes (best-effort lock; a publish in flight wins). Crashed
 records from a failed publish or orphan cleanup have no `serve` block and stay `crashed`.
-`gc`'s dead-Serve-proxy check uses the same port retries before tearing down an env.
+`gc`'s dead-Serve-proxy check uses the same port retries before tearing down an env. `gc`'s
+expire and cold transitions drop the stale `liveness` field.
 
 #### Lifetime
 
@@ -867,13 +871,18 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # uninstall is the one removal command (stops it, deletes the unit, envs keep running);
     # run is the foreground supervisor the unit starts.
 
-nectar doctor [--fix]
-    # Checks: portless present + proxy up · tailscale up (names the CLI used and its
-    # source, §4.5) + this host's serve entries · port-range availability · pack store
-    # served on 8440 · no 443 tailscale serve entry (portless killer) · dead Nectar-range
-    # Serve proxies · quota headroom. --fix repairs the pack chain and removes dead
-    # Nectar-range proxies. The pack store serves desktop/ios testpacks only; with no packs
-    # stored, a stopped pack chain is a warning, since web previews do not use it.
+nectar doctor [--fix [--dry-run]]
+    # Checks (§10.5): portless on PATH + proxy up · tailscale up (names the CLI
+    # used and its source, §4.5) · no 443 serve entry
+    # (portless killer) · no funnel · Serve entries in Nectar's tailnet range, classified
+    # owned / orphan / foreign / ambiguous · dead or expired envs still holding a process or
+    # Serve entry · gc recency · nectard installed, active and pointing at this install ·
+    # tools env recipes need on PATH and on nectard's PATH · pack store on 8440 · port
+    # ranges · pack quota. --fix runs gc, removes orphan entries, releases dead envs,
+    # installs or reinstalls nectard and restarts the pack server (testpacks only: with no
+    # packs stored, a stopped pack chain is a warning); --dry-run lists those
+    # actions without making them. Result: { healthy, checks[], actions[] } where every
+    # action has { action, target, reason, status, before, after }.
 ```
 
 ### `publish --json` result (web example)
@@ -1003,8 +1012,13 @@ run also removes Nectar-range Serve entries whose loopback proxy target is dead.
 whose dead target is the owning env's nectard `proxy_port` while the app still answers is
 pointed back at the app instead (§4.5). Otherwise, if an env
 record owns the entry, GC kills its process group, clears its runtime claims, and marks it
-`crashed` with failure details. `doctor` reports the same orphan class and `doctor --fix`
-applies the same cleanup.
+`crashed` with failure details (an `expired`, `stopped` or `cold` owner keeps its status;
+only the entry goes). "Dead" and "Nectar's" are defined by §10.5's classification, which
+`gc`, `doctor` and `doctor --fix` share. Stopping an env's process group (gc, `stop`, `rm`)
+signals it only when a process in the group still carries that env's `NECTAR_ENV`, and
+removing its Serve entry is skipped when anything on its tailnet port is not the env's own `/`
+proxy to its upstream or proxy port. nectard's revive, mesh re-assertion and unfronting apply the same check and
+leave such a port alone (the env serves locally with `urls.mesh: null` until a republish).
 
 ### 10.3 Scheduling
 
@@ -1020,7 +1034,7 @@ warns if `gc` hasn't run in 24 h.
 | F2 | tailscale down / logged out | publish succeeds local-only: `urls.mesh: null`, `packet_fields.preview_url` falls back to `urls.local`, loud warning (`E_TAILNET_DOWN` only if `--require-mesh`) |
 | F3 | serve crashes post-publish | lazy detection on every read → `status: crashed` (process gone) or `unhealthy` (port silent), back to `serving` when the port answers; `show`/`resolve` return log tail; desk renders "surface down — re-request publish"; re-publish restarts on the same URLs |
 | F4 | `ready_path` never 200s | publish fails `E_SERVE_TIMEOUT` with log tail; detached process killed, Serve entry removed, runtime fields/port claims cleared; env kept as `crashed` with `failure` details |
-| F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove them and clear matching env claims |
+| F5 | port collision or stale Serve proxy | allocator probes IPv4+IPv6 before binding and skips occupied ports; `doctor` reports Serve entries targeting dead loopback ports; `gc` / `doctor --fix` remove only the orphan class of §10.5 and clear matching env claims; foreign and ambiguous entries are reported and left alone |
 | F6 | checkout conflict / dirty nectar worktree | worktree is nectar-owned ⇒ `git reset --hard` + clean is always legal; borrowed `--worktree` is never reset — publish fails `E_CHECKOUT` instead |
 | F7 | smoke fails (backend) | publish fails `E_SMOKE_FAILED`; evidence written; no packet fields emitted |
 | F8 | testpack fetch sha mismatch | `open` deletes the download, retries once, then errors — never launches an unverified pack |
@@ -1031,6 +1045,43 @@ warns if `gc` hasn't run in 24 h.
 | F13 | simctl failure (no runtime, boot timeout, install/launch error) | publish fails `E_SIM` with simctl stderr; env kept as `crashed`; nectar-created device cleaned up |
 | F14 | `open` on a Mac without a matching iOS runtime | `E_PLATFORM` with the `preview_url`-needs-nothing hint; non-Mac `open` goes straight to the stream URL |
 | F15 | publishing host requests its own tailnet Serve URL | Tailscale supplies no caller identity and Serve returns 403; `resolve.is_self: true` tells consumers to prefer `urls.local`; packet `preview_url` remains the canonical mesh URL |
+
+### 10.5 `doctor --fix`
+
+`nectar doctor --fix` repairs only what is provably Nectar's, and is safe to re-run: a second
+run on a repaired machine plans no actions. `--dry-run` prints the same action list with
+`status: planned` and changes nothing.
+
+**Serve entries.** Every `tailscale serve` target under a port in
+`tailnet_port_start..tailnet_port_end` (8440, the pack store, is handled separately; ports
+outside the range are never read) is classified (`src/doctor.ts`):
+
+| class | rule | doctor | `--fix` / gc |
+| --- | --- | --- | --- |
+| owned | the env record holding this tailnet port has this upstream port or this `proxy_port` (§4.5), and its process (carrying its `NECTAR_ENV`) runs, or it is `serving`/`unhealthy` and the upstream answers | pass | kept |
+| orphan | loopback HTTP proxy to a Nectar upstream port (in `upstream_port_start..end`, or a record's upstream or proxy port), nothing answers there, no live process of the owning env, mounted at `/`, and the only handler on that tailnet port | `serve-orphans` fail | `tailscale serve --https=<port> off`, after re-reading the table to confirm it is still the port's only handler (a dead `proxy_port` whose app still answers is re-pointed at the app instead); an owning `serving`/`crashed` record is marked `crashed` + `E_SERVE_ORPHAN` |
+| foreign | not a loopback HTTP proxy (remote URL, TCP forward, path, text), a loopback port outside Nectar's upstream range that no record allocated, or any entry under a Tailscale Service (`Services`) | `serve-foreign` warn | never touched |
+| ambiguous | something answers on the Nectar upstream port but no live env owns it; the record holding the tailnet port points at a different upstream; or a dead Nectar target that shares its port with other handlers or sits on a sub-path (turning the port off would take the others down) | `serve-ambiguous` warn | never touched |
+
+**Dead envs.** A record that is `expired`, `cold`, `stopped` or `crashed`, or past
+`expires_at`, and still has its own process (by `NECTAR_ENV`) or a Serve entry pointing at its
+upstream is reported by `env-resources` along with pending gc transitions.
+
+**Actions, in order.**
+1. `gc` (when it has not run in 24 h or has pending work), reported as one
+   `remove-serve-entry` per orphan, one `gc-<transition>` per env and the `gc` run itself.
+2. `release-env` for dead envs gc did not cover: stop the env's own process group and its own
+   Serve entry; the record keeps its status and ports.
+3. `install-nectard` / `reinstall-nectard` through `nectar daemon install` when nectard is
+   missing, inactive, or its unit runs a different node or CLI than the running install. A
+   unit bound to another `NECTAR_HOME` is reported and left alone. `nectar daemon uninstall`
+   removes it.
+4. `start-pack-server` / `serve-pack-store` when Tailscale is up and no Funnel is on: start a
+   new read-only pack server (an old recorded PID is never signalled) and point `:8440` at it.
+
+Doctor never starts, stops or configures Portless and never touches port 443, Funnel, or any
+process without the env's `NECTAR_ENV`. Missing tools (`path-tools`, `portless`) are warnings
+with hints, not repairs.
 
 ## 11. Where the implementation lives
 

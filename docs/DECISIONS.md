@@ -471,3 +471,22 @@ on a live republish, because the new slot starts without the other slot's caches
 needs two ports per env and a reviewer-visible URL swap, which open question 6 already
 deferred. Only web envs stage: dev, desktop and iOS republish in place, and stopped or
 crashed envs have nothing to keep serving.
+
+## D27 — `doctor --fix` removes only what it can prove is Nectar's
+
+**Chose:** classify every Serve entry in Nectar's tailnet range as owned, orphan, foreign or
+ambiguous, and let `gc` and `doctor --fix` remove only orphans: loopback proxies to a Nectar
+upstream port where nothing listens and the owning env's process is gone. Process groups are
+signalled only when a member carries the env's `NECTAR_ENV`. `doctor --fix` installs nectard
+through `nectar daemon install`, and leaves a unit bound to another `NECTAR_HOME` alone.
+Every repair is an action with before/after, and `--dry-run` lists them. (SPEC §10.5.)
+**Alternatives:** (a) the old rule: any entry in the tailnet range whose loopback target is
+dead; (b) a Nectar-side registry of every Serve entry it ever created; (c) report only and
+never repair.
+**Why:** the Studio had orphaned entries and dead records to clean up, alongside Portless and
+other services that also use `tailscale serve` and loopback ports. (a) would remove someone
+else's entry that happens to sit in the range and point at a dead port of theirs, and gc
+killed process groups by recorded pgid alone, which a recycled pgid turns into killing a
+stranger. (b) duplicates what env records already hold, and drifts. (c) leaves the rollout to
+hand-written shell. Anything doctor cannot prove stays put and is reported with a hint.
+

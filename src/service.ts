@@ -327,21 +327,32 @@ export class NectarService {
     const old = await this.store.maybeEnv(name);
     if (old !== undefined) await this.assertSameSource(old, options.repo, options.recipe.source === "static");
     const identity = await this.identity();
-    const record = this.nextRecord(options, name, options.worktree ?? path.join(this.paths.work, name), identity, old);
+    const slot = path.join(this.paths.work, name);
+    const owned = old !== undefined && !old.borrowed_worktree && old.worktree === `${slot}.alt` ? old.worktree : slot;
+    const record = this.nextRecord(options, name, options.worktree ?? owned, identity, old);
     // Stop the old runtime while its pid/pgid are still on disk — overwriting the
     // record first would orphan the running server if we die before stopping it.
     if (old !== undefined) await this.stopRuntime(old);
     await this.store.writeEnv(record);
+    if (options.worktree === undefined) {
+      const other = owned === slot ? `${slot}.alt` : slot;
+      if (existsSync(other)) await this.discardWorktree(options.repo, other);
+    }
     return { record, ...(old === undefined ? {} : { old }), identity };
   }
 
   private async assertSameSource(old: EnvRecord, repo: string, isStatic: boolean): Promise<void> {
-    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await sameRepository(old.repo, repo)) return;
+    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await this.sameGitSource(old, repo)) return;
     throw new NectarError(
       "E_USAGE",
       `Env '${old.name}' is published from ${old.repo}, not ${repo}; pass --name <other> to publish this one beside it, or run nectar rm ${old.name} --force first`,
       { existing_repo: old.repo },
     );
+  }
+
+  private async sameGitSource(old: EnvRecord, repo: string): Promise<boolean> {
+    if (await sameRepository(old.repo, repo)) return true;
+    return !old.borrowed_worktree && existsSync(path.join(old.worktree, ".git")) && sameRepository(old.worktree, repo);
   }
 
   private nextRecord(

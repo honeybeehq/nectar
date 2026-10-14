@@ -155,6 +155,9 @@ describe("fixture-backed web publish", () => {
     expect((await runCommand("git", ["worktree", "add", "--detach", worktree, "main"], { cwd: first })).exitCode).toBe(0);
     const again = await service.publish({ repo: worktree, branch: "main", ttl: "1h" });
     expect(again.urls).toEqual(published.urls);
+    expect((await runCommand("git", ["worktree", "remove", worktree], { cwd: first })).exitCode).toBe(0);
+    const back = await service.publish({ repo: first, ttl: "1h" });
+    expect(back.urls).toEqual(published.urls);
   });
 
   it("keeps the previous publish serving when a republish fails to install or check out", async () => {
@@ -203,6 +206,10 @@ describe("fixture-backed web publish", () => {
     const worktrees = (await runCommand("git", ["worktree", "list"], { cwd: repo })).stdout;
     expect(worktrees).not.toContain(`${before.worktree} `);
     expect(worktrees).not.toContain("prunable");
+    await service.stop(env);
+    await service.publish({ repo, ttl: "1h" });
+    expect(((await service.show(env)).env as { worktree: string }).worktree).toBe(`${before.worktree}.alt`);
+    expect((await runCommand("git", ["worktree", "list"], { cwd: repo })).stdout).not.toContain(`${before.worktree} `);
     await service.publish({ repo, ttl: "1h" });
     expect(((await service.show(env)).env as { worktree: string }).worktree).toBe(before.worktree);
   });

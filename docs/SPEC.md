@@ -46,10 +46,11 @@ Agents of any harness call it directly; the packet carries only strings.
   process + a record. Identified per-machine by the mode-qualified **name**
   `<app>--<branch-slug>--<mode>` and a short random **eid** (`e7f3`). One env per
   (app, branch, mode) per machine; republish upserts. The env belongs to the source it was
-  first published from (`repo`: the git toplevel, or the static source path). Publishing
+  published from (`repo`: the git toplevel, or the static source path). Publishing
   another source into an existing name is `E_USAGE` naming that source and suggesting
   `--name`, and the existing env is untouched. A git worktree of the same repository
-  (same `--git-common-dir`) counts as the same source.
+  (same `--git-common-dir` as the recorded `repo` or as Nectar's own worktree of the env)
+  counts as the same source, so the recorded worktree may be removed afterwards.
 - **app** — the repo's short name, from `--name`, else the recipe (`name` in `nectar.toml`,
   `package.json`, `[project].name`), else the repo directory name.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
@@ -417,7 +418,8 @@ and build succeed does Nectar stop the old serve, write the new record, remove t
 staging slot and returns its code (`E_CHECKOUT`, `E_INSTALL`, …) with the log tail; the
 message says the previous publish still serves and `details.still_serving` is its commit.
 Static sites stage through their existing copy-and-swap (§6.1.1) before the old serve
-stops. Republishing a stopped or crashed env, or a borrowed `--worktree`, works in place as
+stops. Republishing a stopped or crashed env works in place, in whichever slot it holds, and
+removes the other slot if one is left over; a borrowed `--worktree` works in place as
 before. A slot starts without the other slot's `node_modules` or `.nectar/` caches, so a
 live republish reinstalls dependencies.
 

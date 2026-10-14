@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { pidAlive, runCommand } from "./commands.js";
 import { daemonHello, socketPath } from "./control.js";
+import type { ListenerState } from "./remote.js";
 import { daemonLogFile, runningDaemonPid } from "./daemon.js";
 import { NectarError } from "./errors.js";
 import type { NectarPaths } from "./paths.js";
@@ -383,7 +384,7 @@ export interface UnitStatus {
   last_gc_at: string | null;
   log: string;
   socket: string;
-  control: { api: number; pid: number; nectar_home: string; ops: string[] } | null;
+  control: { api: number; pid: number; nectar_home: string; ops: string[]; program: string | null; remote: ListenerState | null } | null;
 }
 
 export async function unitStatus(
@@ -409,6 +410,9 @@ export async function unitStatus(
     last_gc_at: config.last_gc_at ?? null,
     log: daemonLogFile(paths),
     socket,
-    control: hello === undefined ? null : { api: hello.api, pid: hello.pid, nectar_home: hello.nectar_home, ops: hello.ops },
+    control:
+      hello === undefined
+        ? null
+        : { api: hello.api, pid: hello.pid, nectar_home: hello.nectar_home, ops: hello.ops, program: hello.program ?? null, remote: hello.remote ?? null },
   };
 }

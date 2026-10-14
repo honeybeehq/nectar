@@ -8,6 +8,7 @@ import { errorEnvelope, successEnvelope, type ErrorEnvelope, type SuccessEnvelop
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
 import type { NectarPaths } from "./paths.js";
 import { NectarService } from "./service.js";
+import type { ListenerState } from "./remote.js";
 import type { Publisher } from "./types.js";
 
 export const CONTROL_API = 1;
@@ -37,6 +38,8 @@ export interface Hello {
   ops: string[];
   nectar_home: string;
   pid: number;
+  program?: string;
+  remote?: ListenerState | null;
 }
 
 export type Envelope = SuccessEnvelope<unknown> | ErrorEnvelope;
@@ -255,12 +258,19 @@ async function prepareSocketDir(file: string): Promise<void> {
 
 export async function startControlServer(
   paths: NectarPaths,
-  options: { socket?: string; log?: (event: Record<string, unknown>) => void } = {},
+  options: { socket?: string; log?: (event: Record<string, unknown>) => void; remote?: () => ListenerState } = {},
 ): Promise<ControlServer> {
   const socket = options.socket ?? socketPath();
   const log = options.log ?? (() => undefined);
   await prepareSocketDir(socket);
-  const hello: Hello = { api: CONTROL_API, ops: [...CONTROL_OPS], nectar_home: paths.root, pid: process.pid };
+  const hello = (): Hello => ({
+    api: CONTROL_API,
+    ops: [...CONTROL_OPS],
+    nectar_home: paths.root,
+    pid: process.pid,
+    ...(process.argv[1] === undefined ? {} : { program: process.argv[1] }),
+    ...(options.remote === undefined ? {} : { remote: options.remote() }),
+  });
   const server = http.createServer((request, response) => {
     const reply = (status: number, value: unknown): void => {
       response.writeHead(status, { "content-type": "application/json" });
@@ -268,7 +278,7 @@ export async function startControlServer(
     };
     const url = new URL(request.url ?? "/", "http://nectard");
     if (request.method === "GET" && url.pathname === "/v1/hello") {
-      reply(200, hello);
+      reply(200, hello());
       return;
     }
     const match = /^\/v1\/([a-z]+)$/.exec(url.pathname);

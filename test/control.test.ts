@@ -78,7 +78,7 @@ describe("nectard control socket", () => {
     expect((await lstat(socket)).mode & 0o777).toBe(0o600);
     expect((await stat(path.dirname(socket))).mode & 0o077).toBe(0);
     const hello = await daemonHello(socket);
-    expect(hello).toEqual({ api: CONTROL_API, ops: [...CONTROL_OPS], nectar_home: home, pid: process.pid });
+    expect(hello).toEqual({ api: CONTROL_API, ops: [...CONTROL_OPS], nectar_home: home, pid: process.pid, program: process.argv[1] });
   });
 
   it("never steals a live socket, replaces a stale one, and refuses a shared directory", async () => {

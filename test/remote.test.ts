@@ -11,7 +11,19 @@ import { runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarError } from "../src/errors.js";
 import { getPaths } from "../src/paths.js";
 import { pinLocalApi, type TailnetPeer } from "../src/localapi.js";
-import { authorize, callRemote, listenerCheck, peerView, startRemoteServer, type RemoteServer } from "../src/remote.js";
+import net from "node:net";
+import { daemonLogger } from "../src/daemon.js";
+import {
+  authorize,
+  callRemote,
+  listenerCheck,
+  peerView,
+  remoteStatus,
+  startRemoteListener,
+  startRemoteServer,
+  type RemoteListener,
+  type RemoteServer,
+} from "../src/remote.js";
 import { NectarService } from "../src/service.js";
 import { fakeLocalApi, tempDir } from "./helpers.js";
 
@@ -110,6 +122,7 @@ async function fakeTailnet(selfAddress = "127.0.0.3"): Promise<FakeTailnet> {
 async function homes(
   config: Record<string, unknown> = { remote: { listen: true } },
   selfAddress?: string,
+  log?: (event: Record<string, unknown>) => void,
 ): Promise<{ a: string; b: string; server: RemoteServer; tailnet: FakeTailnet }> {
   vi.stubEnv("NECTAR_TAILSCALE_BIN", "/bin/false");
   vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
@@ -121,7 +134,7 @@ async function homes(
     path.join(b, "nectar.json"),
     JSON.stringify({ tailnet_host: "nodeb", upstream_port_start: 4700, upstream_port_end: 4799, ...config }),
   );
-  const server = await startRemoteServer(getPaths(b), { address: "127.0.0.1", port: 0 });
+  const server = await startRemoteServer(getPaths(b), { address: "127.0.0.1", port: 0, ...(log === undefined ? {} : { log }) });
   servers.push(server);
   vi.stubEnv("NECTAR_REMOTE_PORT", String(server.port));
   return { a, b, server, tailnet };
@@ -300,10 +313,16 @@ describe.each<Transport>(["socket", "token port"])("tailnet listener over the Lo
     const { b } = await homes();
     await mkdir(path.join(b, "logs"), { recursive: true });
     await writeFile(path.join(b, "logs", "nectard.log"), `${JSON.stringify({ event: "remote_unavailable", message: "bind failed" })}\n`);
-    const check = await listenerCheck(getPaths(b), { remote: { listen: true } } as never);
-    expect(check).toMatchObject({ status: "fail", listener: "failed" });
+    const check = await listenerCheck(getPaths(b), { remote: { listen: true } } as never, { hello: () => Promise.resolve(undefined) });
+    expect(check).toMatchObject({ status: "fail", listener: "failed", last_event: { event: "remote_unavailable" } });
     expect(check.message).toContain(`nothing answers on 127.0.0.3:${process.env.NECTAR_REMOTE_PORT}`);
+    expect(check.message).toContain("nectard does not answer on its control socket either");
     expect(check.message).toContain("nectard logged: bind failed");
+    const older = { api: 1, ops: [], nectar_home: b, pid: 4242, program: "/opt/old/dist/cli.js" };
+    const stale = await listenerCheck(getPaths(b), { remote: { listen: true } } as never, { hello: () => Promise.resolve(older) });
+    expect(stale.message).toContain("nectard (pid 4242, /opt/old/dist/cli.js) does not report a tailnet listener, so it runs an older nectar build");
+    const off = { ...older, remote: { listen: false, listening: false, address: null, port: 8441, last_error: null, whois: null, since: null } };
+    expect((await listenerCheck(getPaths(b), { remote: { listen: true } } as never, { hello: () => Promise.resolve(off) })).message).toContain("read remote.listen as off");
   });
 
   it("refuses callers on its own node, by address or by node ID", async () => {
@@ -560,5 +579,174 @@ describe("peer redaction", () => {
     }
     expect(shown).toMatchObject({ env: { name: env.name, publisher: { via: "nectard" }, deps: { db: { kind: "postgres" } }, failure: { code: "E_SERVE_TIMEOUT" } }, ports: { tailnet: 8443 } });
     expect(published).toMatchObject({ warnings: ["skipped 1 symlink(s) while copying $NECTAR_HOME/inbox/k/app", "see <path>, <path>, <path> and https://x.ts.net:8443/a"] });
+  });
+});
+
+describe("tailnet listener startup", () => {
+  type Event = Record<string, unknown>;
+  const SELF = { ID: "nSELF", HostName: "nodeself", UserID: OWNER };
+  const running = (ips: string[]): Record<string, unknown> => ({ BackendState: "Running", Self: { ...SELF, TailscaleIPs: ips } });
+
+  async function localApi(status: () => unknown, identity: (addr: string) => unknown = () => whois({ id: "nSELF" })): Promise<void> {
+    const api = await fakeLocalApi({ socket: path.join(await tempDir("localapi"), "tailscaled.sock") }, { status, whois: identity });
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", api.socket ?? "");
+    servers.push(api);
+  }
+
+  async function listener(options: { port?: number; deadlineMs?: number } = {}): Promise<{ events: Event[]; listener: RemoteListener; home: string }> {
+    const home = await tempDir("listener");
+    await writeFile(path.join(home, "nectar.json"), JSON.stringify({ remote: { listen: true } }));
+    const events: Event[] = [];
+    const started = startRemoteListener(getPaths(home), (event) => events.push(event), { port: options.port ?? 0, retryMs: 40, deadlineMs: options.deadlineMs ?? 2_000 });
+    servers.push(started);
+    return { events, listener: started, home };
+  }
+
+  async function until(events: Event[], wanted: (event: Event) => boolean): Promise<Event> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const found = events.find(wanted);
+      if (found !== undefined) return found;
+      if (Date.now() > deadline) throw new Error(`no such event in ${JSON.stringify(events)}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it("logs remote_listen_failed while tailscale is not Running, then listens once it is", async () => {
+    let state = "Starting";
+    await localApi(() => ({ ...running(["127.0.0.1", "fd7a::5"]), BackendState: state }));
+    const { events, listener: started } = await listener();
+    const failed = await until(events, (event) => event.event === "remote_listen_failed");
+    expect(failed).toMatchObject({ reason: "not_running", backend_state: "Starting", ips: ["127.0.0.1", "fd7a::5"], retry_in_ms: 40 });
+    expect(failed.endpoint).toMatch(/^unix:/);
+    expect(started.state()).toMatchObject({ listen: true, listening: false });
+    expect(started.state().last_error).toContain("tailscale is Starting here, not Running");
+    state = "Running";
+    const listening = await until(events, (event) => event.event === "remote_listen");
+    expect(listening).toMatchObject({ address: "127.0.0.1", api: "localapi", whois: "ready" });
+    expect(events.find((event) => event.event === "remote_status" && event.backend_state === "Running")).toMatchObject({ ipv4: "127.0.0.1" });
+    expect(started.state()).toMatchObject({ listening: true, address: "127.0.0.1", last_error: null, whois: null });
+    await started.close();
+    expect(events.at(-1)).toMatchObject({ event: "remote_listen_closed", reason: "shutdown" });
+  });
+
+  it("names an IPv6-only node and logs each repeated failure only once in a while", async () => {
+    await localApi(() => running(["fd7a:115c:a1e0::1"]));
+    const { events, listener: started } = await listener();
+    const failed = await until(events, (event) => event.event === "remote_listen_failed");
+    expect(failed).toMatchObject({ reason: "ipv6_only", ips: ["fd7a:115c:a1e0::1"] });
+    expect(failed.message).toContain("only IPv6 tailnet addresses");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(events.filter((event) => event.event === "remote_listen_failed")).toHaveLength(1);
+    expect(started.state().listening).toBe(false);
+  });
+
+  it("logs an unreachable LocalAPI and a status read that never finishes, and retries both", async () => {
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", path.join(await tempDir("localapi-none"), "missing.sock"));
+    const first = await listener();
+    expect(await until(first.events, (event) => event.event === "remote_listen_failed")).toMatchObject({ reason: "localapi_unreachable" });
+    await first.listener.close();
+
+    const socket = path.join(await tempDir("localapi-hang"), "tailscaled.sock");
+    const hanging = http.createServer(() => undefined);
+    await new Promise<void>((resolve) => hanging.listen(socket, resolve));
+    servers.push({ close: () => new Promise<void>((resolve) => { hanging.closeAllConnections(); hanging.close(() => resolve()); }) });
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", socket);
+    const { events } = await listener({ deadlineMs: 100 });
+    const failed = await until(events, (event) => event.event === "remote_listen_failed");
+    expect(failed).toMatchObject({ reason: "status_timeout" });
+    expect(failed.message).toContain("did not finish within 0.1s");
+  });
+
+  it("logs a bind failure with its errno and listens once the port is free", async () => {
+    await localApi(() => running(["127.0.0.1"]));
+    const holder = net.createServer();
+    await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+    const port = (holder.address() as net.AddressInfo).port;
+    const { events, listener: started } = await listener({ port });
+    const failed = await until(events, (event) => event.event === "remote_listen_failed");
+    expect(failed).toMatchObject({ reason: "bind", code: "EADDRINUSE", address: "127.0.0.1", port });
+    expect(failed.message).toContain("another process holds that port");
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    expect(await until(events, (event) => event.event === "remote_listen")).toMatchObject({ address: "127.0.0.1", port });
+    expect(started.state()).toMatchObject({ listening: true, port });
+  });
+
+  it("reports WhoIs that fails inside nectard, and when it recovers", async () => {
+    let broken = true;
+    await localApi(() => running(["127.0.0.1"]), () => (broken ? 500 : whois({ id: "nSELF" })));
+    const { events, listener: started } = await listener();
+    const listening = await until(events, (event) => event.event === "remote_listen");
+    expect(listening.whois).toContain("whois answered 500");
+    expect(started.state().last_error).toContain("WhoIs does not work inside nectard");
+    broken = false;
+    await until(events, (event) => event.event === "remote_whois_ready");
+    expect(started.state()).toMatchObject({ listening: true, whois: null, last_error: null });
+  });
+
+  it("restarts on a new tailnet address and logs the close", async () => {
+    let address = "127.0.0.1";
+    await localApi(() => running([address]));
+    const { events, listener: started } = await listener();
+    await until(events, (event) => event.event === "remote_listen");
+    address = "127.0.0.2";
+    expect(await until(events, (event) => event.event === "remote_listen_closed")).toMatchObject({ reason: "address_changed", address: "127.0.0.1", to: "127.0.0.2" });
+    expect(await until(events, (event) => event.event === "remote_listen" && event.address === "127.0.0.2")).toBeDefined();
+    expect(started.state().address).toBe("127.0.0.2");
+  });
+
+  it("logs that the listener is off when nectard starts with remote.listen off", () => {
+    const events: Event[] = [];
+    const off = startRemoteListener(getPaths("/nonexistent/home"), (event) => events.push(event), { listen: false });
+    expect(events).toEqual([expect.objectContaining({ event: "remote_listen_off", config: "/nonexistent/home/nectar.json" })]);
+    expect(off.state()).toMatchObject({ listen: false, listening: false });
+  });
+
+  it("puts listening, address and last_error in daemon status", () => {
+    const on = { remote: { listen: true } } as never;
+    const state = { listen: true, listening: true, address: "100.64.0.1", port: 8441, last_error: null, whois: null, since: null };
+    expect(remoteStatus(on, { pid: 1, nectar_home: "/h", remote: state })).toEqual({ listen: true, port: 8441, listening: true, address: "100.64.0.1", last_error: null });
+    expect(remoteStatus(on, null)).toMatchObject({ listening: false, address: null, last_error: "nectard does not answer on its control socket either" });
+    expect(remoteStatus(on, { pid: 9, nectar_home: "/h", program: null, remote: null }).last_error).toContain("runs an older nectar build");
+    expect(remoteStatus({ remote: { listen: false } } as never, null)).toMatchObject({ listen: false, listening: false, last_error: null });
+  });
+});
+
+describe("tailnet refusal log", () => {
+  it("logs every refusal with the node, its tags and the rule, never the self-check as a refusal, and doctor counts them", async () => {
+    transport = "socket";
+    const events: Record<string, unknown>[] = [];
+    let log: (event: Record<string, unknown>) => void = (event) => events.push(event);
+    const { b, tailnet } = await homes({ remote: { listen: true } }, "127.0.0.3", (event) => log(event));
+    const paths = getPaths(b);
+    await mkdir(paths.logs, { recursive: true });
+    const file = daemonLogger(paths, 10_000_000, () => undefined);
+    log = (event) => {
+      events.push(event);
+      file(event);
+    };
+    const cases: Array<[unknown, Record<string, unknown>, string, string]> = [
+      [whois({ id: "nTAGGED", name: "ci", tags: ["tag:ci"] }), { listen: true }, "remote_refused", "tagged"],
+      [whois({ id: "nOTHER", name: "laptop", user: 2002, login: "other@example.com" }), { listen: true }, "remote_refused", "not_owner"],
+      [whois({ id: "nFRIEND" }), { listen: true, allow: [] }, "remote_refused", "allow_empty"],
+      [whois({ id: "nFRIEND" }), { listen: true, allow: [{ node_id: "nSOMEONE" }] }, "remote_refused", "not_in_allow"],
+      [500, { listen: true }, "remote_refused", "whois_failed"],
+      [whois({ id: "nSELF" }), { listen: true }, "remote_self_check", "self"],
+    ];
+    for (const [identity, remote] of cases) {
+      tailnet.identity = identity;
+      await writeFile(path.join(b, "nectar.json"), JSON.stringify({ tailnet_host: "nodeb", remote }));
+      expect(await codeOf(callRemote("nodeb", "ls", { args: {}, caller: {} }))).toBe("E_FORBIDDEN");
+    }
+    const refusals = events.filter((event) => event.event === "remote_refused" || event.event === "remote_self_check");
+    expect(refusals.map((event) => [event.event, event.rule])).toEqual(cases.map(([, , event, rule]) => [event, rule]));
+    expect(refusals[0]).toMatchObject({ node_name: "ci", node_id: "nTAGGED", tags: ["tag:ci"], login: "owner@example.com", peer_address: "127.0.0.1" });
+    expect(refusals[1]).toMatchObject({ node_id: "nOTHER", login: "other@example.com", user_id: 2002, node_user_id: 2002, owner: OWNER, tags: [] });
+    expect(refusals[4]).toMatchObject({ node_id: null });
+    expect(refusals[4]?.whois).toContain("whois answered 500");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const check = await listenerCheck(paths, { remote: { listen: true } } as never, { hello: () => Promise.resolve(undefined) });
+    expect(check).toMatchObject({ refusals: { count: 5, window_hours: 24, last: { rule: "whois_failed", node_id: null } } });
   });
 });

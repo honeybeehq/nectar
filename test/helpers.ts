@@ -332,7 +332,8 @@ export async function fakeLocalApi(listen: { socket: string } | { tcp: true }, o
       }
       const url = new URL(request.url ?? "/", "http://local-tailscaled.sock");
       if (url.pathname === "/localapi/v0/status") {
-        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(options.status ?? { BackendState: "Running", Self: { DNSName: "fixture.tailtest.ts.net." } }));
+        const status = typeof options.status === "function" ? (options.status as () => unknown)() : options.status;
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(status ?? { BackendState: "Running", Self: { DNSName: "fixture.tailtest.ts.net." } }));
       } else if (url.pathname === "/localapi/v0/whois") {
         const addr = url.searchParams.get("addr") ?? "";
         const found = typeof options.whois === "function" ? options.whois(addr) : options.whois?.[addr];

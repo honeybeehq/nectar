@@ -12,7 +12,7 @@ import { getPaths } from "./paths.js";
 import { DEFAULT_CONFIG } from "./state.js";
 import { debugEnabled, traceTailscale } from "./tailscale.js";
 import { isRef } from "./refs.js";
-import { remotePort, startRemoteListener } from "./remote.js";
+import { remoteStatus, startRemoteListener } from "./remote.js";
 
 const argv = process.argv.slice(2);
 const jsonRequested = argv.includes("--json");
@@ -258,13 +258,13 @@ daemon
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
       traceTailscale(log, { all: debugEnabled() });
       const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
-      const control = await startControlServer(service.paths, { log }).catch((error: unknown) => {
+      const remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
+      const control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
         log({ event: "control_unavailable", message: asNectarError(error).message });
         return undefined;
       });
-      const remote = config.remote?.listen === true ? startRemoteListener(service.paths, log) : undefined;
       const shutdown = async (): Promise<void> => {
-        await remote?.close();
+        await remote.close();
         await control?.close();
         await supervisor.stop();
         await release();
@@ -307,7 +307,8 @@ daemon
     execute("daemon", async () => {
       const service = new NectarService();
       const config = await service.store.readConfig().catch(() => undefined);
-      return { ...(await unitStatus(service.paths)), remote: { listen: config?.remote?.listen === true, port: remotePort() } };
+      const status = await unitStatus(service.paths);
+      return { ...status, remote: remoteStatus(config, status.control) };
     }),
   );
 

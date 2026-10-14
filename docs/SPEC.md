@@ -364,8 +364,28 @@ tailnet port range whose loopback target is dead, §10.2.)
   `remote.listen` is `true` in `nectar.json`; `nectar daemon install --remote` sets it and
   `--no-remote` clears it. nectard then also serves the control API on this node's own
   Tailscale IPv4 address (from tailscaled's LocalAPI status), port **8441**
-  (`NECTAR_REMOTE_PORT` overrides it, for tests). It never binds `0.0.0.0` or `::`. When
-  tailscale is down at start it logs `remote_unavailable` and retries every minute.
+  (`NECTAR_REMOTE_PORT` overrides it, for tests). It never binds `0.0.0.0` or `::`.
+  - Startup never fails silently. With `remote.listen` not `true` when it starts, nectard
+    logs `remote_listen_off` (with the `nectar.json` path it read). Otherwise every attempt
+    reads LocalAPI status (a read that has not finished after 20 s counts as failed; a
+    still-pending read is reused, never stacked) and logs `remote_status` whenever the
+    endpoint, `BackendState` or Tailscale IPs change. An attempt that cannot listen logs
+    `remote_listen_failed` with `reason`: `localapi_unreachable`, `status_error`,
+    `status_timeout`, `not_running` (BackendState is not `Running`), `ipv6_only` (no
+    Tailscale IPv4), `no_tailnet_ip`, `address`, `bind` (with the errno `code`, e.g.
+    `EADDRINUSE`, `EADDRNOTAVAIL`, plus `address` and `port`) or `internal`, and the
+    `message`, `endpoint`, `backend_state` and `ips` it saw. It retries every 30 s for as
+    long as it runs; the same failure is logged again only every 20th attempt (`repeats`).
+  - Once bound it asks WhoIs about its own IPv4 and logs `remote_listen` with `address`,
+    `port`, `endpoint`, `attempt` and `whois` (`"ready"` or the reason WhoIs fails, in which
+    case it refuses every caller). Every 30 s it re-reads status: a new Tailscale IPv4 closes
+    the listener (`remote_listen_closed`, `reason: "address_changed"`) and binds the new one
+    at once, and a WhoIs that was failing logs `remote_whois_ready` when it works again (or
+    `remote_whois_failed` when its reason changes). A listener error after binding logs
+    `remote_listen_closed` with `reason: "server_error"` and retries in 30 s; shutdown logs
+    `reason: "shutdown"`.
+  - nectard's control-socket hello carries `program` (the CLI file it runs) and `remote`:
+    `{listen, listening, address, port, last_error, whois, since}`.
   - Every request, `GET /v1/hello` included, is authenticated before its body is read:
     nectard asks tailscaled `WhoIs(<peer ip>:<peer port>)` of the raw TCP peer through the
     LocalAPI (`/localapi/v0/whois`, at the endpoint found as in "Talking to tailscaled"
@@ -417,9 +437,20 @@ tailnet port range whose loopback target is dead, §10.2.)
     `warnings`, `mesh_error` and `deps` as `{kind}`. Error details are cut to `hint`,
     `refused` and `node_id` (`publish` keeps `log_tail`). In messages, warnings and log
     tails `NECTAR_HOME` reads `$NECTAR_HOME` and every other absolute path reads `<path>`.
-  - Logs: one `remote` event per request with the caller's node ID and login.
+  - Logs: one `remote` event per request with the caller's node ID and login. Every refused
+    request also logs `remote_refused` with `rule`, `op`, `code`, `peer_address`,
+    `node_name`, `node_id`, `login`, `tags`, `user_id`, `node_user_id`, `owner`, `whois`
+    (when WhoIs failed) and `message`, and never a token. `rule` is `whois_failed`,
+    `config_unreadable`, `listener_off`, `tagged`, `no_login`, `owner_unknown` or
+    `not_owner` (no `remote.allow`), `allow_malformed`, `allow_empty` or `not_in_allow`
+    (with `remote.allow`), or `not_publisher` (touch/stop/rm of someone else's env). A
+    caller on this node itself, such as doctor's own probe, logs `remote_self_check`
+    (`rule: "self"`) instead.
 - **Logs.** Events (start, revive, crash_loop, mesh, proxy, proxy_closed, proxy_port_taken,
-  touch, gc, tailscale, error), one JSON line each, go to
+  touch, gc, tailscale, error, control_listen, control, and the tailnet listener's
+  remote_status, remote_listen, remote_listen_failed, remote_listen_closed,
+  remote_listen_off, remote_whois_ready, remote_whois_failed, remote, remote_refused and
+  remote_self_check), one JSON line each, go to
   `~/.nectar/logs/nectard.log` (rotated like serve logs) and to stdout in the foreground.
   Quiet cycles write nothing. A `tailscale` event is written for every failed tailscale
   call nectard makes (status, serve, serve status). A LocalAPI call logs `{api: "localapi",
@@ -1227,7 +1258,10 @@ nectar daemon run [--interval 30s] [--gc-interval 1h]
     # reports unloaded and waited_ms (a warning if it is still loaded);
     # run is the foreground supervisor the unit starts. status adds socket (the control
     # socket path) and control (nectard's hello: api, pid, nectar_home, ops; null when
-    # nothing answers there) and remote ({listen, port}). install --remote turns on the
+    # nothing answers there; also program and remote, see §4.5) and remote ({listen, port,
+    # listening, address, last_error}: listen is nectar.json, the rest is what nectard
+    # reports; last_error also says when nectard does not answer, runs an older build
+    # that reports no listener, or read remote.listen off when it started). install --remote turns on the
     # tailnet listener (remote.listen in nectar.json); --no-remote turns it off.
 
 nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
@@ -1240,7 +1274,11 @@ nectar doctor [--fix [--dry-run]] [--no-daemon [--save]]
     # failed, with the reason; api and localapi as in the tailscale check). doctor asks
     # the listener for /v1/hello from this node: refused as "self" means it listens and
     # WhoIs works, refused as "whois" means it refuses every caller (reason from
-    # nectard.log), no answer is failed with nectard's last remote_unavailable ·
+    # nectard.log), no answer is failed with what nectard's hello says about its listener
+    # and its last remote_listen_failed/closed/off message. The check carries last_event
+    # (the newest listener lifecycle event in nectard.log) and refusals ({count,
+    # window_hours: 24, last: {at, rule, node_name, node_id, login, tags}}; self-checks
+    # are not counted) ·
     # tools env recipes need on PATH and on nectard's PATH · pack store on 8440 · port
     # ranges · pack quota. --fix runs gc, removes orphan entries, releases dead envs,
     # installs or reinstalls nectard and restarts the pack server (testpacks only: with no

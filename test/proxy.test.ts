@@ -137,7 +137,7 @@ describe("touch on request", () => {
     for (const cleanup of cleanups.splice(0)) await cleanup().catch(() => undefined);
   });
 
-  it("touches at most once per env per throttle window, never for assets, without waiting for the touch", async () => {
+  it("touches at most once per env per throttle window, never for assets, without waiting for the touch, and reports a moved upstream", async () => {
     const app = await startApp(4966);
     cleanups.push(async () => stopProcessGroup(app.pgid));
     let release: () => void = () => undefined;
@@ -171,6 +171,10 @@ describe("touch on request", () => {
     await get(4967, "/", { "sec-fetch-dest": "document" });
     expect(touchView).toHaveBeenCalledTimes(2);
     expect(await hub.sync([env])).toEqual([]);
+    const moved = { ...env, urls: { ...env.urls, local: "http://127.0.0.1:4968" }, serve: { cmd: "x", pid: 1, pgid: 1, upstream_port: 4968, tailnet_port: 8443 } };
+    expect(await hub.sync([moved])).toEqual(["ws--main--web"]);
+    expect(await probeProxy(4967, "ws--main--web")).toBe(4968);
+    expect(await hub.sync([moved])).toEqual([]);
     expect(await hub.sync([])).toEqual([]);
     expect(await portOpen(4967)).toBe(false);
   });
@@ -265,6 +269,27 @@ describe("nectard fronting the real service", () => {
     expect(after.serve?.tailnet_port).toBe(before.serve?.tailnet_port);
     expect(after.urls.mesh).toBe(before.urls.mesh);
     expect((await serveCalls(tailscaleLog, after.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${after.serve?.proxy_port}`);
+  });
+
+  it("re-fronts an env whose republish moved it to a new upstream port", async () => {
+    const { service, tailscaleLog, repo } = await liveHarness();
+    const published = (await service.publish({ repo, ttl: "1h" })) as { env: string };
+    cleanups.push(async () => void (await service.remove(published.env, true)));
+    const supervisor = new Supervisor(service, { front: true });
+    cleanups.push(async () => supervisor.stop());
+    await supervisor.sweep(false);
+    const before = await service.store.readEnv(published.env);
+    await stopProcessGroup(before.serve?.pgid ?? 0);
+    const squatter = await startApp(before.serve?.upstream_port ?? 0);
+    cleanups.push(async () => stopProcessGroup(squatter.pgid));
+    await service.publish({ repo, ttl: "1h" });
+    const moved = await service.store.readEnv(published.env);
+    expect(moved.serve?.upstream_port).not.toBe(before.serve?.upstream_port);
+    expect(moved.serve?.proxy_port).toBe(before.serve?.proxy_port);
+    expect((await serveCalls(tailscaleLog, moved.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${moved.serve?.upstream_port}`);
+    await supervisor.sweep(false);
+    expect((await serveCalls(tailscaleLog, moved.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${moved.serve?.proxy_port}`);
+    expect((await get(moved.serve?.proxy_port ?? 0, "/", html)).body).toContain(published.env);
   });
 
   it("gc points the tailnet URL straight at a live app when its proxy is gone", async () => {

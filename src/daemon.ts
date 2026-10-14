@@ -89,8 +89,9 @@ export class ProxyHub {
     const upstream = upstreamOf(record.urls.local, record.serve.upstream_port);
     const existing = this.proxies.get(record.name);
     if (existing !== undefined && (record.serve.proxy_port === undefined || existing.port === record.serve.proxy_port)) {
+      const moved = existing.upstream.port !== upstream.port || existing.upstream.host !== upstream.host;
       existing.upstream = upstream;
-      return false;
+      return moved;
     }
     const port = record.serve.proxy_port ?? (await this.service.assignProxyPort(record.name));
     if (port === undefined) return false;

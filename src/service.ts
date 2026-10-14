@@ -1186,10 +1186,12 @@ export class NectarService {
   // Touch re-arms the env's own TTL (SPEC §4.4), not the default; a busy lock
   // means a publish is mid-flight — skip, the env is active anyway.
   private async touchOnView(record: EnvRecord): Promise<void> {
+    if (record.status === "expired" || record.status === "cold") return;
     const now = new Date();
     const touched = await this.store.updateEnv(
       record.name,
       (current) => {
+        if (current.status === "expired" || current.status === "cold") return;
         current.last_touched_at = now.toISOString();
         current.expires_at = expiresAt(now, current.ttl_ms ?? parseDuration(DEFAULT_TTL));
       },

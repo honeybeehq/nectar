@@ -210,6 +210,8 @@ only when status or reason changes (best-effort lock; a publish in flight wins).
 records from a failed publish or orphan cleanup have no `serve` block and stay `crashed`.
 `gc`'s dead-Serve-proxy check uses the same port retries before tearing down an env.
 
+#### Lifetime
+
 TTL default **7 d** for every mode, per-publish `--ttl 12h|30d`. Viewing an env is
 touch-on-view: `nectar open`, `nectar resolve` and `nectar show <env>` (and desk render, which
 calls `nectar touch` or `resolve` on view) set `expires_at` to now + the env's own TTL, so a
@@ -637,7 +639,7 @@ plus (added post-v0 review, 2026-07-19):
 
 ```bash
 nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
-               [--ttl 7d]  [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
+               [--ttl 7d] [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
@@ -667,6 +669,9 @@ nectar resolve <ref> [--json]
 nectar touch <env|ref> [--ttl <duration>]
     # Re-arms with the env's own TTL; --ttl replaces that TTL from here on. Implicit
     # touches (open/resolve/show) re-arm the env's own TTL, never the 7 d default.
+    # Result expires_at is one ISO string, or an env→ISO map when a bare env name
+    # matched several modes whose expiries differ. Implicit touches skip expired/cold
+    # envs (republish revives them); explicit touch still re-arms them.
 nectar stop <env>            # stop serve process, keep everything; status → stopped
 nectar rm <env> [--force]    # stop + delete worktree/packs/evidence/record (uses trash);
                              # a *serving*/*unhealthy* env refuses without --force (E_USAGE)

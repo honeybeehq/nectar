@@ -238,8 +238,9 @@ describe("static sites", () => {
     expect(stored.worktree).toBe(path.join(state, "work", env));
     expect(stored.serve?.cmd).toContain("static-server");
 
-    const again = await service.publish({ repo: source, ttl: "1h" });
+    const again = await service.publish({ repo: source });
     expect(again).toMatchObject({ env, commit: first.commit, urls: first.urls });
+    expect(new Date(again.expires_at as string).getTime() - Date.now()).toBeGreaterThan(7 * 24 * 60 * 60_000 - 60_000);
 
     await rm(source, { recursive: true, force: true });
     expect(await fetch(local).then(async (response) => response.text())).toContain("<h1>proto</h1>");
@@ -681,6 +682,9 @@ describe("lifecycle, doctor, and cross-machine command adapters", () => {
     expect((await service.gc()).transitions).toEqual([{ env: ignored, action: "expire" }]);
     expect((await service.store.readEnv(viewed)).status).toBe("serving");
     expect((await service.store.readEnv(ignored)).status).toBe("expired");
+    const expiredAt = (await service.store.readEnv(ignored)).expires_at;
+    await service.show(ignored);
+    expect((await service.store.readEnv(ignored)).expires_at).toBe(expiredAt);
 
     const rearmed = await service.touch(ignored);
     expect(new Date(rearmed.expires_at as string).getTime() - Date.now()).toBeLessThanOrEqual(60_000);

@@ -771,8 +771,10 @@ container avoids macOS's prompt for other apps' data, which a LaunchAgent cannot
 whole discovery 10 s; a step that runs out is skipped and recorded, never awaited again
 while its call is still pending. nectard (a service) tries the standalone app's
 `/Library/Tailscale/ipnport` first, then lsof, and never lists the App Store group
-container; an interactive process keeps lsof → group container → macsys → socket. The
-result is cached per process with a 30 s → 5 min re-discovery backoff. **Why:** on mini02
+container. Every other process keeps Tailscale's lsof first, then macsys, and lists the
+container only when nothing else was found, in a child `ls` that is SIGKILLed and let go at
+its bound. The result is cached per process with a 30 s → 5 min re-discovery backoff; a
+401 from a reused discovery's endpoint (a stale proof) discovers again at once. **Why:** on mini02
 nectard logged `status_timeout` 20 s after every start and never listened, while doctor from
 ssh found the LocalAPI. lsof found no proof there, and the group-container `readdir` that
 followed had no timeout: from a LaunchAgent, macOS can hold that read on a privacy prompt
@@ -781,9 +783,13 @@ was never reached (a never-returning `readdir` reproduces exactly that). The lis
 Nectar's own addition: Tailscale's CLI never reads the container, so under launchd it can
 only prompt or fail. macsys goes first there because it is two reads of fixed paths
 without a child process and answers on every standalone-app Mac; on an App Store Mac it is
-one quick ENOENT before lsof. Doing the listing in a child process was rejected: a child
-blocked on the same prompt is no easier to abandon than a pending `readdir`, and skipping
-it is what Tailscale itself does.
+one quick ENOENT before lsof. CLI processes are not reliably told apart from nectard's
+context (an agent started under a launchd-run daemon inherits the same privacy context),
+so for them the listing moves behind macsys, where a standalone-app Mac never reaches it.
+It runs in a child process because a `readdir` that is blocked in the kernel holds one of
+Node's file-system threads, and Node waits for that thread on exit, even through
+`process.exit`. The command would print its result and then hang, and nectard would hang
+on SIGTERM. A child can be killed and unref'd, so the parent stays free to exit.
 
 ## D33 — `[deps]` postgres without Docker: one Nectar-owned local cluster per major, a role and database per env
 

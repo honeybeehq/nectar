@@ -1,4 +1,5 @@
-import { readdir, readFile, readlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readFile, readlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -65,11 +66,43 @@ export const DISCOVERY_BUDGET_MS = 10_000;
 export const REDISCOVER_MIN_MS = 30_000;
 export const REDISCOVER_MAX_MS = 300_000;
 
-const realFs: DiscoveryFs = {
-  readdir: (directory) => readdir(directory),
-  readlink: (file) => readlink(file),
-  readFile: (file) => readFile(file, "utf8"),
-};
+const LS_ERRORS: Array<[RegExp, string]> = [
+  [/Operation not permitted/, "EPERM"],
+  [/Permission denied/, "EACCES"],
+  [/No such file or directory/, "ENOENT"],
+  [/Not a directory/, "ENOTDIR"],
+];
+
+function listInChild(directory: string, timeoutMs: number): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(existsSync("/bin/ls") ? "/bin/ls" : "ls", ["-1A", directory], { stdio: ["ignore", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      child.unref();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(Object.assign(new Error(`listing ${directory} did not finish within ${timeoutMs}ms`), { code: "ETIMEDOUT" }));
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve(Buffer.concat(out).toString().split("\n").filter((name) => name !== ""));
+        return;
+      }
+      const stderr = Buffer.concat(err).toString().trim();
+      const known = LS_ERRORS.find(([pattern]) => pattern.test(stderr));
+      reject(Object.assign(new Error(stderr || `ls exited ${code ?? "on a signal"}`), { code: known?.[1] ?? `ls exited ${code ?? "on a signal"}: ${stderr}` }));
+    });
+  });
+}
 
 let defaultMode: DiscoveryMode = "interactive";
 
@@ -213,8 +246,13 @@ export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<
     return { endpoints: [{ kind: "socket", socket: pinned, source: "env" }], notes: [], steps, mode };
   }
   const platform = options.platform ?? ((env.NECTAR_TEST_DISCOVERY_PLATFORM || undefined) as NodeJS.Platform | undefined) ?? process.platform;
-  const fs: DiscoveryFs = { ...realFs, ...options.fs };
   const stepMs = options.stepTimeoutMs ?? DISCOVERY_STEP_TIMEOUT_MS;
+  const fs: DiscoveryFs = {
+    readdir: (directory) => listInChild(directory, stepMs),
+    readlink: (file) => readlink(file),
+    readFile: (file) => readFile(file, "utf8"),
+    ...options.fs,
+  };
   const deadline = Date.now() + (options.budgetMs ?? DISCOVERY_BUDGET_MS);
   const hang = new Set((env.NECTAR_TEST_DISCOVERY_HANG ?? "").split(",").filter((step) => step !== ""));
   const endpoints: LocalApiEndpoint[] = [];
@@ -277,9 +315,9 @@ export async function discoverLocalApi(options: DiscoveryOptions = {}): Promise<
       record({ step: "group-container", outcome: "skipped", ms: 0, found: 0, note: `group-container: skipped; ${SERVICE_SKIPS_CONTAINER}` });
     } else {
       await lsofStep();
+      await macsysStep();
       if (endpoints.length === 0) await run("group-container", `group-container:${home}`, (stepNotes) => groupContainerProofs(fs, home, stepNotes));
       else record({ step: "group-container", outcome: "skipped", ms: 0, found: 0 });
-      await macsysStep();
     }
   }
   const sockets = options.sockets ?? (platform === "darwin" ? [DARWIN_TAILSCALED_SOCKET] : TAILSCALE_SOCKETS);
@@ -382,13 +420,15 @@ export function discoveryReport(): DiscoveryReport | null {
   return { ...report, steps: [...report.steps], next_discovery_in_ms: next };
 }
 
-async function attempt(endpoint: LocalApiEndpoint, method: string, apiPath: string, options: LocalApiRequestOptions): Promise<LocalApiResponse | string> {
+type Attempt = { ok: true; response: LocalApiResponse } | { ok: false; failure: string; stale: boolean };
+
+async function attempt(endpoint: LocalApiEndpoint, method: string, apiPath: string, options: LocalApiRequestOptions): Promise<Attempt> {
   try {
     const response = await localApiRequest(endpoint, method, apiPath, options);
-    if (endpoint.kind === "tcp" && response.status === 401) return `${describeEndpoint(endpoint)} refused its token (a stale sameuserproof)`;
-    return response;
+    if (endpoint.kind === "tcp" && response.status === 401) return { ok: false, failure: `${describeEndpoint(endpoint)} refused its token (a stale sameuserproof)`, stale: true };
+    return { ok: true, response };
   } catch (error) {
-    return `${describeEndpoint(endpoint)}: ${error instanceof Error ? error.message : String(error)}`;
+    return { ok: false, failure: `${describeEndpoint(endpoint)}: ${error instanceof Error ? error.message : String(error)}`, stale: false };
   }
 }
 
@@ -420,34 +460,47 @@ async function currentDiscovery(envPinned: boolean): Promise<{ discovery: Discov
 
 export async function callLocalApi(method: string, apiPath: string, options: LocalApiRequestOptions = {}): Promise<LocalApiCall> {
   const failures: string[] = [];
+  const tried: LocalApiEndpoint[] = [];
+  let stale = false;
   const envPinned = process.env.NECTAR_TAILSCALE_SOCKET !== undefined && process.env.NECTAR_TAILSCALE_SOCKET !== "";
   const first = pinnedEndpoint ?? (envPinned ? undefined : cachedEndpoint);
   if (first !== undefined) {
-    const response = await attempt(first, method, apiPath, options);
-    if (typeof response !== "string") return { ok: true, endpoint: first, response };
-    if (pinnedEndpoint !== undefined) return { ok: false, reason: `Tailscale LocalAPI unreachable: ${response}` };
+    const result = await attempt(first, method, apiPath, options);
+    if (result.ok) return { ok: true, endpoint: first, response: result.response };
+    if (pinnedEndpoint !== undefined) return { ok: false, reason: `Tailscale LocalAPI unreachable: ${result.failure}` };
     cachedEndpoint = undefined;
-    failures.push(response);
+    failures.push(result.failure);
+    tried.push(first);
+    stale = result.stale;
   }
-  const { discovery, cachedFor } = await currentDiscovery(envPinned);
-  for (const [index, endpoint] of discovery.endpoints.entries()) {
-    if (first !== undefined && sameEndpoint(endpoint, first)) continue;
-    const response = await attempt(endpoint, method, apiPath, options);
-    if (typeof response !== "string") {
-      cachedEndpoint = endpoint;
-      rediscoverMs = REDISCOVER_MIN_MS;
-      if (report !== undefined) report.won = { step: discoveryStepOf(discovery, index) ?? null, endpoint: describeEndpoint(endpoint) };
-      return { ok: true, endpoint, response };
+  for (;;) {
+    const { discovery, cachedFor } = await currentDiscovery(envPinned);
+    for (const [index, endpoint] of discovery.endpoints.entries()) {
+      if (tried.some((done) => sameEndpoint(endpoint, done))) continue;
+      tried.push(endpoint);
+      const result = await attempt(endpoint, method, apiPath, options);
+      if (result.ok) {
+        cachedEndpoint = endpoint;
+        rediscoverMs = REDISCOVER_MIN_MS;
+        if (report !== undefined) report.won = { step: discoveryStepOf(discovery, index) ?? null, endpoint: describeEndpoint(endpoint) };
+        return { ok: true, endpoint, response: result.response };
+      }
+      failures.push(result.failure);
+      stale ||= result.stale;
     }
-    failures.push(response);
+    if (stale && cachedFor !== undefined) {
+      lastDiscovery = undefined;
+      stale = false;
+      continue;
+    }
+    if (lastDiscovery?.discovery === discovery && !lastDiscovery.backedOff) {
+      lastDiscovery.backedOff = true;
+      rediscoverMs = Math.min(rediscoverMs * 2, REDISCOVER_MAX_MS);
+    }
+    if (report !== undefined) report.won = null;
+    const reused = cachedFor === undefined || lastDiscovery === undefined ? [] : [`endpoints from the discovery ${seconds(cachedFor)} ago; the next discovery runs in ${seconds(Math.max(0, lastDiscovery.validMs - cachedFor))}`];
+    return { ok: false, reason: `Tailscale LocalAPI unreachable: ${[...discovery.notes, ...failures, ...reused].join("; ") || "nothing to try"}` };
   }
-  if (lastDiscovery?.discovery === discovery && !lastDiscovery.backedOff) {
-    lastDiscovery.backedOff = true;
-    rediscoverMs = Math.min(rediscoverMs * 2, REDISCOVER_MAX_MS);
-  }
-  if (report !== undefined) report.won = null;
-  const reused = cachedFor === undefined || lastDiscovery === undefined ? [] : [`endpoints from the discovery ${seconds(cachedFor)} ago; the next discovery runs in ${seconds(Math.max(0, lastDiscovery.validMs - cachedFor))}`];
-  return { ok: false, reason: `Tailscale LocalAPI unreachable: ${[...discovery.notes, ...failures, ...reused].join("; ") || "nothing to try"}` };
 }
 
 export function bodyExcerpt(body: string): string {

@@ -224,7 +224,7 @@ describe("LocalAPI discovery", () => {
     expect(found.endpoints).toEqual([{ kind: "tcp", port: 53771, token: TOKEN, source: "app-store" }]);
   });
 
-  it("falls back to listing the group container, then macsys, then the tailscaled socket", async () => {
+  it("falls back to macsys and the tailscaled socket, and lists the group container only when nothing else was found", async () => {
     const home = await tempDir("home");
     const group = path.join(home, "Library", "Group Containers", container);
     await mkdir(group, { recursive: true });
@@ -236,9 +236,22 @@ describe("LocalAPI discovery", () => {
     await writeFile(socket, "");
     const found = await discoverLocalApi({ env: {}, platform: "darwin", home, macsysDir: macsys, sockets: [socket], lsof: () => Promise.resolve("") });
     expect(found.endpoints).toEqual([
-      { kind: "tcp", port: 50001, token: TOKEN, source: "app-store" },
       { kind: "tcp", port: 50002, token: "abcdef", source: "macsys" },
       { kind: "socket", socket, source: "default" },
+    ]);
+    expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
+      ["lsof", "none"],
+      ["macsys", "found"],
+      ["group-container", "skipped"],
+      ["socket", "found"],
+    ]);
+    const listed = await discoverLocalApi({ env: {}, platform: "darwin", home, macsysDir: "/nonexistent", sockets: [], lsof: () => Promise.resolve("") });
+    expect(listed.endpoints).toEqual([{ kind: "tcp", port: 50001, token: TOKEN, source: "app-store" }]);
+    expect(listed.steps.map((step) => [step.step, step.outcome])).toEqual([
+      ["lsof", "none"],
+      ["macsys", "none"],
+      ["group-container", "found"],
+      ["socket", "none"],
     ]);
   });
 
@@ -282,20 +295,21 @@ describe("LocalAPI discovery bounds", () => {
     };
   }
 
-  it("skips a group-container listing that never returns and still finds macsys within the bound", async () => {
+  it("skips a group-container listing that never returns and still reaches the socket within the bound", async () => {
     const home = await homeWithContainer();
-    const macsys = await macsysDir();
+    const socket = path.join(await tempDir("sock"), "tailscaled.socket");
+    await writeFile(socket, "");
     const calls: string[] = [];
-    const options = { env: {}, platform: "darwin" as const, home, macsysDir: macsys, sockets: [], lsof: () => Promise.resolve(""), fs: { readdir: hangingReaddir(home, calls) }, stepTimeoutMs: 200 };
+    const options = { env: {}, platform: "darwin" as const, home, macsysDir: "/nonexistent", sockets: [socket], lsof: () => Promise.resolve(""), fs: { readdir: hangingReaddir(home, calls) }, stepTimeoutMs: 200 };
     const started = Date.now();
     const found = await discoverLocalApi(options);
     expect(Date.now() - started).toBeLessThan(1_000);
-    expect(found.endpoints).toEqual([{ kind: "tcp", port: 50002, token: "abcdef", source: "macsys" }]);
+    expect(found.endpoints).toEqual([{ kind: "socket", socket, source: "default" }]);
     expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
       ["lsof", "none"],
+      ["macsys", "none"],
       ["group-container", "timeout"],
-      ["macsys", "found"],
-      ["socket", "none"],
+      ["socket", "found"],
     ]);
     expect(found.notes.join("\n")).toContain("group-container: did not finish within 0.2s, so it was skipped");
 
@@ -303,6 +317,16 @@ describe("LocalAPI discovery bounds", () => {
     expect(again.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "stuck", ms: 0 });
     expect(again.endpoints).toEqual(found.endpoints);
     expect(calls).toHaveLength(1);
+  });
+
+  it("lists the group container in a child process that it can abandon", async () => {
+    const home = await homeWithContainer();
+    await writeFile(path.join(home, "Library", "Group Containers", container, `sameuserproof-50009-${TOKEN}`), "");
+    const found = await discoverLocalApi({ env: {}, platform: "darwin", home, macsysDir: "/nonexistent", sockets: [], lsof: () => Promise.resolve("") });
+    expect(found.endpoints).toEqual([{ kind: "tcp", port: 50009, token: TOKEN, source: "app-store" }]);
+    const missing = await discoverLocalApi({ env: {}, platform: "darwin", home: await tempDir("home"), macsysDir: "/nonexistent", sockets: [], lsof: () => Promise.resolve("") });
+    expect(missing.steps.find((step) => step.step === "group-container")).toMatchObject({ outcome: "none" });
+    expect(missing.notes.join("\n")).not.toContain("cannot list");
   });
 
   it("kills an lsof that never exits and moves on to the next step", async () => {
@@ -367,8 +391,8 @@ describe("LocalAPI discovery bounds", () => {
     expect(Date.now() - started).toBeLessThan(900);
     expect(found.steps.map((step) => [step.step, step.outcome])).toEqual([
       ["lsof", "timeout"],
-      ["group-container", "timeout"],
-      ["macsys", "skipped"],
+      ["macsys", "timeout"],
+      ["group-container", "skipped"],
       ["socket", "skipped"],
     ]);
   });
@@ -405,6 +429,25 @@ describe("LocalAPI discovery bounds", () => {
     expect(discoveryReport()).toMatchObject({ won: null });
     expect(discoveryReport()?.next_discovery_in_ms).toBeGreaterThan(0);
     expect(discoveryReport()?.next_discovery_in_ms).toBeLessThanOrEqual(30_000);
+  });
+
+  it("discovers again at once when a cached endpoint's token went stale", async () => {
+    const api = await fakeLocalApi({ tcp: true }, { token: "abcdef" });
+    servers.push(api);
+    const macsys = await tempDir("macsys");
+    await symlink(String(api.port), path.join(macsys, "ipnport"));
+    const proof = path.join(macsys, `sameuserproof-${api.port}`);
+    await writeFile(proof, "0ld0ld\n");
+    vi.stubEnv("NECTAR_TAILSCALE_SOCKET", "");
+    vi.stubEnv("NECTAR_TEST_DISCOVERY_PLATFORM", "darwin");
+    vi.stubEnv("NECTAR_TEST_LSOF_BIN", await fakeExecutable(await tempDir("lsof-bin"), "lsof", "exit 0"));
+    vi.stubEnv("NECTAR_TEST_MACSYS_DIR", macsys);
+    vi.stubEnv("HOME", await tempDir("home"));
+    const stale = await readStatus();
+    expect(stale.ok ? "" : stale.reason).toContain("refused its token (a stale sameuserproof)");
+    await writeFile(proof, "abcdef\n");
+    expect(await readStatus()).toMatchObject({ ok: true, endpoint: { source: "macsys" } });
+    expect(discoveryReport()).toMatchObject({ won: { step: "macsys" } });
   });
 
   it("backs off once per failed discovery, however many callers shared it", async () => {

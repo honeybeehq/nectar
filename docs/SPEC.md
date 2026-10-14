@@ -529,8 +529,12 @@ shows the extension holding open; failing that, a listing of
 `~/Library/Group Containers/*.io.tailscale.ipn.macos/`; the standalone app's
 `/Library/Tailscale/ipnport` link and `sameuserproof-<port>`; then `/var/run/tailscaled.socket`.
 On Linux: `/var/run/tailscale/tailscaled.sock`, then `/run/tailscale/tailscaled.sock`.
-nectard (`daemon run`, a LaunchAgent on macOS) discovers as a service: macsys first, then
-lsof, and it never lists the group container (D32 amendment). Every discovery step (`env`,
+Every process discovers in this order on macOS: lsof, then macsys, then, only when neither
+found anything, the group-container listing, then the socket. nectard (`daemon run`, a
+LaunchAgent on macOS) discovers as a service: macsys first, then lsof, and it never lists
+the group container (D32 amendment). The listing runs `/bin/ls` in a child process that is
+SIGKILLed and let go at the step's bound, so a listing blocked by macOS privacy protection
+never keeps a Nectar process from exiting. Every discovery step (`env`,
 `lsof`, `group-container`, `macsys`, `socket`) gets 3 s and the whole discovery 10 s; a
 step that runs out is recorded as `timeout` and skipped, and a step whose earlier call
 has still not returned is not started again (`stuck`), so a blocked file-system call
@@ -538,7 +542,8 @@ costs one worker thread once, not one per retry. A step left with no budget is
 `skipped`. lsof is killed at its 3 s. The discovery is cached in the process: an endpoint
 that answers is reused until it fails, and when none answers, the same endpoints are
 retried without a new discovery for 30 s, doubling to at most 5 min, back to 30 s once
-one answers. doctor's `tailscale` and `remote` checks carry `discovery`: `{mode, at,
+one answers. A port that answers 401 to a reused discovery's token means the proof
+changed (Tailscale restarted), so Nectar discovers again at once. doctor's `tailscale` and `remote` checks carry `discovery`: `{mode, at,
 steps: [{step, outcome, ms, found, note?}], running, won: {step, endpoint} | null,
 next_discovery_in_ms}`, and the tailscale message names the steps, e.g. `(service
 discovery: macsys found 1 (answered), lsof none, group-container skipped, socket

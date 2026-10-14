@@ -140,8 +140,9 @@ import {
   shutdownSim,
 } from "./sim.js";
 import { ensureAxHelper, findAppPid } from "./ax.js";
-import { exposureSub, relayAdd, relayHealth, relayRm } from "./relay.js";
+import { exposureSub, relayAdd, relaydCreate, relaydDelete, relaydMine, relaydName, relaydRotate, relaydUpdate, relayHealth, relayRm, usesRelayd, type RelaydRoute } from "./relay.js";
 import type {
+  ExposureTarget,
   DepRecord,
   DesktopRecipe,
   DevRecipe,
@@ -181,6 +182,7 @@ interface PublishOptions {
   host?: string;
   local?: boolean;
   received?: boolean;
+  public?: boolean;
 }
 
 interface PublishShape {
@@ -255,6 +257,7 @@ interface GcReport {
   packs_pruned: Array<{ file: string; size_bytes: number }>;
   staging_pruned: string[];
   evidence_pruned: string[];
+  exposures: Array<{ env: string; action: "patched" | "unchanged" | "revoked" | "unreachable" | "skipped"; reason?: string; expires_at?: string }>;
   ran_at: string;
 }
 
@@ -287,6 +290,21 @@ interface Diagnosis {
   nectard: NectardState;
   packServerLive: boolean;
   proxyPresent: boolean;
+}
+
+const SECRET_FIELDS = ["share_url", "share_note", "password", "credentials"];
+
+function shareNote(password: string): string {
+  return `Open the url and sign in as reviewer with password ${password}. Share this only with the person who should see the preview.`;
+}
+
+export function defaultExposure(exposures: Record<string, ExposureTarget> | undefined): string {
+  const entries = Object.entries(exposures ?? {});
+  const marked = entries.filter(([, target]) => target.default === true);
+  if (marked.length > 1) throw new NectarError("E_EXPOSE", `More than one exposure target is marked default (${marked.map(([name]) => name).join(", ")})`);
+  const chosen = marked[0] ?? (entries.length === 1 ? entries[0] : entries.find(([name]) => name === "site"));
+  if (chosen === undefined) throw new NectarError("E_EXPOSE", "No default exposure target in machine config (~/.nectar/nectar.json → exposures, mark one \"default\": true)");
+  return chosen[0];
 }
 
 const DEAD_STATUSES: ReadonlySet<EnvStatus> = new Set(["expired", "cold", "stopped", "crashed"]);
@@ -394,16 +412,16 @@ export class NectarService {
     if (options.host !== undefined && options.local === true) throw new NectarError("E_USAGE", "--host and --local exclude each other");
     if (options.host !== undefined && !(await this.isLocalHost(options.host))) return this.publishRemote(options.host, options);
     const placement = options.host === undefined ? await this.place(options) : undefined;
-    if (placement === undefined) return this.publishHere(options, ttlMs);
+    if (placement === undefined) return this.publishPublic(await this.publishHere(options, ttlMs), options);
     const placed = { placed_on: placement.host ?? (await this.identity()).host, placement_reason: placement.reason };
-    if (placement.host === undefined) return { ...(await this.publishHere(options, ttlMs)), ...placed };
+    if (placement.host === undefined) return { ...(await this.publishPublic(await this.publishHere(options, ttlMs), options)), ...placed };
     let shipment: Shipment;
     try {
       shipment = await this.shipment(options);
     } catch (error) {
       if (!(error instanceof NectarError)) throw error;
       const refusal = { placed_on: (await this.identity()).host, placement_reason: `not shipped to ${placement.host}: ${error.message}; published on this host` };
-      return { ...(await this.publishHere(options, ttlMs)), ...refusal };
+      return { ...(await this.publishPublic(await this.publishHere(options, ttlMs), options)), ...refusal };
     }
     const result = await this.ship(placement.host, shipment);
     if (options.dryRun !== true && placement.key !== undefined && this.readOnly === undefined && typeof result.env === "string") {
@@ -414,6 +432,32 @@ export class NectarService {
       });
     }
     return { ...result, ...placed };
+  }
+
+  private async publishPublic(result: Record<string, unknown>, options: PublishOptions): Promise<Record<string, unknown>> {
+    if (options.public !== true || options.dryRun === true || typeof result.env !== "string") return result;
+    const config = await this.store.readConfig();
+    const to = defaultExposure(config.exposures);
+    let exposed: Record<string, unknown>;
+    try {
+      exposed = await this.expose(result.env, { to, gate: "password" });
+    } catch (error) {
+      const failure = asNectarError(error);
+      throw new NectarError(failure.code, `Published ${typeof result.ref === "string" ? result.ref : result.env}, but exposing it publicly failed: ${failure.message}`, {
+        ...failure.details,
+        env: result.env,
+        ...(typeof result.ref === "string" ? { ref: result.ref } : {}),
+      });
+    }
+    const details = Object.fromEntries(Object.entries(exposed).filter(([key]) => !["env", "url", "share_url", "packet_fields", "secret"].includes(key)));
+    return {
+      ...result,
+      url: exposed.url,
+      share_url: exposed.share_url,
+      public: { target: to, ...details },
+      packet_fields: exposed.packet_fields,
+      secret: ["share_url", "public.share_note", "public.password", "public.credentials"],
+    };
   }
 
   private async publishHere(options: PublishOptions, ttlMs: number): Promise<Record<string, unknown>> {
@@ -675,6 +719,7 @@ export class NectarService {
       verify: options.verify,
       dry_run: options.dryRun,
       fresh: options.fresh,
+      public: options.public,
     };
     const site = await this.staticCandidate(options);
     const target = path.resolve(options.repo ?? process.cwd());
@@ -2951,25 +2996,30 @@ export class NectarService {
     if (record.exposure === undefined) return;
     const config = await this.store.readConfig();
     const target = config.exposures?.[record.exposure.target];
-    if (target !== undefined) await relayRm(target, record.exposure.sub);
+    if (target !== undefined && record.exposure.revoked_at === undefined) {
+      if (record.exposure.control === "relayd" || usesRelayd(target)) await relaydDelete(target, record.exposure.sub);
+      else await relayRm(target, record.exposure.sub);
+    }
     delete record.exposure;
     record.urls.public = null;
   }
 
   async expose(
     input: string,
-    options: { to: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean },
+    options: { to?: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean; rotate?: boolean },
   ): Promise<Record<string, unknown>> {
     if (isRef(input)) {
       const parsed = parseRef(input);
       if (!(await this.isLocalHost(parsed.host))) {
         const flags = [
-          "expose", parsed.env, "--to", options.to, "--json",
+          "expose", parsed.env, "--json",
+          ...(options.to === undefined ? [] : ["--to", options.to]),
           ...(options.gate === undefined ? [] : ["--gate", options.gate]),
           ...(options.password === undefined ? [] : ["--password", options.password]),
           ...(options.public === true ? ["--public"] : []),
           ...(options.ttl === undefined ? [] : ["--ttl", options.ttl]),
           ...(options.exposeInteractive === true ? ["--expose-interactive"] : []),
+          ...(options.rotate === true ? ["--rotate"] : []),
         ];
         return this.remoteResult(parsed.host, flags);
       }
@@ -2978,9 +3028,10 @@ export class NectarService {
     const name = validateEnvName(input);
     return this.store.withLock(name, async () => {
       const config = await this.store.readConfig();
-      const target = config.exposures?.[options.to];
+      const to = options.to ?? defaultExposure(config.exposures);
+      const target = config.exposures?.[to];
       if (target === undefined) {
-        throw new NectarError("E_EXPOSE", `No exposure target '${options.to}' in machine config (~/.nectar/nectar.json → exposures)`);
+        throw new NectarError("E_EXPOSE", `No exposure target '${to}' in machine config (~/.nectar/nectar.json → exposures)`);
       }
       if (target.kind !== "relay") throw new NectarError("E_EXPOSE", `Exposure kind '${target.kind}' is not implemented in v0.2`);
       const record = await this.refreshLiveness(await this.store.readEnv(name));
@@ -3001,6 +3052,8 @@ export class NectarService {
       if (isPublic && options.public !== true) {
         throw new NectarError("E_EXPOSE", "--gate none exposes with no auth; pass --public to confirm");
       }
+      if (usesRelayd(target)) return this.exposeViaRelayd(record, to, target, upstream, gate, options);
+      if (options.rotate === true) throw new NectarError("E_USAGE", "--rotate needs a relay with control: \"relayd\"");
       const password = gate === "password" ? options.password ?? crypto.randomBytes(9).toString("base64url") : undefined;
       const expiresEpoch = options.ttl
         ? Math.floor((Date.now() + parseDuration(options.ttl, "ttl")) / 1000)
@@ -3008,7 +3061,7 @@ export class NectarService {
       const sub = record.exposure?.sub ?? exposureSub(record, isPublic);
       const added = await relayAdd({ target, sub, upstream, expiresEpoch, gate, ...(password === undefined ? {} : { password }) });
       record.exposure = {
-        target: options.to,
+        target: to,
         kind: target.kind,
         sub,
         url: added.url,
@@ -3020,12 +3073,130 @@ export class NectarService {
       return {
         env: record.name,
         url: added.url,
+        share_url: added.url,
         gate,
-        ...(password === undefined ? {} : { password, credentials: { user: "reviewer", password } }),
+        ...(password === undefined ? {} : { password, credentials: { user: "reviewer", password }, share_note: shareNote(password) }),
         expires_at: record.exposure.expires_at,
+        secret: SECRET_FIELDS,
         packet_fields: this.packetFields(record),
       };
     });
+  }
+
+  private async exposeViaRelayd(
+    record: EnvRecord,
+    to: string,
+    target: ExposureTarget,
+    upstream: string,
+    gate: "password" | "none",
+    options: { password?: string; ttl?: string; rotate?: boolean },
+  ): Promise<Record<string, unknown>> {
+    const fixed = options.ttl !== undefined;
+    const expiresEpoch = fixed
+      ? Math.floor((Date.now() + parseDuration(options.ttl ?? "", "ttl")) / 1000)
+      : Math.floor(new Date(record.expires_at).getTime() / 1000);
+    const current = record.exposure;
+    let route: RelaydRoute | "gone" = "gone";
+    let reused = false;
+    if (current !== undefined && current.revoked_at === undefined && current.target === to && current.control === "relayd") {
+      if (options.password !== undefined) throw new NectarError("E_USAGE", `'${record.name}' is already exposed at ${current.url}; pass --rotate for a new password, or unexpose it first`);
+      route = await relaydUpdate(target, current.sub, { expiresEpoch, gate });
+      if (route !== "gone" && options.rotate === true && route.password === undefined) route = await relaydRotate(target, current.sub);
+      reused = route !== "gone";
+    } else if (current !== undefined) {
+      await this.tearDownExposure(record).catch(() => undefined);
+    }
+    if (route === "gone") {
+      route = await relaydCreate(target, { name: relaydName(record), upstream, expiresEpoch, gate, ...(options.password === undefined ? {} : { password: options.password }) });
+    }
+    const password = route.password ?? (reused || gate === "none" ? undefined : options.password);
+    record.exposure = {
+      target: to,
+      kind: target.kind,
+      sub: route.sub,
+      url: route.url,
+      gate: route.gate,
+      expires_at: route.expires_at,
+      control: "relayd",
+      ...(fixed ? { fixed_ttl: true } : {}),
+      cap_at: route.cap_at,
+    };
+    record.urls.public = route.url;
+    await this.store.writeEnv(record);
+    return {
+      env: record.name,
+      url: route.url,
+      share_url: route.url,
+      gate: route.gate,
+      ...(password === undefined ? {} : { password, credentials: { user: "reviewer", password }, share_note: shareNote(password) }),
+      ...(reused ? { reused: true, ...(password === undefined && route.gate === "password" ? { password_unchanged: true } : {}) } : {}),
+      expires_at: route.expires_at,
+      cap_at: route.cap_at,
+      secret: SECRET_FIELDS,
+      packet_fields: this.packetFields(record),
+    };
+  }
+
+  private async syncExposures(config: MachineConfig): Promise<GcReport["exposures"]> {
+    const synced: GcReport["exposures"] = [];
+    const byTarget = new Map<string, EnvRecord[]>();
+    for (const record of await this.store.listEnvs()) {
+      const exposure = record.exposure;
+      if (exposure?.control !== "relayd" || exposure.revoked_at !== undefined) continue;
+      byTarget.set(exposure.target, [...(byTarget.get(exposure.target) ?? []), record]);
+    }
+    for (const [name, records] of byTarget) {
+      const target = config.exposures?.[name];
+      if (target === undefined || !usesRelayd(target)) continue;
+      let listing: Awaited<ReturnType<typeof relaydMine>>;
+      try {
+        listing = await relaydMine(target);
+      } catch (error) {
+        const reason = asNectarError(error).message;
+        synced.push(...records.map((record) => ({ env: record.name, action: "unreachable" as const, reason })));
+        continue;
+      }
+      for (const snapshot of records) {
+        try {
+          await this.store.withLock(snapshot.name, async () => {
+            const record = await this.store.readEnv(snapshot.name);
+            const exposure = record.exposure;
+            if (exposure?.control !== "relayd" || exposure.revoked_at !== undefined || exposure.target !== name) return;
+            const revokedBy = listing.revoked.get(exposure.sub) ?? (listing.live.has(exposure.sub) ? undefined : "gone");
+            const markRevoked = async (reason: string): Promise<void> => {
+              exposure.revoked_at = new Date().toISOString();
+              exposure.revoked_reason = reason;
+              record.urls.public = null;
+              await this.store.writeEnv(record);
+              synced.push({ env: record.name, action: "revoked", reason });
+            };
+            if (revokedBy !== undefined) {
+              await markRevoked(revokedBy);
+              return;
+            }
+            const live = listing.live.get(exposure.sub);
+            const want = Math.min(Math.floor(new Date(record.expires_at).getTime() / 1000), Math.floor(new Date(live?.cap_at ?? record.expires_at).getTime() / 1000));
+            const have = Math.floor(new Date(live?.expires_at ?? exposure.expires_at).getTime() / 1000);
+            if (exposure.fixed_ttl === true || Math.abs(want - have) < 60 || want * 1000 <= Date.now()) {
+              synced.push({ env: record.name, action: "unchanged", expires_at: live?.expires_at ?? exposure.expires_at });
+              return;
+            }
+            const updated = await relaydUpdate(target, exposure.sub, { expiresEpoch: want });
+            if (updated === "gone") {
+              await markRevoked("gone");
+              return;
+            }
+            exposure.expires_at = updated.expires_at;
+            exposure.cap_at = updated.cap_at;
+            await this.store.writeEnv(record);
+            synced.push({ env: record.name, action: "patched", expires_at: updated.expires_at });
+          });
+        } catch (error) {
+          synced.push({ env: snapshot.name, action: "skipped", reason: asNectarError(error).message });
+        }
+      }
+    }
+    return synced;
   }
 
   async unexpose(input: string): Promise<Record<string, unknown>> {
@@ -3038,6 +3209,13 @@ export class NectarService {
     return this.store.withLock(name, async () => {
       const record = await this.store.readEnv(name);
       if (record.exposure === undefined) return { env: record.name, unexposed: false };
+      if (record.exposure.revoked_at !== undefined) {
+        const was = record.exposure.url;
+        delete record.exposure;
+        record.urls.public = null;
+        await this.store.writeEnv(record);
+        return { env: record.name, unexposed: true, was, already_revoked: true };
+      }
       const url = record.exposure.url;
       await this.tearDownExposure(record);
       await this.store.writeEnv(record);
@@ -3130,6 +3308,7 @@ export class NectarService {
     const packPrunes = selectPackPrunes(candidates, config.pack_quota_bytes);
     const staleStaging = await findStaleStaging(this.paths.packs, now.getTime() - 60 * 60_000);
     const evidencePrunes = await selectEvidencePrunes(this.paths.evidence, config.evidence_quota_bytes);
+    const exposures = options.dryRun === true ? [] : await this.syncExposures(config);
     if (!options.dryRun) {
       await trashPaths([...packPrunes.map((file) => file.path), ...staleStaging, ...evidencePrunes], this.paths.root);
       // Re-read before stamping — doctor --fix may have registered the pack
@@ -3145,6 +3324,7 @@ export class NectarService {
       packs_pruned: packPrunes.map((file) => ({ file: path.relative(this.paths.root, file.path), size_bytes: file.size })),
       staging_pruned: staleStaging.map((file) => path.relative(this.paths.root, file)),
       evidence_pruned: evidencePrunes.map((file) => path.relative(this.paths.root, file)),
+      exposures,
       ran_at: now.toISOString(),
     };
   }

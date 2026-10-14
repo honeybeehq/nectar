@@ -2,7 +2,7 @@
 # Set up your own <domain>.site preview relay. Idempotent — safe to re-run. Run as root
 # on the relay host (needs: a public IP, ports 80/443 free-or-Caddy, tailscale joined).
 #
-#   ./install.sh <domain>                 # install binary(if needed)+script+routes+cron+conf
+#   ./install.sh <domain>                 # install caddy (if needed) and the routes dir; then ./install-relayd.sh
 #   ./install.sh <domain> --with-cert     # also append the *.<domain> wildcard block (needs the token)
 #
 # Two things you provide once (the installer prints these too):
@@ -13,7 +13,6 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 CADDYFILE=/etc/caddy/Caddyfile
 ROUTES=/etc/caddy/nctr-routes
-CONF=/etc/nectar-relay.conf
 
 DOMAIN="${1:-}"
 WITH_CERT="${2:-}"
@@ -36,16 +35,8 @@ ExecReload=/usr/local/bin/caddy reload --config $CADDYFILE --force
 EnvironmentFile=-/etc/caddy/nctr.env
 EOF
 
-echo "== nectar-relay command + routes dir + conf ($DOMAIN) =="
-install -m0755 "$here/nectar-relay" /usr/local/bin/nectar-relay
+echo "== routes dir =="
 mkdir -p "$ROUTES"
-printf 'NECTAR_RELAY_DOMAIN=%s\n' "$DOMAIN" > "$CONF"   # bare `nectar-relay ls` knows its domain
-
-echo "== hourly prune (belt-and-braces TTL teardown) =="
-cat > /etc/cron.d/nctr-relay-prune <<EOF
-# drop expired preview routes even if the publisher never called unexpose
-17 * * * * root /usr/local/bin/nectar-relay prune >/dev/null 2>&1
-EOF
 
 if [[ "$WITH_CERT" == "--with-cert" ]]; then
   echo "== *.$DOMAIN wildcard site block =="
@@ -61,7 +52,7 @@ systemctl daemon-reload
 systemctl restart caddy   # restart (not reload) so a freshly-written nctr.env is picked up
 sleep 2
 systemctl is-active caddy
-echo "relay ready for *.$DOMAIN. health: $(/usr/local/bin/nectar-relay health)"
+echo "caddy ready for *.$DOMAIN. Next: ./install-relayd.sh $DOMAIN (the route service, D35)"
 if [[ "$WITH_CERT" != "--with-cert" ]]; then
   echo
   echo "next: point DNS  *.$DOMAIN A <this-host-public-ip>  (DNS-only), then:"

@@ -12,7 +12,7 @@ import type { ListenerState } from "./remote.js";
 import type { Publisher } from "./types.js";
 
 export const CONTROL_API = 1;
-export const CONTROL_OPS = ["publish", "ls", "show", "resolve", "touch", "stop", "rm"] as const;
+export const CONTROL_OPS = ["publish", "ls", "show", "resolve", "touch", "stop", "rm", "expose", "unexpose"] as const;
 export type ControlOp = (typeof CONTROL_OPS)[number];
 
 export const DAEMON_HINT = "nectar daemon install";
@@ -61,7 +61,7 @@ type ArgSpec = Record<string, "string" | "boolean">;
 
 const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   publish: {
-    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", host: "string", local: "boolean" },
+    spec: { path: "string", mode: "string", branch: "string", ttl: "string", worktree: "string", packet: "string", verify: "boolean", name: "string", dry_run: "boolean", fresh: "boolean", host: "string", local: "boolean", public: "boolean" },
     required: ["path"],
   },
   ls: { spec: { mode: "string", status: "string", host: "string" }, required: [] },
@@ -70,6 +70,11 @@ const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   touch: { spec: { target: "string", ttl: "string" }, required: ["target"] },
   stop: { spec: { env: "string" }, required: ["env"] },
   rm: { spec: { env: "string", force: "boolean" }, required: ["env"] },
+  expose: {
+    spec: { env: "string", to: "string", gate: "string", password: "string", public: "boolean", ttl: "string", expose_interactive: "boolean", rotate: "boolean" },
+    required: ["env"],
+  },
+  unexpose: { spec: { env: "string" }, required: ["env"] },
 };
 
 function checkArgs(op: ControlOp, args: unknown): Record<string, string | boolean> {
@@ -169,6 +174,7 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
         fresh: flag("fresh"),
         host: text("host"),
         local: flag("local"),
+        public: flag("public"),
       };
       return { ...(await service.publish(Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)))), via: "nectard" };
     }
@@ -184,6 +190,27 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
       return service.stop(target);
     case "rm":
       return service.remove(target, flag("force") ?? false);
+    case "expose": {
+      const gate = text("gate");
+      if (gate !== undefined && gate !== "password" && gate !== "none") throw new NectarError("E_USAGE", "gate must be 'password' or 'none'");
+      const to = text("to");
+      const password = text("password");
+      const ttl = text("ttl");
+      const open = flag("public");
+      const interactive = flag("expose_interactive");
+      const rotate = flag("rotate");
+      return service.expose(target, {
+        ...(to === undefined ? {} : { to }),
+        ...(gate === undefined ? {} : { gate }),
+        ...(password === undefined ? {} : { password }),
+        ...(open === undefined ? {} : { public: open }),
+        ...(ttl === undefined ? {} : { ttl }),
+        ...(interactive === undefined ? {} : { exposeInteractive: interactive }),
+        ...(rotate === undefined ? {} : { rotate }),
+      });
+    }
+    case "unexpose":
+      return service.unexpose(target);
   }
 }
 

@@ -100,10 +100,11 @@ program
   .option("--fresh", "drop and recreate the env's [deps] databases (and re-run the seed)")
   .option("--host <node>", "ship the committed tree (or static dir) to another node's nectard and publish there")
   .option("--local", "publish on this host even when a pool is configured")
+  .option("--public", "also expose it on the internet through the default exposure target, gated")
   .action(
     async (
       target: string | undefined,
-      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean; host?: string; local?: boolean },
+      options: { mode?: string; branch?: string; ttl?: string; worktree?: string; packet?: string; verify?: boolean; name?: string; dryRun?: boolean; fresh?: boolean; host?: string; local?: boolean; public?: boolean },
     ) =>
       execute("publish", async () => {
         const globals = program.opts<{ repo: string }>();
@@ -122,6 +123,7 @@ program
           fresh: options.fresh,
           host: options.host,
           local: options.local,
+          public: options.public,
         };
         return routed("publish", args, async (service) => service.publish({
           repo: source,
@@ -136,6 +138,7 @@ program
           ...(options.fresh === undefined ? {} : { fresh: options.fresh }),
           ...(options.host === undefined ? {} : { host: options.host }),
           ...(options.local === undefined ? {} : { local: options.local }),
+          ...(options.public === undefined ? {} : { public: options.public }),
         }), options.host !== undefined);
       }),
   );
@@ -200,29 +203,36 @@ program
 program
   .command("expose <env-or-ref>")
   .description("expose a serving env on the public internet through a configured relay")
-  .requiredOption("--to <target>", "exposures.<name> from machine config (e.g. site)")
+  .option("--to <target>", "exposures.<name> from machine config (default: the target marked default)")
   .addOption(new Option("--gate <gate>", "password or none").choices(["password", "none"]))
   .option("--password <password>", "explicit gate password (default: generated)")
   .option("--public", "confirm an ungated (--gate none) exposure")
   .option("--ttl <duration>", "route lifetime (default: the env's own expiry)")
   .option("--expose-interactive", "allow exposing an interactive iOS stream")
-  .action(async (input: string, options: { to: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean }) =>
+  .option("--rotate", "relayd: replace the gate password of a live exposure")
+  .action(async (input: string, options: { to?: string; gate?: "password" | "none"; password?: string; public?: boolean; ttl?: string; exposeInteractive?: boolean; rotate?: boolean }) =>
     execute("expose", async () =>
-      new NectarService().expose(input, {
-        to: options.to,
-        ...(options.gate === undefined ? {} : { gate: options.gate }),
-        ...(options.password === undefined ? {} : { password: options.password }),
-        ...(options.public === undefined ? {} : { public: options.public }),
-        ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
-        ...(options.exposeInteractive === undefined ? {} : { exposeInteractive: options.exposeInteractive }),
-      }),
+      routed(
+        "expose",
+        { env: input, to: options.to, gate: options.gate, password: options.password, public: options.public, ttl: options.ttl, expose_interactive: options.exposeInteractive, rotate: options.rotate },
+        async (service) =>
+          service.expose(input, {
+            ...(options.to === undefined ? {} : { to: options.to }),
+            ...(options.gate === undefined ? {} : { gate: options.gate }),
+            ...(options.password === undefined ? {} : { password: options.password }),
+            ...(options.public === undefined ? {} : { public: options.public }),
+            ...(options.ttl === undefined ? {} : { ttl: options.ttl }),
+            ...(options.exposeInteractive === undefined ? {} : { exposeInteractive: options.exposeInteractive }),
+            ...(options.rotate === undefined ? {} : { rotate: options.rotate }),
+          }),
+      ),
     ),
   );
 
 program
   .command("unexpose <env-or-ref>")
   .description("remove an env's public route")
-  .action(async (input: string) => execute("unexpose", async () => new NectarService().unexpose(input)));
+  .action(async (input: string) => execute("unexpose", async () => routed("unexpose", { env: input }, async (service) => service.unexpose(input))));
 
 program
   .command("gc")

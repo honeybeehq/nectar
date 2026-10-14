@@ -383,12 +383,14 @@ describe("route selection", () => {
       () => selectRoute("publish", paths, { socket: "/s", hello: none, writable: readOnly }),
       () => selectRoute("touch", paths, { socket: "/s", hello: hello("/other"), writable: readOnly }),
       () => selectRoute("rm", paths, { socket: "/s", hello: hello("/srv/nectar", ["ls"]), writable: readOnly }),
-      () => selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly }),
+      () => selectRoute("open", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly }),
+      () => selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar", ["publish", "ls"]), writable: readOnly }),
     ];
     for (const failure of failures) {
       await expect(failure()).rejects.toMatchObject({ code: "E_DAEMON", details: { hint: "nectar daemon install" } });
     }
-    expect(await codeOf(selectRoute("expose", paths, { writable }))).toBe("ok");
+    expect(await codeOf(selectRoute("open", paths, { writable }))).toBe("ok");
+    expect(await selectRoute("expose", paths, { socket: "/s", hello: hello("/srv/nectar"), writable: readOnly })).toEqual({ kind: "daemon", socket: "/s" });
     for (const view of ["ls", "show", "resolve"]) {
       expect(await selectRoute(view, paths, { socket: "/s", hello: none, writable: readOnly })).toMatchObject({
         kind: "readonly",

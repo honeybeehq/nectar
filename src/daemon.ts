@@ -332,7 +332,7 @@ export class Supervisor {
     this.lastGcAt = Date.now();
     try {
       const report = await this.service.gc();
-      this.log({ event: "gc", transitions: report.transitions, serve_orphans: report.serve_orphans, skipped: report.skipped });
+      this.log({ event: "gc", transitions: report.transitions, serve_orphans: report.serve_orphans, skipped: report.skipped, exposures: report.exposures });
     } catch (error) {
       this.log({ event: "error", phase: "gc", message: asNectarError(error).message });
     }

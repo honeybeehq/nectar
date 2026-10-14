@@ -49,27 +49,33 @@ program
   });
 
 program
-  .command("publish")
-  .description("publish a web, desktop, ios, or crystallized dev review environment")
-  .addOption(new Option("--mode <mode>", "web, desktop, ios, or dev"))
+  .command("publish [path]")
+  .description("publish a web, desktop, ios, or crystallized dev review environment, or a static HTML site")
+  .addOption(new Option("--mode <mode>", "web, desktop, ios, dev, or static"))
   .option("--branch <branch>", "branch to publish")
   .option("--ttl <duration>", "time to live", "72h")
   .option("--worktree <path>", "borrow an existing clean worktree")
   .option("--packet <hint>", "optional packet lineage hint")
   .option("--verify", "launch a dev env through readiness, then return it to warm")
-  .action(async (options: { mode?: string; branch?: string; ttl: string; worktree?: string; packet?: string; verify?: boolean }) =>
-    execute("publish", async () => {
-      const globals = program.opts<{ repo: string }>();
-      return new NectarService().publish({
-        repo: globals.repo,
-        ttl: options.ttl,
-        ...(options.mode === undefined ? {} : { mode: options.mode }),
-        ...(options.branch === undefined ? {} : { branch: options.branch }),
-        ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
-        ...(options.packet === undefined ? {} : { packet: options.packet }),
-        ...(options.verify === undefined ? {} : { verify: options.verify }),
-      });
-    }),
+  .option("--name <app>", "app name for a static site (default: directory or file name)")
+  .action(
+    async (
+      target: string | undefined,
+      options: { mode?: string; branch?: string; ttl: string; worktree?: string; packet?: string; verify?: boolean; name?: string },
+    ) =>
+      execute("publish", async () => {
+        const globals = program.opts<{ repo: string }>();
+        return new NectarService().publish({
+          repo: target ?? globals.repo,
+          ttl: options.ttl,
+          ...(options.mode === undefined ? {} : { mode: options.mode }),
+          ...(options.branch === undefined ? {} : { branch: options.branch }),
+          ...(options.worktree === undefined ? {} : { worktree: options.worktree }),
+          ...(options.packet === undefined ? {} : { packet: options.packet }),
+          ...(options.verify === undefined ? {} : { verify: options.verify }),
+          ...(options.name === undefined ? {} : { name: options.name }),
+        });
+      }),
   );
 
 program

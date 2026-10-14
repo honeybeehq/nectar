@@ -1,6 +1,7 @@
 import path from "node:path";
 import http from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
@@ -56,6 +57,7 @@ async function harness(): Promise<{
   vi.stubEnv("FAKE_LAUNCH_LOG", launchLog);
   vi.stubEnv("NECTAR_TRASH_BIN", trash);
   vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", packServer);
+  vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
   vi.stubEnv("NECTAR_AX_PID_TIMEOUT_MS", "100");
   const service = new NectarService(state);
   services.push({ service, envs: [] });
@@ -195,6 +197,92 @@ describe("fixture-backed web publish", () => {
     expect(local).toMatch(/^http:\/\/\[::1\]:45\d\d$/);
     expect(await fetch(local).then(async (response) => response.text())).toBe("scrubbed");
     expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8600 ${local}`);
+  });
+});
+
+describe("static sites", () => {
+  async function siteDir(files: Record<string, string>): Promise<string> {
+    const dir = path.join(await tempDir("static-src"), "proto");
+    for (const [name, contents] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(dir, name)), { recursive: true });
+      await writeFile(path.join(dir, name), contents);
+    }
+    return dir;
+  }
+
+  it("publishes a plain directory idempotently from a Nectar-owned copy that outlives the source", async () => {
+    const { service, state, tailscaleLog } = await harness();
+    const source = await siteDir({
+      "index.html": `<link rel="stylesheet" href="style.css"><script src="app.js"></script><h1>proto</h1>`,
+      "style.css": "h1{color:red}",
+      "app.js": "console.log('proto')",
+    });
+
+    const first = await service.publish({ repo: source, ttl: "1h" });
+    const env = first.env as string;
+    track(service, env);
+    expect(first).toMatchObject({
+      env: "proto--static--web",
+      mode: "web",
+      branch: "static",
+      source,
+      packet_fields: { preview_url: "https://fixture.tailtest.ts.net:8600", testpack_ref: null },
+    });
+    expect(first.commit).toMatch(/^[0-9a-f]{8}$/);
+    const local = (first.urls as { local: string }).local;
+    const css = await fetch(`${local}/style.css`);
+    expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
+    expect(await css.text()).toBe("h1{color:red}");
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8600 ${local}`);
+    const stored = await service.store.readEnv(env);
+    expect(stored.worktree).toBe(path.join(state, "work", env));
+    expect(stored.serve?.cmd).toContain("static-server");
+
+    const again = await service.publish({ repo: source, ttl: "1h" });
+    expect(again).toMatchObject({ env, commit: first.commit, urls: first.urls });
+
+    await rm(source, { recursive: true, force: true });
+    expect(await fetch(local).then(async (response) => response.text())).toContain("<h1>proto</h1>");
+    expect(((await service.list()).envs as Array<{ name: string; status: string }>).find((item) => item.name === env)?.status).toBe(
+      "serving",
+    );
+  });
+
+  it("detects static sites only where no recipe applies, and honours --mode static, --name, and single files", async () => {
+    const { service } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-dist" }),
+      "dist/index.html": "<h1>built</h1>",
+    });
+    const built = await service.publish({ repo, ttl: "1h" });
+    track(service, built.env as string);
+    expect(built.env).toBe(`${path.basename(repo).toLowerCase()}--main--web`);
+    expect(await fetch((built.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>built</h1>");
+
+    const app = await initGitRepo({
+      "package.json": JSON.stringify({ name: "fixture-app", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server,
+      "index.html": "<h1>vite entry</h1>",
+    });
+    const web = await service.publish({ repo: app, ttl: "1h" });
+    track(service, web.env as string);
+    expect(web).toMatchObject({ env: "fixture-app--main--web" });
+    expect(web.source).toBeUndefined();
+    const forced = await service.publish({ repo: app, mode: "static", name: "App Shell", ttl: "1h" });
+    track(service, forced.env as string);
+    expect(forced.env).toBe("app-shell--main--web");
+    expect(await fetch((forced.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>vite entry</h1>");
+
+    const single = path.join(await tempDir("static-single"), "Coupons Report.html");
+    await writeFile(single, "<h1>coupons</h1>");
+    const file = await service.publish({ repo: single, ttl: "1h" });
+    track(service, file.env as string);
+    expect(file.env).toBe("coupons-report--static--web");
+    expect(await fetch((file.urls as { local: string }).local).then(async (response) => response.text())).toBe("<h1>coupons</h1>");
+
+    const empty = await tempDir("static-empty");
+    await expect(service.publish({ repo: empty, mode: "static" })).rejects.toMatchObject({ code: "E_NO_RECIPE" });
+    await expect(service.publish({ repo: app, name: "x" })).rejects.toMatchObject({ code: "E_USAGE" });
   });
 });
 

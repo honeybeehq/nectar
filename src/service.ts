@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { currentBranch, installDependencies, prepareWorktree, resolveCommit, resolveRepo, shortCommit } from "./git.js";
 import { allocatePort, portAvailable, portOpen, portOpenOnHost } from "./ports.js";
@@ -17,7 +18,7 @@ import {
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
-import { envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
+import { appSlug, envName, formatRef, isRef, parseRef, validateEnvName, branchSlug } from "./refs.js";
 import { loadRecipe, selectMode } from "./recipe.js";
 import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
@@ -39,6 +40,7 @@ import {
 import { createTestpackZip, currentPlatform, extractAndLaunch, extractTestpack, extractVerified, fetchVerified, fileSize, pathExists, readAndValidateManifest, sha256, writeManifest } from "./testpack.js";
 import { trashPaths } from "./files.js";
 import { hasProbeableServe, holdsRuntime, portAnswers, probeLiveness } from "./liveness.js";
+import { findStaticSite, stageStaticSite, STATIC_ROOTS, type StaticSite } from "./static-site.js";
 import { findStaleStaging, gcTransition, packCandidates, selectEvidencePrunes, selectPackPrunes, type GcTransition } from "./gc.js";
 import {
   bootSim,
@@ -87,6 +89,7 @@ interface PublishOptions {
   worktree?: string;
   packet?: string;
   verify?: boolean;
+  name?: string;
 }
 
 interface MachineIdentity {
@@ -146,6 +149,9 @@ export class NectarService {
     // Validate caller input before touching the repo — a bad --ttl is a usage
     // error, not a checkout problem.
     const ttlMs = parseDuration(options.ttl ?? "72h", "ttl");
+    const site = await this.staticCandidate(options);
+    if (site !== undefined) return this.publishStatic(site, options, ttlMs);
+    if (options.name !== undefined) throw new NectarError("E_USAGE", "--name applies only to static sites; set name in nectar.toml");
     const repo = await resolveRepo(options.repo ?? process.cwd());
     const branch = options.branch ?? (await currentBranch(repo));
     const recipe = await loadRecipe(repo);
@@ -169,6 +175,79 @@ export class NectarService {
     if (mode === "ios") return this.publishIos(publishOptions);
     if (mode === "dev") return this.publishDev(publishOptions);
     return this.publishDesktop(publishOptions);
+  }
+
+  private async staticCandidate(options: PublishOptions): Promise<StaticSite | undefined> {
+    if (options.mode !== undefined && options.mode !== "static") return undefined;
+    const target = path.resolve(options.repo ?? process.cwd());
+    const site = await findStaticSite(target);
+    if (options.mode === "static") {
+      if (site === undefined) {
+        throw new NectarError(
+          "E_NO_RECIPE",
+          `No index.html in ${target} or its ${STATIC_ROOTS.slice(1).join("/")} directory, and it is not an .html file`,
+        );
+      }
+      return site;
+    }
+    if (site === undefined || site.file !== undefined) return site;
+    let repo: string;
+    try {
+      repo = await resolveRepo(target);
+    } catch {
+      return site;
+    }
+    if (existsSync(path.join(repo, "nectar.toml"))) return undefined;
+    try {
+      await loadRecipe(repo);
+      return undefined;
+    } catch {
+      return site;
+    }
+  }
+
+  private async publishStatic(site: StaticSite, options: PublishOptions, ttlMs: number): Promise<Record<string, unknown>> {
+    if (options.worktree !== undefined || options.verify === true) {
+      throw new NectarError("E_USAGE", "--worktree and --verify do not apply to static sites");
+    }
+    let branch = options.branch;
+    if (branch === undefined) {
+      try {
+        branch = await currentBranch(await resolveRepo(path.dirname(site.file ?? path.join(site.source, "index.html"))));
+      } catch {
+        branch = "static";
+      }
+    }
+    const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
+    const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+    const recipe: Recipe = {
+      name: appSlug(options.name ?? site.name),
+      source: "static",
+      web: { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} },
+    };
+    const web = await this.publishWeb({
+      repo: site.source,
+      branch,
+      recipe,
+      ttlMs,
+      site,
+      ...(options.packet === undefined ? {} : { packet: options.packet }),
+    });
+    return this.publishResult(web.record, this.packetFields(web.record), web.warnings, { source: site.source });
+  }
+
+  private async stageStatic(record: EnvRecord, site: StaticSite): Promise<string[]> {
+    try {
+      const staged = await stageStaticSite(site, record.worktree);
+      record.commit = staged.hash;
+      delete record.install_hash;
+      await this.store.writeEnv(record);
+      return staged.skippedLinks === 0 ? [] : [`skipped ${staged.skippedLinks} symlink(s) while copying ${site.root}; static sites serve regular files only`];
+    } catch (error) {
+      record.status = "crashed";
+      await this.store.writeEnv(record);
+      throw error;
+    }
   }
 
   private async initialRecord(options: {
@@ -365,6 +444,7 @@ export class NectarService {
     ttlMs: number;
     worktree?: string;
     packet?: string;
+    site?: StaticSite;
   }): Promise<PublishedWeb> {
     if (options.recipe.web === undefined) throw new NectarError("E_NO_RECIPE", "Recipe does not declare [web]");
     const name = envName(options.recipe.name, options.branch, "web");
@@ -384,17 +464,19 @@ export class NectarService {
         throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
-      const record = await this.checkout(
-        initial.record,
-        initial.old,
-        options.worktree,
-        initial.identity.config.worktree_cache_allowlist,
-      );
+      const site = options.site;
+      let record = initial.record;
+      let stageWarnings: string[] = [];
+      if (site === undefined) {
+        record = await this.checkout(record, initial.old, options.worktree, initial.identity.config.worktree_cache_allowlist);
+      } else {
+        stageWarnings = await this.stageStatic(record, site);
+      }
       try {
-        const branchRecipe = await loadRecipe(record.worktree);
-        const web = branchRecipe.web;
+        const web = site === undefined ? (await loadRecipe(record.worktree)).web : options.recipe.web;
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
-        return await this.startWeb(record, web, initial.identity, initial.old);
+        const published = await this.startWeb(record, web, initial.identity, initial.old);
+        return { ...published, warnings: [...published.warnings, ...stageWarnings] };
       } catch (error) {
         await this.rollbackRuntime(record, error);
         throw error;

@@ -107,7 +107,7 @@ servers surface honestly as `status: crashed` with a log tail.
 ```text
 ~/.nectar/
   envs/<name>.json          # <name> includes --web/--desktop; source of truth
-  work/<name>/              # nectar-owned git worktree/clone of the branch
+  work/<name>/              # nectar-owned git worktree/clone of the branch, or a static site's copy
   packs/<name>/             # testpacks + any served artifacts (tailnet :8440 root)
     acme-desktop--agent-coupons-stack.testpack.zip
   evidence/<name>/          # shell recordings, smoke output, screenshots
@@ -255,6 +255,9 @@ STRIPE_KEY = "project/acme/stripe-test"
 Sections are independent; a repo declares only the modes it supports. **Fallback without a
 recipe**: a `dev` script in `package.json` ⇒ `[web] serve = "<pm> dev"`; everything else
 requires the recipe (publishing desktop/cli/backend without one is an error `E_NO_RECIPE`).
+**Static fallback** (§6.1.1): when neither applies and the target has an `index.html` at its
+root or in `dist/`, `build/`, `out/`, `public/` or `_site/`, or is itself an `.html` file,
+it publishes as a static site.
 `nectar publish` picks the mode: `--mode` flag > single declared section > `web` if
 inferable > error.
 
@@ -319,6 +322,42 @@ prefer `urls.mesh`. `packet_fields.preview_url` stays mesh-canonical and unchang
 **Per-branch names.** The portless grammar `<branch-slug>.<app>.localhost` is exactly
 portless's worktree convention, produced deliberately so a human running portless by hand
 and a nectar env are indistinguishable locally.
+
+#### 6.1.1 Static sites (amendment · 2026-10-14, DECISIONS D22)
+
+A prototype that is just HTML (plus CSS/JS/images) publishes with the same command and
+envelope as any web env, and needs no `package.json` or `nectar.toml`:
+
+```bash
+nectar publish ./proto --json             # directory: index.html at root or in a build dir
+nectar publish ./report.html --json       # one file, served as index.html
+nectar publish --mode static --name shell # force it where a recipe would otherwise win
+```
+
+- **Detection.** `--mode static` forces it. Without `--mode`, a path to an `.html` file is
+  static; a directory is static only when the recipe path does not apply (not a git repo,
+  or a repo with no `nectar.toml` and no `dev` script). Existing recipe behaviour is
+  unchanged. The site root is the first of `.`, `dist`, `build`, `out`, `public`, `_site`
+  holding an `index.html`.
+- **Copy, not checkout.** Nectar copies the site root's regular files (skipping `.git`,
+  `node_modules` and symlinks, capped at 20 000 files / 512 MiB) into
+  `~/.nectar/work/<name>/` through a staging directory and an atomic swap. The preview
+  serves that copy, so it survives the source directory or Cell being deleted. Uncommitted
+  files are included. `commit` is an 8-hex content hash of the copy.
+- **Name.** `<app>--<branch>--web`. `<app>` is `--name`, or else the directory name (file
+  name without `.html`). `<branch>` is `--branch`, or else the enclosing git branch, or else
+  `static`. Re-publishing the same name is the usual idempotent upsert: same ports, same
+  URL, fresh copy.
+- **Serve.** The serve command is Nectar's own static server
+  (`exec <node> <nectar>/dist/static-server.js`, cwd = the copy, `PORT` from the
+  allocator). It is recorded in `serve.cmd` like any recipe's command, so anything that
+  restarts web serves restarts static ones. The server binds `127.0.0.1`, answers GET/HEAD
+  only, maps `/dir/` to `dir/index.html` (redirecting `/dir`), refuses symlinks and paths
+  outside the copy, never lists directories, and sends `cache-control: no-cache`.
+- Everything after step 1 of §6.1 is identical: readiness, tailnet port, `preview_url`,
+  quota (static envs count toward `serving_web_limit`), gc, `stop`/`rm`, `expose`. The
+  envelope adds `source` (the path that was copied). `--worktree` and `--verify` are
+  `E_USAGE`; `--name` on a non-static publish is `E_USAGE`.
 
 ### 6.2 desktop — the testpack
 
@@ -586,11 +625,13 @@ plus (added post-v0 review, 2026-07-19):
 ### Commands
 
 ```bash
-nectar publish [--mode web|desktop|cli|backend|ios] [--branch <b>] [--ttl 72h]
-               [--worktree <path>] [--packet <hint>] [--json]
+nectar publish [path] [--mode web|desktop|cli|backend|ios|dev|static] [--branch <b>]
+               [--ttl 72h] [--worktree <path>] [--packet <hint>] [--name <app>] [--json]
     # Idempotent upsert per (app, branch, mode): re-publish refreshes checkout, restarts
     # serve, keeps ports and URLs stable. --worktree borrows an existing checkout instead
     # of creating one (agent worktrees; nectar then never deletes it — DECISIONS D2).
+    # [path] overrides --repo. Static sites (a directory of HTML or one .html file) are
+    # detected or forced with --mode static and publish as web envs (§6.1.1).
 
 nectar ls [--json] [--mode <m>] [--status <s>]
     # This machine's envs: name, mode, status, urls.mesh, expires-in, publisher bee, liveness.

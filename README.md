@@ -64,6 +64,13 @@ Then, in any repo with a `dev` script (or a `nectar.toml`):
 nectar publish --json
 ```
 
+A directory of plain HTML (or one `.html` file) needs no recipe. Nectar copies it into
+`~/.nectar/work` and serves the copy with its own static server:
+
+```bash
+nectar publish ./proto --json
+```
+
 ## The CLI
 
 `publish` · `ls` · `show` · `open` · `resolve` · `touch` · `stop` · `rm` · `gc` ·

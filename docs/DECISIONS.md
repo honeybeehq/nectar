@@ -360,3 +360,24 @@ seven-months-old dev preview — acceptable as an internal-only nicety, never th
 external tenants exist. Panel research: docs/research/exposure-{codex,kimi,fable}.md
 (2026-07-19; three models, three emphases; disagreements resolved here — the kimi
 panelist's exe.dev NAT finding overruled the fable panelist's hosting suggestion).
+
+## D22 — Static sites publish as web envs served by Nectar's own server
+
+**Chose:** a directory of HTML (or one `.html` file) publishes through `nectar publish` as
+an ordinary `web` env. Nectar copies the files into `work/<name>/` and the env's serve
+command is Nectar's bundled static server, so the env gets the usual `preview_url`,
+`packet_fields`, ports, TTL, gc and exposure. Detection only applies where the recipe path
+does not, and `--mode static` forces it. (SPEC §6.1.1.)
+**Alternatives:** (a) D18's `nectar drop`, which stores content-addressed copies in the
+pack store and serves them from the :8440 pack server; (b) a new `static` env mode;
+(c) `npx serve`/`python -m http.server` as the serve command.
+**Why:** agents building prototypes call `publish` and expect a packet-ready `preview_url`
+that stays stable across republishes. They do not call a separate command that returns a
+`drop_url` under a shared path prefix. Root-relative asset paths (`/style.css`) break under
+`/drops/<id>/`, which is the same reason D3 gives one port per env. A web env also has a
+recorded serve process that a supervisor can restart like any other, and an idempotent name
+instead of a new hash per content change. This amends D18 for prototypes. `drop` stays the
+design for tiny piped artifacts (stdin HTML, reports) where a path-prefixed, pack-store URL
+is enough. (b) leaks a new mode into the desk contract for what is still a web preview.
+(c) adds a network fetch or an interpreter dependency at serve time. The bundled server is
+about 150 lines of `node:http` with no new dependencies.

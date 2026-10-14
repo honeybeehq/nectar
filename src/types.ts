@@ -49,7 +49,7 @@ export interface IosRecipe {
 
 export interface Recipe {
   name: string;
-  source: "nectar.toml" | "package.json";
+  source: "nectar.toml" | "package.json" | "static";
   web?: WebRecipe;
   desktop?: DesktopRecipe;
   ios?: IosRecipe;

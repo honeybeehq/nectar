@@ -376,7 +376,7 @@ describe("relayd checker follow-ups", () => {
     expect(await relayd.call("GET", "/routes?mine=1")).toMatchObject({ status: 403, body: { error: { rule: "self" } } });
   });
 
-  it("caps open connections per peer so one node cannot hold every slot", async () => {
+  it("caps open connections per peer and drops a peer that never finishes its headers", { timeout: 15_000 }, async () => {
     const relayd = await relay();
     const port = relayd.relayd.control?.port ?? 0;
     const sockets = await Promise.all(
@@ -384,6 +384,7 @@ describe("relayd checker follow-ups", () => {
         new Promise<net.Socket>((resolve) => {
           const socket = net.connect(port, "127.0.0.1", () => {
             socket.write("GET /routes?mine=1 HTTP/1.1\r\nHost: x\r\n");
+            socket.resume();
             resolve(socket);
           });
         }),
@@ -396,8 +397,9 @@ describe("relayd checker follow-ups", () => {
       setTimeout(() => resolve(false), 2_000);
     });
     expect(refused).toBe(true);
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    await Promise.all(sockets.map((socket) => new Promise((resolve) => socket.once("close", resolve))));
+    expect(Date.now() - started).toBeLessThan(8_000);
     relayd.as(A);
     expect((await relayd.call("GET", "/routes?mine=1")).status).toBe(200);
   });

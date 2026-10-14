@@ -687,7 +687,8 @@ Routes removed by `rm`, a kill flag or expiry leave a tombstone for 30 days, so
 `GET /routes?mine=1` reports them `revoked` with the reason. A route past its expiry is
 gone at once for PATCH, rotate, verify and the listing, before prune removes its file.
 Quotas: 50 live routes per node, 200 per relay (429). The control port takes at most 64
-connections, 8 per peer address, headers within 5 s and a 16 KiB body.
+connections, 8 per peer address, headers within 5 s (408), 15 s of silence and a 16 KiB
+body.
 
 **Gate (slice 1).** The password gate stays: Caddy `basic_auth` user `reviewer` with a
 bcrypt hash from `caddy hash-password`, given the password on stdin. relayd mints a

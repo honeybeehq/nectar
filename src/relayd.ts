@@ -30,6 +30,7 @@ const MAX_BODY_BYTES = 16 * 1024;
 const WHOIS_DEADLINE_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const HEADERS_TIMEOUT_MS = 5_000;
+const IDLE_TIMEOUT_MS = 15_000;
 const MAX_CONNECTIONS = 64;
 const MAX_CONNECTIONS_PER_PEER = 8;
 const SUFFIX_BYTES = 4;
@@ -782,7 +783,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
     return peer;
   };
 
-  const controlServer = http.createServer((request, response) => {
+  const controlServer = http.createServer({ connectionsCheckingInterval: 1_000 }, (request, response) => {
     let peer: Peer | undefined;
     const url = new URL(request.url ?? "/", "http://relayd");
     const handle = async (): Promise<{ status: number; body: Record<string, unknown> }> => {
@@ -824,6 +825,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
   });
   controlServer.requestTimeout = REQUEST_TIMEOUT_MS;
   controlServer.headersTimeout = HEADERS_TIMEOUT_MS;
+  controlServer.timeout = IDLE_TIMEOUT_MS;
   controlServer.maxConnections = MAX_CONNECTIONS;
   const perPeer = new Map<string, number>();
   controlServer.on("connection", (socket: net.Socket) => {

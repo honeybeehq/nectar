@@ -1505,7 +1505,7 @@ export class NectarService {
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
       if (holdsRuntime(record.status) && !force) {
-        throw new NectarError("E_USAGE", `Environment '${name}' is serving; pass --force to stop and remove it`);
+        throw new NectarError("E_USAGE", `Environment '${name}' is ${record.status}; pass --force to stop and remove it`);
       }
       await this.stopRuntime(record);
       await this.releaseSim(record);

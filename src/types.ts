@@ -188,7 +188,7 @@ export interface TestpackRecord {
   bundle_id?: string;
 }
 
-export type BranchSource = "flag" | "head" | "contains" | "detached";
+export type BranchSource = "flag" | "head" | "contains" | "session" | "detached";
 
 export interface EnvRecord {
   eid: string;
@@ -274,6 +274,7 @@ export interface ResolveResult {
   log_tail?: string[];
   touched?: false;
   touch_skipped?: string;
+  preview_url_reason?: string;
 }
 
 export interface MultiResolveResult {

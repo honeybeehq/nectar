@@ -60,9 +60,13 @@ Agents of any harness call it directly; the packet carries only strings.
 - **branch-slug** — the branch with `/` → `-` (`agent/coupons-stack` → `agent-coupons-stack`),
   lowercased, `[a-z0-9-]` only. The branch is `--branch`, else the checked-out branch. A
   detached HEAD takes a branch whose tip is HEAD, else a branch containing HEAD (local
-  before remote-tracking, then by name), else `detached-<8-hex sha>`, and publishes HEAD's
-  commit. `branch_source` in the plan, result and record says which (`flag`, `head`,
-  `contains`, `detached`).
+  before remote-tracking, then by name), else a per-session slot `cell-<session>` when the
+  publisher is a Honeybee session, else `detached-<8-hex sha>`, and publishes HEAD's
+  commit. `<session>` is the publisher's `HIVE_BEE` (name), else `HIVE_BEE_ID`, slugified
+  and cut to 40 characters; through nectard it is the caller's, never nectard's own. So
+  an agent that commits past every branch keeps one env and URL across its publishes.
+  `branch_source` in the plan, result and record says which (`flag`, `head`, `contains`,
+  `session`, `detached`).
 - **mode** — `web | desktop | cli | backend | ios`. Matches the packet `kind` vocabulary
   except `code`: a `code` packet is precisely one with **no** nectar env. (`ios` does not
   exist in the desk contract's kind vocabulary yet — coordination item, see §6.5 and open
@@ -1010,7 +1014,8 @@ nectar resolve <ref> [--json]
     # env). expires_at is the expiry after this resolve's touch. A remote ref returns the
     # remote's values; when the remote's Nectar predates these fields, ref and packet_fields
     # are derived from its urls and mode (public_url from urls.public) and expires_at /
-    # expires_in are null.
+    # expires_in are null. When the env is expired, cold, stopped or crashed, nothing serves
+    # its URLs, so packet_fields.preview_url is null and preview_url_reason says why.
     # Consumers prefer urls.local when is_self, urls.mesh otherwise. Touches the env.
 
 nectar touch <env|ref> [--ttl <duration>]
@@ -1173,7 +1178,9 @@ no others: it has no command, environment or recipe field. The socket is reachab
 by the same user on the same host (0600 socket in a 0700 directory). Publish paths are
 limited to the home directory and the caller's Cell, and Nectar's own state and the
 usual key directories are excluded, so a Cell cannot ask nectard to serve files its
-sandbox hides from it elsewhere. Git is the other way a repo can make nectard run something,
+sandbox hides from it elsewhere. The caller's session name only picks a detached
+HEAD's slot (§3); it grants nothing, and a different repo that lands on the same slot is
+refused by the same source checks as any other republish. Git is the other way a repo can make nectard run something,
 through its own config and hooks. So every git command Nectar runs (rev-parse, branch,
 status, worktree add/remove/prune, reset) runs with global and system config ignored
 (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`; a Linux Cell can write

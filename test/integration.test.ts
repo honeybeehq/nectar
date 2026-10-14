@@ -60,6 +60,7 @@ async function harness(): Promise<{
   vi.stubEnv("NECTAR_PACK_SERVER_ENTRY", packServer);
   vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
   vi.stubEnv("NECTAR_AX_PID_TIMEOUT_MS", "100");
+  for (const key of ["HIVE_BEE", "HIVE_BEE_ID", "HIVE_SESSION", "HIVE_SESSION_ID"]) vi.stubEnv(key, undefined);
   const service = new NectarService(state);
   services.push({ service, envs: [] });
   return { service, state, fakeDir, tailscaleLog: tailscale.log, launchLog };
@@ -233,6 +234,57 @@ describe("fixture-backed web publish", () => {
     const ahead = await service.publish({ repo: c, ttl: "1h" });
     track(service, ahead.env as string);
     expect(ahead).toMatchObject({ env: "cells--ahead--web", branch: "ahead", commit: head.slice(0, 8), branch_source: "contains" });
+  });
+
+  it("keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url", async () => {
+    const { service, state } = await harness();
+    const repo = await initGitRepo({
+      "package.json": JSON.stringify({ name: "slots", scripts: { dev: "node server.mjs" } }),
+      "server.mjs": server.replace('process.env.VALHALL_HEM_TOKEN ?? "scrubbed"', '"v1"'),
+    });
+    const commit = async (name: string): Promise<string> => {
+      await writeFile(path.join(repo, name), `${name}\n`);
+      await runCommand("git", ["add", name], { cwd: repo });
+      await runCommand("git", ["commit", "-qm", name], { cwd: repo });
+      return (await runCommand("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    };
+    await runCommand("git", ["checkout", "-q", "--detach"], { cwd: repo });
+    const first = await commit("one.txt");
+
+    expect(await service.publish({ repo, dryRun: true })).toMatchObject({ branch: `detached-${first.slice(0, 8)}`, branch_source: "detached" });
+    vi.stubEnv("HIVE_BEE", "Agent/Slots_Bee");
+    expect(await service.publish({ repo, dryRun: true })).toMatchObject({ name: "slots--cell-agent-slots-bee--web", branch_source: "session" });
+    const published = await service.publish({ repo, ttl: "1h" });
+    track(service, published.env as string);
+    expect(published).toMatchObject({ env: "slots--cell-agent-slots-bee--web", branch: "cell-agent-slots-bee", branch_source: "session", commit: first.slice(0, 8) });
+
+    const second = await commit("two.txt");
+    const again = await service.publish({ repo, ttl: "1h" });
+    expect(again).toMatchObject({ eid: published.eid, env: published.env, urls: published.urls, commit: second.slice(0, 8), branch_source: "session" });
+    expect((await service.show(published.env as string)).env).toMatchObject({ branch_source: "session", commit: second.slice(0, 8) });
+    const other = await initGitRepo({ "package.json": JSON.stringify({ name: "slots", scripts: { dev: "node server.mjs" } }), "server.mjs": server });
+    await runCommand("git", ["checkout", "-q", "--detach"], { cwd: other });
+    await writeFile(path.join(other, "x.txt"), "x\n");
+    await runCommand("git", ["add", "x.txt"], { cwd: other });
+    await runCommand("git", ["commit", "-qm", "x"], { cwd: other });
+    expect(await service.publish({ repo: other, dryRun: true })).toMatchObject({ name: published.env, branch_source: "session" });
+    await expect(service.publish({ repo: other, ttl: "1h" })).rejects.toMatchObject({ code: "E_USAGE", details: { existing_repo: repo } });
+
+    vi.stubEnv("HIVE_BEE", undefined);
+    vi.stubEnv("HIVE_BEE_ID", "0f9e8d7c-other-session");
+    expect(await service.publish({ repo, dryRun: true })).toMatchObject({ name: "slots--cell-0f9e8d7c-other-session--web", branch_source: "session" });
+    const viaNectard = new NectarService(state, { publisher: { user: "t", via: "nectard", hive_bee: "caller-bee" } });
+    expect(await viaNectard.publish({ repo, dryRun: true })).toMatchObject({ name: "slots--cell-caller-bee--web", branch_source: "session" });
+    vi.stubEnv("HIVE_BEE_ID", undefined);
+    expect(await service.publish({ repo, dryRun: true })).toMatchObject({ branch: `detached-${second.slice(0, 8)}`, branch_source: "detached" });
+
+    const live = await service.resolve(published.env as string);
+    expect(live).toMatchObject({ status: "serving", packet_fields: { preview_url: "https://fixture.tailtest.ts.net:8600" } });
+    expect(live).not.toHaveProperty("preview_url_reason");
+    await service.stop(published.env as string);
+    const stopped = await service.resolve(published.env as string);
+    expect(stopped).toMatchObject({ status: "stopped", packet_fields: { preview_url: null } });
+    expect((stopped as { preview_url_reason: string }).preview_url_reason).toMatch(/^env is stopped/);
   });
 
   it("keeps the previous publish serving when a republish fails to install or check out", async () => {

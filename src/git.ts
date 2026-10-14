@@ -110,7 +110,19 @@ export interface BranchSlot {
   commit?: string;
 }
 
-export async function resolveBranch(repo: string, explicit?: string): Promise<BranchSlot> {
+const SESSION_SLOT_MAX = 40;
+
+export function sessionSlot(session: string | undefined): string | undefined {
+  if (session === undefined) return undefined;
+  const slug = session
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .slice(0, SESSION_SLOT_MAX)
+    .replace(/^-+|-+$/g, "");
+  return slug === "" ? undefined : `cell-${slug}`;
+}
+
+export async function resolveBranch(repo: string, explicit?: string, session?: string): Promise<BranchSlot> {
   if (explicit !== undefined) return { branch: explicit, source: "flag" };
   const current = await git(["branch", "--show-current"], repo);
   if (current) return { branch: current, source: "head" };
@@ -132,6 +144,8 @@ export async function resolveBranch(repo: string, explicit?: string): Promise<Br
     .sort((a, b) => a.rank - b.rank || (a.branch < b.branch ? -1 : a.branch > b.branch ? 1 : 0));
   const chosen = candidates[0];
   if (chosen !== undefined) return { branch: chosen.branch, source: "contains", commit };
+  const slot = sessionSlot(session);
+  if (slot !== undefined) return { branch: slot, source: "session", commit };
   return { branch: `detached-${commit.slice(0, 8)}`, source: "detached", commit };
 }
 

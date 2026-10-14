@@ -503,10 +503,26 @@ check is a security boundary here. `git config --get` and `rev-list` run through
 hardened `runGit` and execute nothing from the repo's config. (d) remains the D29
 follow-up. Limits: a shallow clone's root is its shallow boundary, so it never matches
 another clone. A record from before this amendment has no `origin`, so once its `repo`
-is gone it still needs `nectar rm <env> --force`. A Cell whose HEAD is past every branch
-gets a new `detached-<sha>` env for each commit; pass `--branch` to keep one URL. When
+is gone it still needs `nectar rm <env> --force`. When
 another clone takes an env over, Nectar removes its old slot through the old clone if
 that clone still exists, so no stale worktree entry is left behind.
+
+**Amendment · 2026-10-14 (a session slot for a detached HEAD):** a Cell whose HEAD is past
+every branch, which is every Cell once its agent commits, got a new `detached-<sha>` env
+and URL for each commit. **Chose:** with no `--branch`, no checked-out branch and no
+branch containing HEAD, the slot is `cell-<session>` when the publisher is a Honeybee
+session: `HIVE_BEE` (the session name), else `HIVE_BEE_ID`, slugified and cut to 40
+characters. Through nectard it is the request's caller, never nectard's own environment.
+`branch_source` is `session`. Without a session it stays `detached-<8-hex sha>`.
+**Alternatives:** (a) leave it to agents to pass `--branch`; (b) use the Cell path or
+space name; (c) put the session slot ahead of the branch rules. **Why:** (a) is easy to
+forget, and the URL in a packet goes dead as soon as the agent commits again. The session
+name is what an agent and its reviewer know, and it survives a Cell move, where (b) does
+not. (c) would split two Cells of one branch that should share `main`. The slot is only
+a name: republishing onto it runs the same source checks, so a different repo whose
+session lands on the same slot is refused as before, and two sessions get two slots.
+A fresh Cell still publishes as `main` (`contains`) until its first commit, then moves
+to its session slot once.
 
 ## D27 — `doctor --fix` removes only what it can prove is Nectar's
 

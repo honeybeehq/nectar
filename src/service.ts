@@ -347,7 +347,7 @@ export class NectarService {
     const site = await this.staticCandidate(options);
     if (site !== undefined) return options.dryRun === true ? this.staticPlan(site, options) : this.publishStatic(site, options, ttlMs);
     const repo = await resolveRepo(options.repo ?? process.cwd());
-    const slot = await resolveBranch(repo, options.branch);
+    const slot = await resolveBranch(repo, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
     const branch = slot.branch;
     const loaded = await loadRecipe(repo);
     const recipe = options.name === undefined ? loaded : { ...loaded, name: appSlug(options.name) };
@@ -1993,6 +1993,8 @@ export class NectarService {
       if (touch) await this.touchOnView(record);
       const streamUrl = isSelf ? record.urls.local ?? record.urls.mesh : record.urls.mesh ?? record.urls.local;
       const commitState = await this.commitState(record);
+      const packetFields = this.packetFields(record);
+      const dead = packetFields.preview_url !== null && DEAD_STATUSES.has(record.status);
       resolutions.push({
         env: record.name,
         ref: record.ref,
@@ -2012,7 +2014,8 @@ export class NectarService {
         host,
         status: record.status,
         liveness: record.liveness ?? null,
-        packet_fields: this.packetFields(record),
+        packet_fields: dead ? { ...packetFields, preview_url: null } : packetFields,
+        ...(dead ? { preview_url_reason: `env is ${record.status}, so nothing serves its URLs; republish it to get a live preview_url` } : {}),
         expires_at: record.expires_at,
         expires_in: formatRemaining(record.expires_at),
         ...(touch ? this.touchNote() : {}),

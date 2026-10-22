@@ -72,6 +72,12 @@ export async function fakeExecutable(directory: string, name: string, source: st
   return file;
 }
 
+export async function fakeActiveOwner(directory: string): Promise<void> {
+  await fakeExecutable(directory, "hive", `echo '[{"id":"fixture-active","status":"running"}]'`);
+  vi.stubEnv("PATH", `${directory}${path.delimiter}${process.env.PATH ?? ""}`);
+  vi.stubEnv("HIVE_BEE", "fixture-active");
+}
+
 export async function fakeTailscale(directory: string): Promise<{ binary: string; log: string }> {
   const log = path.join(directory, "tailscale.log");
   const binary = await fakeExecutable(

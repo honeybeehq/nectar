@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pidAlive, runCommand, stopProcessGroup } from "../src/commands.js";
 import { NectarService } from "../src/service.js";
 import { extractTestpack } from "../src/testpack.js";
-import { fakeExecutable, fakeServiceManager, fakeTailscale, initGitRepo, record, statefulTailscale, tempDir } from "./helpers.js";
+import { fakeActiveOwner, fakeExecutable, fakeServiceManager, fakeTailscale, initGitRepo, record, statefulTailscale, tempDir } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -62,6 +62,7 @@ async function harness(): Promise<{
   vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
   vi.stubEnv("NECTAR_AX_PID_TIMEOUT_MS", "100");
   for (const key of ["HIVE_BEE", "HIVE_BEE_ID", "HIVE_SESSION", "HIVE_SESSION_ID"]) vi.stubEnv(key, undefined);
+  await fakeActiveOwner(fakeDir);
   const service = new NectarService(state);
   services.push({ service, envs: [] });
   return { service, state, fakeDir, tailscaleLog: tailscale.log, launchLog };

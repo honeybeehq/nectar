@@ -7,7 +7,7 @@ import { composeSpec, depEnvironment, postgresDataMount, redactedDeps } from "..
 import { loadRecipe, seedScenario } from "../src/recipe.js";
 import { NectarService } from "../src/service.js";
 import type { PostgresDepRecipe } from "../src/types.js";
-import { fakeDocker, fakeExecutable, fakeTailscale, initGitRepo, tempDir, type FakeDockerState } from "./helpers.js";
+import { fakeActiveOwner, fakeDocker, fakeExecutable, fakeTailscale, initGitRepo, tempDir, type FakeDockerState } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -55,6 +55,7 @@ async function harness(): Promise<{ service: NectarService; state: string; docke
   vi.stubEnv("NECTAR_DOCKER_BIN", docker.binary);
   vi.stubEnv("NECTAR_PG_BIN", path.join(fakeDir, "no-local-postgres"));
   const service = new NectarService(state);
+  await fakeActiveOwner(fakeDir);
   services.push({ service, envs: [] });
   return { service, state, docker };
 }

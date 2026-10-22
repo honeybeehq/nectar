@@ -16,7 +16,7 @@ import {
 import { loadRecipe } from "../src/recipe.js";
 import { NectarService } from "../src/service.js";
 import type { PostgresDepRecipe } from "../src/types.js";
-import { fakeDocker, fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
+import { fakeActiveOwner, fakeDocker, fakeExecutable, fakeTailscale, initGitRepo, tempDir } from "./helpers.js";
 
 const services: Array<{ service: NectarService; envs: string[] }> = [];
 
@@ -71,6 +71,7 @@ async function harness(options: { dockerDown?: boolean } = {}): Promise<{ servic
   vi.stubEnv("NECTAR_PG_BIN", `${bin18}${path.delimiter}${bin16}`);
   if (options.dockerDown !== false) vi.stubEnv("FAKE_DOCKER_DOWN", "1");
   const service = new NectarService(state);
+  await fakeActiveOwner(fakeDir);
   services.push({ service, envs: [] });
   return { service, state, log, bin18, bin16 };
 }

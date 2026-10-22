@@ -3251,7 +3251,7 @@ export class NectarService {
         return gcTransition(record, now, config.idle_stop_ms);
       };
       const action = transition(snapshot);
-      if (!options.dryRun && owner !== undefined) {
+      if (!options.dryRun && ((owner === "inactive" && snapshot.owner_inactive_since === undefined) || (owner === "active" && snapshot.owner_inactive_since !== undefined))) {
         try {
           await this.store.withLock(snapshot.name, async () => {
             const record = await this.store.readEnv(snapshot.name);
@@ -3261,7 +3261,8 @@ export class NectarService {
             await this.store.writeEnv(record);
           });
         } catch (error) {
-          skipped.push({ env: snapshot.name, reason: asNectarError(error).message });
+          const failure = asNectarError(error);
+          skipped.push({ env: snapshot.name, reason: failure.code === "E_BUSY" ? "busy" : failure.message });
           continue;
         }
       }

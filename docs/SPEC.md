@@ -1026,7 +1026,7 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   only, maps `/dir/` to `dir/index.html` (redirecting `/dir`), refuses symlinks and paths
   outside the copy, never lists directories, and sends `cache-control: no-cache`.
 - Everything after step 1 of §6.1 is identical: readiness, tailnet port, `preview_url`,
-  quota (static envs count toward `serving_web_limit`), gc, `stop`/`rm`, `expose`. The
+  memory admission (static envs require the same headroom as web envs), gc, `stop`/`rm`, `expose`. The
   envelope adds `source` (the path that was copied). `--worktree` and `--verify` are
   `E_USAGE`.
 
@@ -1679,7 +1679,7 @@ static site's files, never `.git`.
 
 | knob | default | on exceed |
 | --- | --- | --- |
-| serving web envs | 12 | `E_QUOTA` — publish tells the bee to `nectar gc` or pick a victim (`--evict-oldest` flag does it) |
+| serving web envs | Half of host RAM / 256 MiB (32 at 16 GiB, 64 at 32 GiB, 128 at 64 GiB) | Capacity estimate, not a fixed-count refusal; `E_QUOTA` only below 256 MiB free plus a reserve of min(1 GiB, RAM / 8) |
 | streamed nectar simulators (ios) | 1 | `E_QUOTA` — serve-sim 0.1.45 cannot run two encoder instances (OQ8); raise when upstream fixes multi-instance |
 | tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
 | upstream ports | 4100–4199 | `E_PORTS` |
@@ -1865,3 +1865,9 @@ Genuinely unresolved — flagged here rather than hedged inline:
     `open` passes an env the app honors (`NECTAR_USER_DATA_DIR`) or launches Electron
     entries with `--user-data-dir` under the pack cache. Needs a convention apps opt into;
     decide before testpacks are used for apps with valuable local state.
+
+### Session-owned preview cleanup
+
+Hourly GC checks serving previews against `hive list --all --json` on the publisher's host (Tailnet SSH for remote publishers). A confirmed done, archived, or missing owner starts a persisted one-hour grace period; another confirmed inactive observation after that period reaps the environment through the existing cleanup path. Idle and stopped sessions remain active owners. Unknown owners and failed lookups are kept and logged in the GC skipped report. Pinned environments and the main bench are protected. Republish resets the grace period.
+
+The default `serving_web_limit` is now a memory-based capacity estimate; a stored legacy value of 12 reads as the new default. Stored values no longer refuse publishes by count; new web publishes require memory headroom instead. Admission includes reclaimable memory (inactive and speculative pages on macOS, MemAvailable on Linux), with free memory as a conservative fallback. Port-range exhaustion remains a separate resource constraint. The reserve and per-preview allowance are admission estimates, not a guarantee against later application memory growth.

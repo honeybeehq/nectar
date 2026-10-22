@@ -6,13 +6,14 @@ import { NectarError } from "./errors.js";
 import { ensureLayout, type NectarPaths } from "./paths.js";
 import { validateEnvName } from "./refs.js";
 import type { EnvRecord, MachineConfig } from "./types.js";
+import { servingCapacity } from "./capacity.js";
 
 export const DEFAULT_CONFIG: MachineConfig = {
   upstream_port_start: 4100,
   upstream_port_end: 4199,
   tailnet_port_start: 8443,
   tailnet_port_end: 8542,
-  serving_web_limit: 12,
+  serving_web_limit: servingCapacity(),
   // One streamed simulator per host: starting a second serve-sim instance kills the
   // first one's encoder (observed on 0.1.45). Raise once upstream multi-instance works.
   serving_sim_limit: 1,
@@ -98,7 +99,9 @@ export class StateStore {
     await this.init();
     try {
       const stored = JSON.parse(await readFile(this.paths.config, "utf8")) as Partial<MachineConfig>;
-      return { ...DEFAULT_CONFIG, ...stored };
+      const config = { ...DEFAULT_CONFIG, ...stored };
+      if (config.serving_web_limit === 12) config.serving_web_limit = DEFAULT_CONFIG.serving_web_limit;
+      return config;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_CONFIG };
       throw error;

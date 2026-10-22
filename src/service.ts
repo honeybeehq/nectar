@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
+import { availableMemory, previewMemoryAvailable } from "./capacity.js";
+import { ownerState, protectedPreview } from "./owner.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -29,6 +31,7 @@ import {
   currentPublisher,
   pidAlive,
   groupBelongsToEnv,
+  groupAlive,
   processBelongsToEnv,
   runCommand,
   runShell,
@@ -1238,26 +1241,15 @@ export class NectarService {
         }
       }
       if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined, options.branch, options.slot);
-      const records = await this.store.listEnvs();
-      // The quota counts live web envs only — not ios streams, not silently-dead
-      // servers a bee could never free by "running gc".
-      const activeWeb = (
-        await Promise.all(
-          records
-            .filter((record) => record.name !== name && record.mode === "web" && hasProbeableServe(record))
-            .map(async (record) => this.refreshLiveness(record)),
-        )
-      ).filter((record) => holdsRuntime(record.status));
-      const config = await this.store.readConfig();
-      if (activeWeb.length >= config.serving_web_limit) {
-        throw new NectarError("E_QUOTA", `Serving web-env quota (${config.serving_web_limit}) reached; run nectar gc or stop an env`);
-      }
       if (
         old !== undefined &&
         holdsRuntime(old.status) &&
         (options.site !== undefined || (!old.borrowed_worktree && options.worktree === undefined))
       ) {
         return this.republishWeb(options, old);
+      }
+      if (!previewMemoryAvailable(await availableMemory())) {
+        throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
       const site = options.site;
@@ -3234,8 +3226,45 @@ export class NectarService {
     const orphanReport = await this.sweepServeOrphans(config, options.dryRun === true);
     const report: Array<{ env: string; action: GcTransition }> = [];
     const skipped: Array<{ env: string; reason: string }> = [];
+    const owners = new Map<string, Promise<Awaited<ReturnType<typeof ownerState>>>>();
     for (const snapshot of await this.store.listEnvs()) {
-      const action = gcTransition(snapshot, now, config.idle_stop_ms);
+      if (protectedPreview(snapshot)) continue;
+      let owner: Awaited<ReturnType<typeof ownerState>> | undefined;
+      if (snapshot.status === "serving") {
+        const key = JSON.stringify([snapshot.publisher.node_name, snapshot.publisher.hive_bee, snapshot.publisher.hive_session]);
+        let lookup = owners.get(key);
+        if (lookup === undefined) {
+          lookup = ownerState(snapshot);
+          owners.set(key, lookup);
+        }
+        owner = await lookup;
+        if (owner === "unknown") {
+          skipped.push({ env: snapshot.name, reason: "owner unresolved; left alone" });
+          continue;
+        }
+      }
+      const transition = (record: EnvRecord): GcTransition | undefined => {
+        if (protectedPreview(record)) return undefined;
+        if (record.status === "serving" && owner === "inactive") {
+          return record.owner_inactive_since !== undefined && now.getTime() - Date.parse(record.owner_inactive_since) >= 60 * 60_000 ? "reap" : undefined;
+        }
+        return gcTransition(record, now, config.idle_stop_ms);
+      };
+      const action = transition(snapshot);
+      if (!options.dryRun && owner !== undefined) {
+        try {
+          await this.store.withLock(snapshot.name, async () => {
+            const record = await this.store.readEnv(snapshot.name);
+            if (record.publisher.hive_bee !== snapshot.publisher.hive_bee || record.publisher.hive_session !== snapshot.publisher.hive_session || record.published_at !== snapshot.published_at) return;
+            if (owner === "inactive") record.owner_inactive_since ??= now.toISOString();
+            else delete record.owner_inactive_since;
+            await this.store.writeEnv(record);
+          });
+        } catch (error) {
+          skipped.push({ env: snapshot.name, reason: asNectarError(error).message });
+          continue;
+        }
+      }
       if (action === undefined) continue;
       if (options.dryRun) {
         report.push({ env: snapshot.name, action });
@@ -3246,9 +3275,12 @@ export class NectarService {
       try {
         await this.store.withLock(snapshot.name, async () => {
           const record = await this.store.readEnv(snapshot.name);
-          const currentAction = gcTransition(record, now, config.idle_stop_ms);
+          if (record.published_at !== snapshot.published_at || record.publisher.hive_bee !== snapshot.publisher.hive_bee || record.publisher.hive_session !== snapshot.publisher.hive_session) return;
+          const currentAction = transition(record);
           if (currentAction === undefined) return;
-          report.push({ env: record.name, action: currentAction });
+          if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve.pgid, record.name))) {
+            throw new NectarError("E_BUSY", "Runtime ownership unresolved; left alone");
+          }
           if (currentAction === "idle-stop") {
             await this.stopRuntime(record);
             delete record.serve;
@@ -3276,6 +3308,7 @@ export class NectarService {
           } else {
             // Reap removes everything the env ever owned, exactly like `rm`.
             await this.stopRuntime(record);
+            if (record.serve !== undefined && groupAlive(record.serve.pgid)) throw new NectarError("E_BUSY", "Runtime still alive; environment retained");
             await this.tearDownExposure(record).catch(() => undefined);
             await this.releaseSim(record);
             await this.releaseDeps(record);
@@ -3290,6 +3323,7 @@ export class NectarService {
             await runGit(["worktree", "prune"], record.repo).catch(() => undefined);
             await this.releaseInbox(record);
           }
+          report.push({ env: record.name, action: currentAction });
         });
       } catch (error) {
         const nectarError = asNectarError(error);

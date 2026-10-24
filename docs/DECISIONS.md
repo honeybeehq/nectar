@@ -955,3 +955,32 @@ listener still uses a loopback port from the configured pool; widening that pool
 companion capacity change. Requests read the current record without taking its lock
 while serving; only a cold wake takes the lock. Activity writes remain throttled. Failed publishes release their route; the URL may
 change on the next publish, as before.
+
+## D37 — Available TCP ports, not 100-port preview slots
+
+**Chose:** widen the default upstream range to 4100–65535 and mesh range to
+8443–65535, migrating saved old defaults on read while preserving custom ranges.
+The relay accepts the expanded preview range. Allocation checks for listeners on all local interfaces,
+reserves recorded ports across both ranges and existing Serve entries, and never
+allocates 443 or the pack/control ports 8440, 8441, 8450 and 8451. The relay
+refuses these service ports too. Outside the legacy ranges, an absent env record leaves a Serve entry
+ambiguous: a wide range alone cannot prove Nectar owns it.
+
+**Alternatives:** retain 100 ports; multiplex applications behind a path prefix;
+choose random ephemeral ports. **Why:** the original 12-preview count appears in the
+first specification without a resource calculation. Memory admission already replaced
+it. A real isolated nectard run on metal-2 reached exactly 50 supervised static previews
+with 100 upstream ports, then refused the 51st with E_PORTS. Each used an app port and a
+viewing proxy port. TCP has many more available ports; the hundred-port boundary had
+no resource reason. Sequential available-port allocation keeps existing low-port URLs
+and respects occupied ports without adding a second allocation mechanism. The TCP
+port number ceiling is real; memory and application costs remain real and variable.
+Shared static serving, demand-started dev servers and placement are separate changes.
+
+**Deployment:** upgrade Nectar and relayd, and widen narrower ACLs deliberately. This
+change does not edit live host configuration, ACL policy or other previews.
+
+The expanded relay range still authorizes only the caller's own MagicDNS host. It
+is not evidence that a service belongs to Nectar. Hosts trusted to publish arbitrary
+recipes can already proxy other services on their own host; restricting port numbers
+is not a substitute for that trust boundary. Deployment ACLs remain operator policy.

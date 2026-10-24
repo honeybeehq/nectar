@@ -1258,7 +1258,7 @@ export class NectarService {
       ) {
         return this.republishWeb(options, old);
       }
-      if (!options.recipe.web.serve.includes("static-server.") && (options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !previewMemoryAvailable(await availableMemory())) {
+      if (!options.recipe.web?.serve.includes("static-server.") && (options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !previewMemoryAvailable(await availableMemory())) {
         throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });

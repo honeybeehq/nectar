@@ -270,7 +270,15 @@ function outcome(run: TailscaleRun, unreachable: string | undefined): ServeOutco
   return { ok: run.ok, message: run.stderr.trim() || run.stdout.trim() || run.cause, api: "cli", ...(unreachable === undefined ? {} : { unreachable }) };
 }
 
-async function changeServe(args: string[], edit: (config: Parameters<ServeConfigEdit>[0], dnsName: string) => string | undefined): Promise<ServeOutcome> {
+let serveChanges: Promise<unknown> = Promise.resolve();
+
+function changeServe(args: string[], edit: (config: Parameters<ServeConfigEdit>[0], dnsName: string) => string | undefined): Promise<ServeOutcome> {
+  const result = serveChanges.then(() => applyServeChange(args, edit));
+  serveChanges = result.catch(() => undefined);
+  return result;
+}
+
+async function applyServeChange(args: string[], edit: (config: Parameters<ServeConfigEdit>[0], dnsName: string) => string | undefined): Promise<ServeOutcome> {
   const local = await localStatus();
   if (local.kind !== "unreachable") {
     if (local.kind === "problem") return { ok: false, message: local.problem, api: "localapi" };

@@ -230,6 +230,7 @@ export interface EnvRecord {
   owner_inactive_since?: string;
   proof_terminal_since?: string;
   last_opened_at?: string;
+  last_viewed_at?: string;
   sim_udid?: string;
   sim_device?: string;
   urls: EnvUrls;

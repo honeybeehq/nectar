@@ -1955,8 +1955,13 @@ Run the isolated real-daemon fixture with `pnpm build && node test/fixtures/proo
 ### Capacity recovery and placement
 
 Dynamic web publish and wake retry E_QUOTA/E_PORTS by putting the least recently viewed
-eligible running app to sleep, one at a time. Live proxy activity supplements persisted
-last_opened_at (unvisited previews sort by published_at). Pinned/--keep previews, the
+eligible running app to sleep, one at a time. A view is a real request from a person or
+agent through the preview URL, including plain curl requests and ongoing request activity.
+Nectar readiness/proxy probes and wake operations themselves do not count. Recovery uses
+the freshest of live proxy activity and persisted last_viewed_at; persistence is throttled,
+but the live map updates on every request. Older records without a saved view and unvisited
+previews sort by published_at. last_opened_at remains the separate open/idle timestamp.
+Pinned/--keep previews, the
 main bench, active requests/streams/upgrades and static previews are excluded. Missing
 live activity protects a runtime. Recheck eligibility under its environment lock.
 Sleeping retains its files, stable URL listener and mesh route; a later visit wakes it.
@@ -1969,7 +1974,15 @@ an error explaining how to add one, free memory or widen custom port bounds; no 
 tailnet discovery. --local/--host and received shipments keep their explicit destination.
 A wake can place the exact published commit remotely and proxy HTTPS requests/upgrades
 through its original URL; the persisted remote target resets on republish. capacity.jsonl
-records wake placements (host, final remote URL) and slept preview names. A wake response
+records every pressure decision, including refusals, with ordered candidates, their view
+times and timestamp sources, skip reasons (including active requests and held locks), and
+chosen previews. It also records wake placements (host, final remote URL) and slept preview
+names. Daemon control becomes ready after initial route restoration; Serve edits within a
+process are serialized across LocalAPI and CLI paths so concurrent restorations cannot
+leave views bypassing the proxy. Control readiness precedes app revival and initial GC,
+so slow app startup does not force callers to bypass the daemon. Recovery logs rotate at
+log_max_bytes with two previous files, using the existing recoverable log rotation.
+A wake response
 also names slept previews in x-nectar-slept-previews. Remote placement requires a reachable
 HTTPS mesh URL; local-only URLs are not accepted as remote destinations.
 

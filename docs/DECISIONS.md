@@ -964,6 +964,7 @@ record. Each request reads and validates that record's token, status and expiry,
 Shared static routes do not enter the dynamic proxy hub. Public relay origin validation
 currently accepts only origin URLs in the old port range; shared paths require a relay
 contract update before public exposure can support them.
+
 ## Proof-aware retirement (2026-10-24)
 
 GC retains previews while any linked proof waits for Tormod, independently of publisher session state and TTL. Terminal proofs receive 24 hours from the first successful terminal observation, persisted as `proof_terminal_since`. Waiting proofs reset that clock, so a reopened proof receives a fresh grace period. Failed reads preserve the clock but prevent retirement until a successful read. Unlinked previews retain the existing one-hour inactive-owner rule. Pinned and main bench previews remain protected.
@@ -1079,3 +1080,17 @@ Remote wake targets remain sticky until republish; recovery after a dead remote 
 and immediate remote teardown on local removal are not provided. The shipped copy has
 the remaining original TTL. The remote wake/HTTPS path requires a real cross-host check
 before rollout; this task could not start an isolated remote daemon due to SSH denial.
+running dynamic web preview. Views are real preview-URL requests from people or agents,
+including plain curl and ongoing request activity, excluding Nectar's readiness/proxy probes.
+Use the freshest live or persisted last_viewed_at; update the live map on every request
+while keeping disk writes throttled. last_opened_at stays separate, so opening metadata
+or waking an app cannot move its view order. Without a saved view, including older records,
+use published_at. Count active requests before wake begins; active responses, streams
+host and URL in capacity.jsonl. Every local pressure decision records its ordered candidates,
+view times/sources, skip reasons and chosen previews, even when none can sleep. Preserve
+the existing slept_previews envelope. Restore routes before exposing daemon control, and
+serialize in-process Serve edits across LocalAPI and CLI: concurrent startup edits otherwise exhaust ETag retries,
+leaving some URLs pointed at apps directly and losing their views. Open control before
+app revival/GC, so their latency does not cause callers to bypass the daemon. Rotate
+capacity.jsonl with log_max_bytes and two previous files through the existing log rotation.
+Recovery records slept names there and

@@ -256,7 +256,10 @@ One process per machine (per `NECTAR_HOME`, guarded by `~/.nectar/nectard.pid`).
 work. (The hourly gc it runs keeps gc's existing rule: it turns off Serve entries in Nectar's
 tailnet port range whose loopback target is dead, §10.2.)
 
-- **Which envs.** `mode: web` envs (recipe and static, §6.1.1) whose status is `serving`,
+- **Shared static.** Each sweep ensures the singleton in §6.1.1 is healthy when
+  any unexpired static route is serving, restores it on its recorded loopback port after
+  exit, and reasserts its one tailnet entry without changing route tokens.
+- **Which envs.** `mode: web` envs (recipe and legacy static, §6.1.1) whose status is `serving`,
   `unhealthy` or `crashed`, that still hold a `serve` block, are not past `expires_at`, and
   are not given up (`failure.code` `E_CRASH_LOOP` or `E_PORTS`). `stopped`, `expired`, `cold`, `warm` dev envs,
   desktop and ios envs are left alone.
@@ -985,7 +988,7 @@ live republish reinstalls dependencies.
 for other authorized tailnet devices. `urls.local` is the loopback/portless URL for
 same-machine consumers. **`preview_url` on the packet remains `urls.mesh`** because packets
 are location-independent; consumers choose at resolve time (DECISIONS D4). One tailnet
-port per env — no path prefixes (SPAs break), no subdomains (ts.net has no per-machine
+port per dynamic env. Static previews use the shared path scheme in §6.1.1. No subdomains (ts.net has no per-machine
 wildcards) (DECISIONS D3).
 
 **Live-use amendment · 2026-07-19 — same-node Serve identity.** A request from the
@@ -1035,21 +1038,41 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   files are included. `commit` is an 8-hex content hash of the copy.
 - **Name.** `<app>--<branch>--web`. `<app>` is `--name`, or else the directory name (file
   name without `.html`). `<branch>` is `--branch`, or else the enclosing git branch, or else
-  `static`. Re-publishing the same name is the usual idempotent upsert: same ports, same
+  `static`. Re-publishing the same name is the usual idempotent upsert: same
   URL, fresh copy. If the name already belongs to a git-checkout env (or a static env when
   publishing a recipe), publish refuses with `E_USAGE` and leaves that env running:
   `nectar rm <env> --force` first, or pick another `--name`. The same holds for a static
   source at a different path with the same name.
-- **Serve.** The serve command is Nectar's own static server
-  (`exec <node> <nectar>/dist/static-server.js`, cwd = the copy, `PORT` from the
-  allocator). It is recorded in `serve.cmd` like any recipe's command, so anything that
-  restarts web serves restarts static ones. The server binds `127.0.0.1`, answers GET/HEAD
-  only, maps `/dir/` to `dir/index.html` (redirecting `/dir`), refuses symlinks and paths
-  outside the copy, never lists directories, and sends `cache-control: no-cache`.
-- Everything after step 1 of §6.1 is identical: readiness, tailnet port, `preview_url`,
-  memory admission (static envs require the same headroom as web envs), gc, `stop`/`rm`, `expose`. The
-  envelope adds `source` (the path that was copied). `--worktree` and `--verify` are
-  `E_USAGE`.
+- **Shared serve (2026-10-24, D36).** New static previews, including recipes whose
+  serve command invokes `static-server`, share one detached read-only server per
+  Nectar state home (one home per production host). Nectard restores that server after
+  exit or reboot. `shared-static.json` holds its PID, health identity, loopback port and
+  tailnet port. Env records hold `static_route` (128 random bits), no `serve` runtime,
+  and URLs ending `/s/<env>/<token>/`. Recipes preserve a literal root argument in
+  `static_root`, recomputed from the current worktree on every publish. Republish keeps
+  the token and URL. The loopback
+  port is OS-assigned outside configured env port ranges; one shared tailnet port is
+  allocated outside those ranges, scanning from 10240. Neither uses 443. Concurrent
+  publishes serialize singleton startup; foreign tailnet entries are left untouched.
+- **Assets.** GET/HEAD only; `/dir/` serves `dir/index.html`, `/dir` redirects with the
+  preview prefix preserved. Relative assets resolve beneath the trailing-slash URL.
+  Build SPAs with a relative asset base (for example Vite `base: './'`) or their mount
+  prefix; root-absolute asset paths and history routers require an app base. Missing
+  files return 404, directories are never listed, symlinks and paths outside the copy
+  are refused, and responses use `cache-control: no-cache`. Tokens separate routes,
+  not browser origins. The server reads the named env record on every request.
+- **Lifetime and resources.** Static routes have no count limit and bypass preview
+  memory admission and per-env port allocation. Every request enforces `expires_at`:
+  an expired route returns HTTP 410 with an explicit expired message before GC runs.
+  A stopped route returns 410; a removed/unknown route returns 404. Existing TTL/touch
+  and GC expire/cold/reap still own renewal and file cleanup; stopping/removing one
+  preview never stops the shared listener or another preview. Public relay exposure
+  of shared paths requires updating its origin-only, 8443–8542 upstream contract.
+- **Existing URLs.** Static records that already own `serve` keep their old server,
+  ports and URLs, including on republish and supervisor revival, until normal retirement.
+  Newly published static routes use the shared server. The envelope still supplies
+  `packet_fields.preview_url` from `urls.mesh` (loopback fallback when offline) and
+  `source` (the copied path). `--worktree` and `--verify` are `E_USAGE`.
 
 #### 6.1.2 Python and Rails apps (amendment · 2026-10-14, DECISIONS D23)
 

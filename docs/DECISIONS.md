@@ -984,3 +984,34 @@ The expanded relay range still authorizes only the caller's own MagicDNS host. I
 is not evidence that a service belongs to Nectar. Hosts trusted to publish arbitrary
 recipes can already proxy other services on their own host; restricting port numbers
 is not a substitute for that trust boundary. Deployment ACLs remain operator policy.
+## D38 — Shared static previews use random path prefixes
+
+**Decision (2026-10-24):** New static previews share one read-only server per Nectar
+state home and one tailnet Serve entry. Their URL is
+`https://<machine>:<shared-port>/s/<env>/<128-bit-random-token>/`. The token survives
+republish. The singleton owns its PID and ports in `shared-static.json`; env records
+carry only `static_route`, their files, URLs and the existing TTL. Its loopback port
+comes from the OS outside configured env ranges; the shared tailnet port is allocated
+outside those ranges, scanning from 10240. Port 443 remains untouched. A machine-wide
+startup lock and a private health identity prevent duplicate servers in concurrent
+publishes. Nectard restores a dead singleton on its existing port, or moves only the
+loopback port if occupied while preserving the canonical tailnet URL. Three failed
+health probes precede hung-server recovery; a command-line identity check prevents
+signalling a recycled PID. Matching tailnet entries need no configuration write.
+
+**Alternatives:** Per-preview ports exhaust a finite range and retain a listener per
+preview. Per-preview ts.net subdomains have no wildcard DNS/certificate support. A
+shared path works with relative assets and does not require new tailnet infrastructure.
+Apps must build with a relative asset base or configure their mount prefix; origin-root
+asset references and origin-root SPA history routers require that configuration. The
+prefix is unguessable but is not a separate browser origin or an authentication system.
+
+**Compatibility:** Existing static records with `serve` keep their old process, ports
+and URLs on republish and restart until retired by the existing lifecycle. This avoids
+breaking proof links. New static publishes (including static-server recipes) do not
+allocate per-preview ports/processes or enter memory admission. Stop affects only the
+record. Each request reads and validates that record's token, status and expiry, returns
+410 with an explicit message after expiry, and leaves cleanup to GC's expire/cold/reap.
+Shared static routes do not enter the dynamic proxy hub. Public relay origin validation
+currently accepts only origin URLs in the old port range; shared paths require a relay
+contract update before public exposure can support them.

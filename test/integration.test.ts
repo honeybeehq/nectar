@@ -444,17 +444,18 @@ describe("static sites", () => {
       mode: "web",
       branch: "static",
       source,
-      packet_fields: { preview_url: "https://fixture.tailtest.ts.net:8600", testpack_ref: null },
+      packet_fields: { preview_url: expect.stringMatching(/^https:\/\/fixture\.tailtest\.ts\.net:\d+\/s\/proto--static--web\/[a-f0-9]{32}\/$/) as string, testpack_ref: null },
     });
     expect(first.commit).toMatch(/^[0-9a-f]{8}$/);
     const local = (first.urls as { local: string }).local;
     const css = await fetch(`${local}/style.css`);
     expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
     expect(await css.text()).toBe("h1{color:red}");
-    expect(await readFile(tailscaleLog, "utf8")).toContain(`--https=8600 ${local}`);
+    expect(await readFile(tailscaleLog, "utf8")).toContain(`${new URL((first.urls as { mesh: string }).mesh).port} ${new URL(local).origin}`);
     const stored = await service.store.readEnv(env);
     expect(stored.worktree).toBe(path.join(state, "work", env));
-    expect(stored.serve?.cmd).toContain("static-server");
+    expect(stored.serve).toBeUndefined();
+    expect(stored.static_route).toMatch(/^[a-f0-9]{32}$/);
 
     const again = await service.publish({ repo: source });
     expect(again).toMatchObject({ env, commit: first.commit, urls: first.urls });

@@ -221,6 +221,8 @@ export interface EnvRecord {
   borrowed_worktree: boolean;
   status: EnvStatus;
   serve?: ServeRecord;
+  static_route?: string;
+  static_root?: string;
   liveness?: Liveness;
   dev?: DevRecord;
   pinned?: boolean;

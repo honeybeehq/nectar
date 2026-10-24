@@ -1,0 +1,34 @@
+T2 checks — 2026-10-24
+
+pnpm typecheck: passed
+pnpm build: passed
+pnpm lint: passed
+git diff --check: passed
+
+Full suite, serial execution to match baseline:
+Baseline (unchanged HEAD source archive inside this Cell): 358 passed / 11 failed / 369 total.
+Changed code: 358 passed / 11 failed / 369 total.
+New failing test names: none.
+
+Identical existing failures:
+test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+test/expose.test.ts > expose through relayd > nectard's hourly sync PATCHes the expiry, never recreates, and marks a removed route revoked
+test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+test/integration.test.ts > fixture-backed web publish > rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT
+test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+test/proxy.test.ts > nectard fronting the real service > re-fronts an env whose republish moved it to a new upstream port
+
+Focused static/control/remote/CLI/daemon suites: 115 passed / 1 failed.
+The one failure is the same baseline daemon GC owner fixture.
+
+Real product verification: pnpm build && node scripts/verify-shared-static.mjs
+See T2-static-run.txt for all 32 curl URLs, ps PID, expiry410, GC, normal and hung-server recovery, and legacy URL preservation.
+
+Independent review: claude-opus-5-5 (Apiary session c66aafda-2586-4ff3-9fc6-7b8430a10fdf), code reading plus parent transcript.
+Recovery findings fixed and rechecked. Remaining documented consequences: shared browser origin/storage, relative asset base requirement, public relay contract follow-up.
+The reviewer did not rerun the product verification.

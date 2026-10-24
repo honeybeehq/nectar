@@ -8,6 +8,7 @@ import { NectarError } from "./errors.js";
 import { getPaths } from "./paths.js";
 import { allocatePort, portAvailable } from "./ports.js";
 import { atomicJson, StateStore } from "./state.js";
+import type { EnvRecord } from "./types.js";
 import { previewProofState } from "./proofs.js";
 import { serveStatic } from "./static-server.js";
 import { serveEntries, rootMount, serveStatus, serveWeb, statusPorts } from "./tailscale.js";
@@ -122,6 +123,15 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
 async function run(root: string, port: number, secret: string): Promise<void> {
   const store = new StateStore(getPaths(root));
   const previous = await metadata(store);
+  const proofLookups = new Map<string, ReturnType<typeof previewProofState>>();
+  const proofState = (record: EnvRecord): ReturnType<typeof previewProofState> => {
+    let lookup = proofLookups.get(record.name);
+    if (lookup === undefined) {
+      lookup = previewProofState(record).finally(() => proofLookups.delete(record.name));
+      proofLookups.set(record.name, lookup);
+    }
+    return lookup;
+  };
   const reply = (response: http.ServerResponse, status: number, message: string): void => {
     response.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
     response.end(message);
@@ -136,7 +146,7 @@ async function run(root: string, port: number, secret: string): Promise<void> {
       if (match === null) return reply(response, 404, "Static preview not found.\n");
       const record = await store.maybeEnv(match[1]!);
       if (record === undefined || record.static_route !== match[2]) return reply(response, 404, "Static preview not found.\n");
-      if (record.status === "expired" || record.status === "cold" || (Date.parse(record.expires_at) <= Date.now() && (await previewProofState(record)).state === "unlinked")) {
+      if (record.status === "expired" || record.status === "cold" || (Date.parse(record.expires_at) <= Date.now() && (await proofState(record)).state === "unlinked")) {
         return reply(response, 410, "This static preview has expired. Publish it again to renew it.\n");
       }
       if (record.status !== "serving") return reply(response, 410, "This static preview is stopped. Publish it again to restart it.\n");

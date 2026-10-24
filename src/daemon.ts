@@ -64,8 +64,8 @@ export class ProxyHub {
     return this.viewedAt;
   }
 
-  activity(name: string): { active: boolean; viewedAt?: number } {
-    return { active: this.proxies.get(name)?.busy ?? true, ...(this.viewedAt.has(name) ? { viewedAt: this.viewedAt.get(name)! } : {}) };
+  activity(name: string): { active: boolean; viewedAt?: number; known: boolean } {
+    return { known: this.proxies.has(name), active: this.proxies.get(name)?.busy ?? true, ...(this.viewedAt.has(name) ? { viewedAt: this.viewedAt.get(name)! } : {}) };
   }
 
   ports(): Map<string, number> {
@@ -199,13 +199,21 @@ export class Supervisor {
     if (this.hub !== undefined) service.setCapacityActivity?.((name) => this.hub!.activity(name));
   }
 
-  async start(): Promise<void> {
+  async start(onRestored?: () => Promise<void>): Promise<void> {
     this.log({ event: "start", interval_ms: this.intervalMs, gc_interval_ms: this.gcIntervalMs, boot_at: new Date(this.bootTimeMs).toISOString() });
     if (this.hub !== undefined) {
       this.watcher = watch(this.service.paths.envs, () => this.syncFront());
       this.watcher.on("error", (error) => this.log({ event: "error", phase: "front_watch", message: error.message }));
     }
-    await this.sweep(true);
+    if (this.hub === undefined) await this.sweep(true);
+    else {
+      const records = await this.service.store.listEnvs();
+      for (const name of await this.hub.sync(records)) this.pendingMesh.add(name);
+      await Promise.all(records.filter(fronted).map(async (record) => this.reassertMesh(record)));
+    }
+    if (this.stopped) return;
+    await onRestored?.();
+    if (this.hub !== undefined) await this.sweep(false);
     await this.gc();
     this.schedule();
   }

@@ -1044,8 +1044,12 @@ Location rewriting handles relative headers as emitted by the shared server toda
 ## D39 — Reclaim idle runtime capacity before refusing a preview
 
 On memory admission or TCP exhaustion, retry after sleeping the least recently viewed
-running dynamic web preview. The daemon's live proxy activity wins over throttled
-on-disk view timestamps. Count requests before wake begins; active responses, streams
+running dynamic web preview. Views are real preview-URL requests from people or agents,
+including plain curl and ongoing request activity, excluding Nectar's readiness/proxy probes.
+Use the freshest live or persisted last_viewed_at; update the live map on every request
+while keeping disk writes throttled. last_opened_at stays separate, so opening metadata
+or waking an app cannot move its view order. Without a saved view, including older records,
+use published_at. Count active requests before wake begins; active responses, streams
 and upgrades, pinned/keep previews and the main bench cannot be selected. Recheck under
 the environment lock. Unknown activity is protected. Keep files, listeners, routes and
 URLs; never delete or retire for capacity, and never select static previews. Sleeping
@@ -1060,7 +1064,14 @@ not discover arbitrary tailnet hosts: reachability is not permission to ship cod
 
 A wake may ship its exact published commit to the pool and retain the original URL as
 an HTTPS proxy to the returned mesh URL. Persist that target until republish; record
-host and URL in capacity.jsonl. Local runtime recovery records slept names there and
+host and URL in capacity.jsonl. Every local pressure decision records its ordered candidates,
+view times/sources, skip reasons and chosen previews, even when none can sleep. Preserve
+the existing slept_previews envelope. Restore routes before exposing daemon control, and
+serialize in-process Serve edits across LocalAPI and CLI: concurrent startup edits otherwise exhaust ETag retries,
+leaving some URLs pointed at apps directly and losing their views. Open control before
+app revival/GC, so their latency does not cause callers to bypass the daemon. Rotate
+capacity.jsonl with log_max_bytes and two previous files through the existing log rotation.
+Recovery records slept names there and
 returns them in x-nectar-slept-previews. Publish results include slept_previews,
 placed_on/placement_reason when moved and a top-level preview_url (also retained in
 packet_fields). Agents can copy that URL directly into proof.

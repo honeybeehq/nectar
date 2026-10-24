@@ -1,0 +1,90 @@
+{"at":"2026-10-24T15:41:45.736Z","daemon":3982283,"state":"/home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/.runs/t12-red-15/state"}
+{"at":"2026-10-24T15:41:46.492Z","publish":"t12-lru--p01--web","url":"https://trmd-metal-3.tailff9529.ts.net:46600","slept":[]}
+{"at":"2026-10-24T15:41:47.000Z","view":"t12-lru--p01--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46600"}
+{"at":"2026-10-24T15:41:47.800Z","publish":"t12-lru--p02--web","url":"https://trmd-metal-3.tailff9529.ts.net:46601","slept":[]}
+{"at":"2026-10-24T15:41:48.279Z","view":"t12-lru--p02--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46601"}
+{"at":"2026-10-24T15:41:49.082Z","publish":"t12-lru--p03--web","url":"https://trmd-metal-3.tailff9529.ts.net:46602","slept":[]}
+{"at":"2026-10-24T15:41:49.554Z","view":"t12-lru--p03--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46602"}
+{"at":"2026-10-24T15:41:50.354Z","publish":"t12-lru--p04--web","url":"https://trmd-metal-3.tailff9529.ts.net:46603","slept":[]}
+{"at":"2026-10-24T15:41:50.829Z","view":"t12-lru--p04--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46603"}
+{"at":"2026-10-24T15:41:51.627Z","publish":"t12-lru--p05--web","url":"https://trmd-metal-3.tailff9529.ts.net:46604","slept":[]}
+{"at":"2026-10-24T15:41:52.098Z","view":"t12-lru--p05--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46604"}
+{"at":"2026-10-24T15:41:52.895Z","publish":"t12-lru--p06--web","url":"https://trmd-metal-3.tailff9529.ts.net:46605","slept":[]}
+{"at":"2026-10-24T15:41:53.360Z","view":"t12-lru--p06--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46605"}
+{"at":"2026-10-24T15:41:54.175Z","publish":"t12-lru--p07--web","url":"https://trmd-metal-3.tailff9529.ts.net:46606","slept":[]}
+{"at":"2026-10-24T15:41:54.644Z","view":"t12-lru--p07--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46606"}
+{"at":"2026-10-24T15:41:55.439Z","publish":"t12-lru--p08--web","url":"https://trmd-metal-3.tailff9529.ts.net:46607","slept":[]}
+{"at":"2026-10-24T15:41:55.913Z","view":"t12-lru--p08--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46607"}
+{"at":"2026-10-24T15:41:56.727Z","publish":"t12-lru--p09--web","url":"https://trmd-metal-3.tailff9529.ts.net:46608","slept":[]}
+{"at":"2026-10-24T15:41:57.211Z","view":"t12-lru--p09--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46608"}
+{"at":"2026-10-24T15:41:58.008Z","publish":"t12-lru--p10--web","url":"https://trmd-metal-3.tailff9529.ts.net:46609","slept":[]}
+{"at":"2026-10-24T15:41:58.489Z","view":"t12-lru--p10--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46609"}
+{"at":"2026-10-24T15:41:59.299Z","publish":"t12-lru--p11--web","url":"https://trmd-metal-3.tailff9529.ts.net:46610","slept":[]}
+{"at":"2026-10-24T15:41:59.773Z","view":"t12-lru--p11--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46610"}
+{"at":"2026-10-24T15:42:00.581Z","publish":"t12-lru--p12--web","url":"https://trmd-metal-3.tailff9529.ts.net:46611","slept":[]}
+{"at":"2026-10-24T15:42:01.055Z","view":"t12-lru--p12--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46611"}
+{"at":"2026-10-24T15:42:01.858Z","publish":"t12-lru--p13--web","url":"https://trmd-metal-3.tailff9529.ts.net:46612","slept":[]}
+{"at":"2026-10-24T15:42:02.334Z","view":"t12-lru--p13--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46612"}
+{"at":"2026-10-24T15:42:03.153Z","publish":"t12-lru--p14--web","url":"https://trmd-metal-3.tailff9529.ts.net:46613","slept":[]}
+{"at":"2026-10-24T15:42:03.628Z","view":"t12-lru--p14--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46613"}
+{"at":"2026-10-24T15:42:04.437Z","publish":"t12-lru--p15--web","url":"https://trmd-metal-3.tailff9529.ts.net:46614","slept":[]}
+{"at":"2026-10-24T15:42:04.911Z","view":"t12-lru--p15--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46614"}
+{"at":"2026-10-24T15:42:07.571Z","daemon":3982740,"state":"/home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/.runs/t12-red-15/state"}
+{"at":"2026-10-24T15:42:08.202Z","view":"t12-lru--p01--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46600"}
+{"at":"2026-10-24T15:42:08.706Z","view":"t12-lru--p02--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46601"}
+{"at":"2026-10-24T15:42:09.206Z","view":"t12-lru--p03--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46602"}
+{"at":"2026-10-24T15:42:09.722Z","view":"t12-lru--p04--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46603"}
+{"at":"2026-10-24T15:42:10.231Z","view":"t12-lru--p05--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46604"}
+{"at":"2026-10-24T15:42:10.737Z","view":"t12-lru--p06--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46605"}
+{"at":"2026-10-24T15:42:11.244Z","view":"t12-lru--p07--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46606"}
+{"at":"2026-10-24T15:42:11.747Z","view":"t12-lru--p08--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46607"}
+{"at":"2026-10-24T15:42:12.251Z","view":"t12-lru--p09--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46608"}
+{"at":"2026-10-24T15:42:12.754Z","view":"t12-lru--p10--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46609"}
+{"at":"2026-10-24T15:42:13.259Z","view":"t12-lru--p11--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46610"}
+{"at":"2026-10-24T15:42:13.765Z","view":"t12-lru--p12--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46611"}
+{"at":"2026-10-24T15:42:14.269Z","view":"t12-lru--p13--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46612"}
+{"at":"2026-10-24T15:42:14.772Z","view":"t12-lru--p14--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46613"}
+{"at":"2026-10-24T15:42:15.280Z","view":"t12-lru--p15--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46614"}
+{"at":"2026-10-24T15:42:15.713Z","daemon":3982922,"state":"/home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/.runs/t12-red-15/state"}
+{"at":"2026-10-24T15:42:15.743Z","routes":[{"env":"t12-lru--p01--web","proxy":46100,"route":"http://127.0.0.1:46101","probe":46101},{"env":"t12-lru--p02--web","proxy":46102,"route":"http://127.0.0.1:46103","probe":46103},{"env":"t12-lru--p03--web","proxy":46104,"route":"http://127.0.0.1:46105","probe":46105},{"env":"t12-lru--p04--web","proxy":46106,"route":"http://127.0.0.1:46107","probe":46107},{"env":"t12-lru--p05--web","proxy":46108,"route":"http://127.0.0.1:46109","probe":46109},{"env":"t12-lru--p06--web","proxy":46110,"route":"http://127.0.0.1:46111","probe":46111},{"env":"t12-lru--p07--web","proxy":46112,"route":"http://127.0.0.1:46113","probe":46113},{"env":"t12-lru--p08--web","proxy":46114,"route":"http://127.0.0.1:46115","probe":46115},{"env":"t12-lru--p09--web","proxy":46116,"route":"http://127.0.0.1:46117","probe":46117},{"env":"t12-lru--p10--web","proxy":46118,"route":"http://127.0.0.1:46119","probe":46119},{"env":"t12-lru--p11--web","proxy":46120,"route":"http://127.0.0.1:46121","probe":46121},{"env":"t12-lru--p12--web","proxy":46122,"route":"http://127.0.0.1:46123","probe":46123},{"env":"t12-lru--p13--web","proxy":46124,"route":"http://127.0.0.1:46125","probe":46125},{"env":"t12-lru--p14--web","proxy":46126,"route":"http://127.0.0.1:46127","probe":46127},{"env":"t12-lru--p15--web","proxy":46128,"route":"http://127.0.0.1:46129","probe":46129}]}
+{"at":"2026-10-24T15:42:15.802Z","view":"t12-lru--p01--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46600"}
+{"at":"2026-10-24T15:42:15.865Z","view":"t12-lru--p02--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46601"}
+{"at":"2026-10-24T15:42:15.928Z","view":"t12-lru--p03--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46602"}
+{"at":"2026-10-24T15:42:15.990Z","view":"t12-lru--p04--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46603"}
+{"at":"2026-10-24T15:42:16.056Z","view":"t12-lru--p05--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46604"}
+{"at":"2026-10-24T15:42:16.124Z","view":"t12-lru--p06--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46605"}
+{"at":"2026-10-24T15:42:16.188Z","view":"t12-lru--p07--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46606"}
+{"at":"2026-10-24T15:42:16.251Z","view":"t12-lru--p08--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46607"}
+{"at":"2026-10-24T15:42:16.317Z","view":"t12-lru--p09--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46608"}
+{"at":"2026-10-24T15:42:16.388Z","view":"t12-lru--p10--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46609"}
+{"at":"2026-10-24T15:42:16.454Z","view":"t12-lru--p11--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46610"}
+{"at":"2026-10-24T15:42:16.514Z","view":"t12-lru--p12--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46611"}
+{"at":"2026-10-24T15:42:16.580Z","view":"t12-lru--p13--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46612"}
+{"at":"2026-10-24T15:42:16.644Z","view":"t12-lru--p14--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46613"}
+{"at":"2026-10-24T15:42:16.709Z","view":"t12-lru--p15--web","victim":null,"url":"https://trmd-metal-3.tailff9529.ts.net:46614"}
+{"at":"2026-10-24T15:42:17.521Z","publish":"t12-lru--p16--web","url":"https://trmd-metal-3.tailff9529.ts.net:46615","slept":[]}
+{"at":"2026-10-24T15:42:18.094Z","view":"t12-lru--p16--web","victim":"t12-lru--p03--web","url":"https://trmd-metal-3.tailff9529.ts.net:46615"}
+{"at":"2026-10-24T15:42:18.950Z","cleanup":"own previews and daemon stopped","pidsGone":31,"root":"/home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/.runs/t12-red-15"}
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 't12-lru--p03--web'
+- 't12-lru--p01--web'
+              ^
+
+    at visit (file:///home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/verify-lru.mjs:34:423)
+    at file:///home/trmd/.hive/v2/cells/pws-t12-lru-c2098f042368/github-com-honeybeehq-nectar-2b94ee083bd1-space-c2098f042368/test/fixtures/verify-lru.mjs:49:8
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 't12-lru--p03--web',
+  expected: 't12-lru--p01--web',
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.18.0

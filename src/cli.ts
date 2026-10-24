@@ -345,13 +345,10 @@ daemon
       traceTailscale(log, { all: debugEnabled() });
       setDiscoveryMode("service");
       const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true, touchEveryMs: Math.min(5 * 60_000, config.idle_stop_ms / 4) });
-      const remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
-      const control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
-        log({ event: "control_unavailable", message: asNectarError(error).message });
-        return undefined;
-      });
+      let remote: ReturnType<typeof startRemoteListener> | undefined;
+      let control: Awaited<ReturnType<typeof startControlServer>> | undefined;
       const shutdown = async (): Promise<void> => {
-        await remote.close();
+        await remote?.close();
         await control?.close();
         await supervisor.stop();
         await release();
@@ -359,7 +356,13 @@ daemon
       };
       process.once("SIGTERM", () => void shutdown());
       process.once("SIGINT", () => void shutdown());
-      await supervisor.start();
+      await supervisor.start(async () => {
+        remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
+        control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
+          log({ event: "control_unavailable", message: asNectarError(error).message });
+          return undefined;
+        });
+      });
     } catch (error) {
       const nectarError = asNectarError(error);
       process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);

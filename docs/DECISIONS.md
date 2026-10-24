@@ -932,3 +932,20 @@ aliases instead (Project design/relayd-acl-diff.md). (d) lets one host take over
 squat another's URL and pick phishing names. (e) puts a tailnet-facing process at root;
 the path unit keeps the privilege in systemd. (f) one operator's few hundred routes fit
 in a file written atomically, like the route files themselves.
+
+## D36 — Keep dynamic preview listeners while their apps sleep
+
+**Chose:** extend nectard's existing per-env HTTP proxy with a serialized wake before
+forwarding. A warm web record retains its proxy/tailnet ports, has zero pid/pgid and
+no upstream port. Dynamic web publishes are lazy when nectard is present; standalone
+publish remains eager. The existing 45-minute idle window applies to web and dev,
+with real HTTP traffic recording activity. Pinned previews and the bench stay running.
+**Alternatives:** another front-door service, redirecting sleeping URLs, or keeping
+apps alive forever.
+**Why:** the existing listener already supports HTTP streaming and WebSocket upgrades,
+and preserves current URLs without another service or startup-page redirect. Static
+routes remain independently pluggable. Sleeping previews consume no app admission or app upstream ports. Each retained proxy
+listener still uses a loopback port from the configured pool; widening that pool is the
+companion capacity change. Requests read the current record without taking its lock
+while serving; only a cold wake takes the lock. Activity writes remain throttled. Failed publishes release their route; the URL may
+change on the next publish, as before.

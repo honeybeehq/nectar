@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { runningDaemonPid } from "./daemon.js";
+import { upstreamOf, type Upstream } from "./proxy.js";
 import os from "node:os";
 import { availableMemory, previewMemoryAvailable } from "./capacity.js";
 import { ownerState, protectedPreview } from "./owner.js";
@@ -1131,7 +1133,7 @@ export class NectarService {
   }
 
   private async foreignServeAt(serve: ServeRecord, status?: unknown): Promise<boolean> {
-    if (serve.tailnet_port === undefined || serve.upstream_port === undefined) return false;
+    if (serve.tailnet_port === undefined || (serve.upstream_port === undefined && serve.proxy_port === undefined)) return false;
     const entries = serveEntries(status ?? (await serveStatus())).filter((entry) => entry.tailnetPort === serve.tailnet_port);
     return entries.some((entry) => !rootMount(entry) || !ownsLoopbackPort(serve, loopbackProxy(entry.target)?.upstreamPort));
   }
@@ -1243,14 +1245,12 @@ export class NectarService {
       if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined, options.branch, options.slot);
       if (
         old !== undefined &&
-        holdsRuntime(old.status) &&
+        (holdsRuntime(old.status) || (old.status === "warm" && old.serve?.proxy_port !== undefined)) &&
         (options.site !== undefined || (!old.borrowed_worktree && options.worktree === undefined))
       ) {
         return this.republishWeb(options, old);
       }
-      if (!previewMemoryAvailable(await availableMemory())) {
-        throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
-      }
+      if ((options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !previewMemoryAvailable(await availableMemory())) throw new NectarError("E_QUOTA", "Insufficient host memory for another preview");
       const initial = await this.initialRecord({ ...options, mode: "web" });
       const site = options.site;
       let record = initial.record;
@@ -1266,7 +1266,7 @@ export class NectarService {
         if (web === undefined) throw new NectarError("E_NO_RECIPE", "Published branch does not declare [web]");
         const depEnv = site === undefined ? await this.provisionDeps(record, loaded, options.fresh === true, stageWarnings) : {};
         if (web.build !== undefined) await this.runBuild(record, web.build, depEnv);
-        const published = await this.startWeb(record, web, initial.identity, initial.old, depEnv);
+        const published = await this.publishWebRuntime(record, web, initial.identity, initial.old, depEnv, site === undefined);
         return { ...published, warnings: [...published.warnings, ...stageWarnings] };
       } catch (error) {
         await this.rollbackRuntime(record, error);
@@ -1281,6 +1281,7 @@ export class NectarService {
   ): Promise<PublishedWeb> {
     const identity = await this.identity();
     const site = options.site;
+    if (site === undefined && (await runningDaemonPid(this.paths)) === undefined && !previewMemoryAvailable(await availableMemory())) throw new NectarError("E_QUOTA", "Insufficient host memory for another preview");
     const slot = path.join(this.paths.work, old.name);
     const destination = site !== undefined ? old.worktree : old.worktree === slot ? `${slot}.alt` : slot;
     const record = this.nextRecord({ ...options, mode: "web" }, old.name, destination, identity, old);
@@ -1307,18 +1308,29 @@ export class NectarService {
       if (web.build !== undefined) await this.runBuild(record, web.build, depEnv);
     } catch (error) {
       if (site === undefined) await this.discardWorktree(record.repo, destination).catch(() => undefined);
+      if (old.status === "warm") await this.store.readEnv(old.name).then((previous) => this.stopDeps(previous)).catch(() => undefined);
       const failure = asNectarError(error);
       throw new NectarError(
         failure.code,
-        `${failure.message}; ${old.name} still serves the previous publish (${old.commit})`,
-        { ...failure.details, still_serving: old.commit },
+        `${failure.message}; ${old.name} ${old.status === "warm" ? "stays asleep on" : "still serves"} the previous publish (${old.commit})`,
+        { ...failure.details, ...(old.status === "warm" ? { still_warm: old.commit } : { still_serving: old.commit }) },
       );
     }
-    await this.stopRuntime(old);
+    if (old.serve?.proxy_port !== undefined && (await runningDaemonPid(this.paths)) !== undefined) {
+      record.serve = { ...old.serve };
+      record.urls = { ...old.urls };
+      await this.store.writeEnv(record);
+      await stopEnvGroup(old.serve.pgid, old.name);
+      record.serve.pid = 0;
+      record.serve.pgid = 0;
+      delete record.serve.upstream_port;
+    } else {
+      await this.stopRuntime(old);
+    }
     await this.store.writeEnv(record);
     if (site === undefined && old.worktree !== destination) await this.discardWorktree(record.repo, old.worktree, old.repo);
     try {
-      const published = await this.startWeb(record, web, identity, old, depEnv);
+      const published = await this.publishWebRuntime(record, web, identity, old, depEnv, site === undefined);
       return { ...published, warnings: [...published.warnings, ...warnings] };
     } catch (error) {
       await this.rollbackRuntime(record, error);
@@ -1672,6 +1684,98 @@ export class NectarService {
     });
   }
 
+  private async publishWebRuntime(
+    record: EnvRecord,
+    recipe: WebRecipe,
+    identity: MachineIdentity,
+    old: EnvRecord | undefined,
+    depEnv: Record<string, string>,
+    dynamic: boolean,
+  ): Promise<PublishedWeb> {
+    if (!dynamic || (await runningDaemonPid(this.paths)) === undefined) return this.startWeb(record, recipe, identity, old, depEnv);
+    const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, () => ({ pid: 0, pgid: 0, cmd: recipe.serve }));
+    if (record.serve === undefined) throw new NectarError("E_INTERNAL", "Missing route allocation");
+    delete record.serve.upstream_port;
+    record.status = "warm";
+    const port = record.serve.proxy_port ?? upstreamPort;
+    if (port === undefined) throw new NectarError("E_PORTS", "Could not allocate preview listener");
+    record.serve.proxy_port = port;
+    record.urls.local = `http://127.0.0.1:${port}`;
+    const mesh = identity.online ? await serveWeb(tailnetPort, record.urls.local) : undefined;
+    record.urls.mesh = mesh?.ok === true && identity.dnsName !== undefined ? `https://${identity.dnsName}:${tailnetPort}` : null;
+    await this.stopDeps(record);
+    await this.store.writeEnv(record);
+    const deadline = Date.now() + 5_000;
+    while ((await probeProxy(port, record.name)) === undefined && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    if ((await probeProxy(port, record.name)) === undefined) throw new NectarError("E_SERVE_TIMEOUT", "nectard did not open the preview listener");
+    return { record, warnings: mesh?.ok === true ? [] : [meshWarning(mesh, `mesh URL unavailable; preview_url fell back to ${record.urls.local}`, identity.offline)], meshError: mesh?.ok === false ? mesh.message : identity.offline ?? null };
+  }
+
+  async wakeWeb(name: string): Promise<Upstream> {
+    const current = await this.store.readEnv(validateEnvName(name));
+    if ((holdsRuntime(current.status) || current.status === "crashed") && current.serve?.upstream_port !== undefined) {
+      return current.serve.upstream_host === undefined
+        ? upstreamOf(current.urls.local === `http://127.0.0.1:${current.serve.proxy_port}` ? null : current.urls.local, current.serve.upstream_port)
+        : { host: current.serve.upstream_host, port: current.serve.upstream_port };
+    }
+    return this.store.withLock(validateEnvName(name), async () => {
+      const record = await this.store.readEnv(name);
+      if (record.mode !== "web" || record.serve === undefined) throw new NectarError("E_NOT_FOUND", "Preview unavailable");
+      if (record.status === "warm") {
+        if (!previewMemoryAvailable(await availableMemory())) throw new NectarError("E_QUOTA", "Insufficient memory to wake preview");
+        const recipe = (await loadRecipe(record.worktree)).web;
+        if (recipe === undefined) throw new NectarError("E_NO_RECIPE", "Missing web recipe");
+        const old = structuredClone(record);
+        try {
+          await this.startDeps(record);
+          await this.startWeb(record, recipe, await this.identity(), old, await this.depEnv(record));
+        } catch (error) {
+          if (record.serve !== undefined && record.serve.pid > 1) await stopEnvGroup(record.serve.pgid, record.name);
+          await this.stopDeps(record);
+          record.serve = old.serve!;
+          record.urls = old.urls;
+          record.status = "warm";
+          await this.store.writeEnv(record);
+          throw error;
+        }
+      }
+      if ((!holdsRuntime(record.status) && record.status !== "crashed") || record.serve.upstream_port === undefined) throw new NectarError("E_NOT_FOUND", "Preview unavailable");
+      record.last_opened_at = new Date().toISOString();
+      await this.store.writeEnv(record);
+      return { host: record.serve.upstream_host ?? "127.0.0.1", port: record.serve.upstream_port };
+    });
+  }
+
+  private async sleepRuntime(record: EnvRecord): Promise<void> {
+    if (record.mode === "web" && record.serve?.proxy_port !== undefined) {
+      if ((await runningDaemonPid(this.paths)) === undefined) return;
+      await stopEnvGroup(record.serve.pgid, record.name);
+      if (groupAlive(record.serve.pgid)) throw new NectarError("E_BUSY", "Preview process still running");
+      await this.stopDeps(record);
+      record.serve.pid = 0;
+      record.serve.pgid = 0;
+      delete record.serve.upstream_port;
+      record.urls.local = `http://127.0.0.1:${record.serve.proxy_port}`;
+    } else {
+      await this.stopRuntime(record);
+      delete record.serve;
+    }
+    delete record.liveness;
+    record.status = "warm";
+    await this.store.writeEnv(record);
+  }
+
+  async idleStop(viewedAt: ReadonlyMap<string, number> = new Map()): Promise<void> {
+    const config = await this.store.readConfig();
+    for (const snapshot of await this.store.listEnvs()) {
+      if (protectedPreview(snapshot) || gcTransition(snapshot, new Date(), config.idle_stop_ms) !== "idle-stop") continue;
+      await this.store.withLock(snapshot.name, async () => {
+        const record = await this.store.readEnv(snapshot.name);
+        if (!protectedPreview(record) && Date.now() - (viewedAt.get(record.name) ?? 0) >= config.idle_stop_ms && gcTransition(record, new Date(), config.idle_stop_ms) === "idle-stop") await this.sleepRuntime(record);
+      }).catch(() => undefined);
+    }
+  }
+
   private async startWeb(
     record: EnvRecord,
     recipe: WebRecipe,
@@ -1699,7 +1803,8 @@ export class NectarService {
         log_tail: await logTail(this.paths, record.name),
       });
     }
-    record.urls.local = readyUrl.origin;
+    if (record.serve !== undefined) record.serve.upstream_host = readyUrl.hostname.replace(/^\[|\]$/g, "");
+    record.urls.local = record.serve?.proxy_port === undefined ? readyUrl.origin : `http://127.0.0.1:${record.serve.proxy_port}`;
     warnings[0] = `portless registration is deferred in v0 — local URL degraded to ${record.urls.local}`;
     let mesh: ServeOutcome | undefined;
     if (identity.online && identity.dnsName !== undefined) mesh = await serveWeb(tailnetPort, await this.meshTarget(record));
@@ -2319,7 +2424,8 @@ export class NectarService {
         await stopProcessGroup(spawned.pgid);
         return fail("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${readyPath} within ${readyTimeoutMs}ms`);
       }
-      record.urls.local = readyUrl.origin;
+      if (record.serve !== undefined) record.serve.upstream_host = readyUrl.hostname.replace(/^\[|\]$/g, "");
+      record.urls.local = serve.proxy_port === undefined ? readyUrl.origin : `http://127.0.0.1:${serve.proxy_port}`;
       const mesh = await this.assertMesh(record, identity);
       record.status = "serving";
       delete record.failure;
@@ -2335,7 +2441,7 @@ export class NectarService {
     await this.store.updateEnv(
       name,
       async (record) => {
-        if (record.mode === "web" && holdsRuntime(record.status)) asserted = await this.assertMesh(record, identity);
+        if (record.mode === "web" && (holdsRuntime(record.status) || record.status === "warm")) asserted = await this.assertMesh(record, identity);
       },
       { bestEffort: true },
     );
@@ -2357,11 +2463,15 @@ export class NectarService {
   }
 
   private async meshTarget(record: EnvRecord): Promise<string> {
-    const direct = record.urls.local ?? `http://127.0.0.1:${record.serve?.upstream_port}`;
-    const proxyPort = record.serve?.proxy_port;
-    if (proxyPort === undefined || record.serve?.upstream_port === undefined) return direct;
+    const serve = record.serve;
+    const host = serve?.upstream_host === "::1" ? "[::1]" : serve?.upstream_host ?? "127.0.0.1";
+    const direct = serve?.proxy_port !== undefined && serve.upstream_port !== undefined
+      ? `http://${host}:${serve.upstream_port}`
+      : record.urls.local ?? `http://${host}:${serve?.upstream_port}`;
+    const proxyPort = serve?.proxy_port;
+    if (proxyPort === undefined) return direct;
     const upstream = await probeProxy(proxyPort, record.name);
-    return upstream === record.serve.upstream_port ? `http://127.0.0.1:${proxyPort}` : direct;
+    return upstream !== undefined ? `http://127.0.0.1:${proxyPort}` : direct;
   }
 
   async assignProxyPort(name: string): Promise<number | undefined> {
@@ -2400,7 +2510,9 @@ export class NectarService {
         const tailnetPort = serve?.tailnet_port;
         if (record.mode !== "web" || record.urls.mesh === null || record.urls.local === null || serve === undefined || tailnetPort === undefined) return;
         if (await this.foreignServeAt(serve)) return;
-        restored = (await serveWeb(tailnetPort, record.urls.local)).ok;
+        if (serve.upstream_port === undefined) return;
+        const host = serve.upstream_host === "::1" ? "[::1]" : serve.upstream_host ?? "127.0.0.1";
+        restored = (await serveWeb(tailnetPort, `http://${host}:${serve.upstream_port}`)).ok;
       },
       { bestEffort: true },
     );
@@ -2408,7 +2520,9 @@ export class NectarService {
   }
 
   async touchView(name: string): Promise<string | undefined> {
-    return (await this.touchRecord(name, new Date()))?.expires_at;
+    const now = new Date();
+    await this.store.updateEnv(name, (record) => { record.last_opened_at = now.toISOString(); }, { bestEffort: true });
+    return (await this.touchRecord(name, now))?.expires_at;
   }
 
   async giveUp(name: string, expectPid: number, code: string, message: string): Promise<boolean> {
@@ -2624,6 +2738,7 @@ export class NectarService {
     }
     if (resolved.mode === "dev") return this.openDev(resolved, options);
     if (resolved.mode === "web") {
+      if (resolved.is_self && options.keep === true) await this.store.updateEnv(resolved.env, (record) => { record.pinned = true; });
       const url = resolved.is_self ? resolved.urls.local ?? resolved.urls.mesh : resolved.urls.mesh ?? resolved.urls.local;
       if (url === null) throw new NectarError("E_NOT_FOUND", `Web environment '${resolved.env}' has no reachable URL`);
       await this.launch(url);
@@ -3032,7 +3147,7 @@ export class NectarService {
       }
       if (target.kind !== "relay") throw new NectarError("E_EXPOSE", `Exposure kind '${target.kind}' is not implemented in v0.2`);
       const record = await this.refreshLiveness(await this.store.readEnv(name));
-      if (record.status !== "serving") {
+      if (record.status !== "serving" && !(record.mode === "web" && record.status === "warm" && record.serve?.proxy_port !== undefined)) {
         throw new NectarError("E_EXPOSE", `Environment '${name}' is ${record.status}; only a serving env can be exposed`);
       }
       // The relay proxies to the tailnet serve URL — that is the only address it can
@@ -3220,13 +3335,14 @@ export class NectarService {
     });
   }
 
-  async gc(options: { dryRun?: boolean } = {}): Promise<GcReport> {
+  async gc(options: { dryRun?: boolean; viewedAt?: ReadonlyMap<string, number> } = {}): Promise<GcReport> {
     const now = new Date();
     const config = await this.store.readConfig();
     const orphanReport = await this.sweepServeOrphans(config, options.dryRun === true);
     const report: Array<{ env: string; action: GcTransition }> = [];
     const skipped: Array<{ env: string; reason: string }> = [];
     const owners = new Map<string, Promise<Awaited<ReturnType<typeof ownerState>>>>();
+    const daemonRunning = (await runningDaemonPid(this.paths)) !== undefined;
     for (const snapshot of await this.store.listEnvs()) {
       if (protectedPreview(snapshot)) continue;
       let owner: Awaited<ReturnType<typeof ownerState>> | undefined;
@@ -3248,7 +3364,9 @@ export class NectarService {
         if (record.status === "serving" && owner === "inactive") {
           return record.owner_inactive_since !== undefined && now.getTime() - Date.parse(record.owner_inactive_since) >= 60 * 60_000 ? "reap" : undefined;
         }
-        return gcTransition(record, now, config.idle_stop_ms);
+        const action = gcTransition(record, now, config.idle_stop_ms);
+        if (action === "idle-stop" && now.getTime() - (options.viewedAt?.get(record.name) ?? 0) < config.idle_stop_ms) return undefined;
+        return action === "idle-stop" && record.mode === "web" && !daemonRunning ? undefined : action;
       };
       const action = transition(snapshot);
       if (!options.dryRun && ((owner === "inactive" && snapshot.owner_inactive_since === undefined) || (owner === "active" && snapshot.owner_inactive_since !== undefined))) {
@@ -3283,10 +3401,7 @@ export class NectarService {
             throw new NectarError("E_BUSY", "Runtime ownership unresolved; left alone");
           }
           if (currentAction === "idle-stop") {
-            await this.stopRuntime(record);
-            delete record.serve;
-            record.status = "warm";
-            await this.store.writeEnv(record);
+            await this.sleepRuntime(record);
           } else if (currentAction === "expire") {
             await this.releaseRuntime(record);
             await this.stopDeps(record);

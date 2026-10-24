@@ -99,6 +99,7 @@ export function classifyServeEntry(
       reason: `env ${owner.name} holds :${entry.tailnetPort} but upstream ${owner.serve?.upstream_port ?? "none"}, not ${upstream.upstreamPort}`,
     };
   }
+  if (owner?.status === "warm" && owner.serve?.proxy_port === upstream.upstreamPort) return { ...base, ...env, class: "owned", reason: `env ${owner.name} retains its sleeping preview route` };
   if (owner !== undefined && !probe.answering && probe.appAnswers === true && owner.urls.local !== null) {
     return {
       ...base,
@@ -112,7 +113,7 @@ export function classifyServeEntry(
     return { ...base, ...env, class: "owned", reason: `env ${owner.name}'s own process still runs` };
   }
   if (probe.answering) {
-    if (owner !== undefined && holdsRuntime(owner.status)) {
+    if (owner !== undefined && (holdsRuntime(owner.status) || (owner.status === "warm" && owner.serve?.proxy_port === upstream.upstreamPort))) {
       return { ...base, ...env, class: "owned", reason: `env ${owner.name} is ${owner.status} and its upstream answers` };
     }
     return {

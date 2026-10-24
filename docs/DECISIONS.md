@@ -938,3 +938,20 @@ in a file written atomically, like the route files themselves.
 GC retains previews while any linked proof waits for Tormod, independently of publisher session state and TTL. Terminal proofs receive 24 hours from the first successful terminal observation, persisted as `proof_terminal_since`. Waiting proofs reset that clock, so a reopened proof receives a fresh grace period. Failed reads preserve the clock but prevent retirement until a successful read. Unlinked previews retain the existing one-hour inactive-owner rule. Pinned and main bench previews remain protected.
 
 Apiary currently offers scoped Project reads and a Champion waiting list, neither a complete host-level preview lookup. Until it supplies that interface, `NECTAR_PROOF_LOOKUP` names an executable adapter, invoked directly without a shell. It receives versioned preview identity on stdin and returns a complete aggregate state. No adapter, timeout, invalid JSON or nonzero exit keeps the preview and records a reason. A missing service must cost storage rather than a reviewer's preview.
+
+## D36 — Keep dynamic preview listeners while their apps sleep
+
+**Chose:** extend nectard's existing per-env HTTP proxy with a serialized wake before
+forwarding. A warm web record retains its proxy/tailnet ports, has zero pid/pgid and
+no upstream port. Dynamic web publishes are lazy when nectard is present; standalone
+publish remains eager. The existing 45-minute idle window applies to web and dev,
+with real HTTP traffic recording activity. Pinned previews and the bench stay running.
+**Alternatives:** another front-door service, redirecting sleeping URLs, or keeping
+apps alive forever.
+**Why:** the existing listener already supports HTTP streaming and WebSocket upgrades,
+and preserves current URLs without another service or startup-page redirect. Static
+routes remain independently pluggable. Sleeping previews consume no app admission or app upstream ports. Each retained proxy
+listener still uses a loopback port from the configured pool; widening that pool is the
+companion capacity change. Requests read the current record without taking its lock
+while serving; only a cold wake takes the lock. Activity writes remain throttled. Failed publishes release their route; the URL may
+change on the next publish, as before.

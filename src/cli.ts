@@ -329,7 +329,7 @@ daemon
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
       traceTailscale(log, { all: debugEnabled() });
       setDiscoveryMode("service");
-      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
+      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true, touchEveryMs: Math.min(5 * 60_000, config.idle_stop_ms / 4) });
       const remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
       const control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
         log({ event: "control_unavailable", message: asNectarError(error).message });

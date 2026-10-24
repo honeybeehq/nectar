@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import type { Socket } from "node:net";
 import { pipeline } from "node:stream";
 
@@ -8,6 +9,8 @@ const UPSTREAM_HEADER = "x-nectar-upstream";
 export const DEFAULT_TOUCH_EVERY_MS = 5 * 60_000;
 
 export interface Upstream {
+  protocol?: "https:";
+  slept_previews?: string[];
   host: string;
   port: number;
 }
@@ -41,6 +44,8 @@ export class EnvProxy {
   private readonly server: http.Server;
   private preparing: Promise<Upstream> | undefined;
   private active = 0;
+
+  get busy(): boolean { return this.active > 0; }
   private heartbeat: NodeJS.Timeout | undefined;
   private readonly agent = new http.Agent({ keepAlive: true });
 
@@ -109,18 +114,20 @@ export class EnvProxy {
       response.end();
       return;
     }
+    if (!retried) this.track((done) => { response.once("finish", done); response.once("close", done); });
     try {
       if (this.prepare !== undefined) this.upstream = await this.ready();
-    } catch {
+    } catch (error) {
       response.writeHead(503, { "content-type": "text/plain; charset=utf-8", "retry-after": "2" });
-      response.end(`Nectar: ${this.env} could not wake; retry shortly.\n`);
+      const capacity = error instanceof Error && "code" in error && ["E_QUOTA", "E_PORTS"].includes(String(error.code));
+      response.end(capacity ? `Nectar: ${error.message}\n` : `Nectar: ${this.env} could not wake; retry shortly.\n`);
       return;
     }
     if (response.destroyed) return;
-    if (!retried && this.prepare !== undefined) this.track((done) => { response.once("finish", done); response.once("close", done); });
+    if (this.upstream.slept_previews?.length) response.setHeader("x-nectar-slept-previews", this.upstream.slept_previews.join(","));
     if (!retried && (this.prepare !== undefined || isView(request))) this.onView();
-    const outbound = http.request(
-      { ...this.upstream, method: request.method, path: request.url, headers: request.headers, agent: this.agent },
+    const outbound = (this.upstream.protocol === "https:" ? https : http).request(
+      { ...this.upstream, method: request.method, path: request.url, headers: this.upstream.protocol === "https:" ? { ...request.headers, host: `${this.upstream.host}:${this.upstream.port}` } : request.headers, agent: this.upstream.protocol === "https:" ? false : this.agent },
       (inbound) => {
         response.writeHead(inbound.statusCode ?? 502, inbound.statusMessage, inbound.rawHeaders);
         pipeline(inbound, response, () => undefined);
@@ -147,6 +154,7 @@ export class EnvProxy {
 
   private async tunnel(request: http.IncomingMessage, socket: Socket, head: Buffer, retried = false): Promise<void> {
     socket.on("error", () => socket.destroy());
+    if (!retried) this.track((done) => { socket.once("close", done); });
     try {
       if (this.prepare !== undefined) this.upstream = await this.ready();
     } catch {
@@ -154,9 +162,8 @@ export class EnvProxy {
       return;
     }
     if (socket.destroyed) return;
-    if (this.prepare !== undefined) this.track((done) => { socket.once("close", done); });
     this.onView();
-    const outbound = http.request({ ...this.upstream, method: request.method, path: request.url, headers: request.headers, agent: false });
+    const outbound = (this.upstream.protocol === "https:" ? https : http).request({ ...this.upstream, method: request.method, path: request.url, headers: this.upstream.protocol === "https:" ? { ...request.headers, host: `${this.upstream.host}:${this.upstream.port}` } : request.headers, agent: false });
     outbound.on("upgrade", (inbound, upstreamSocket: Socket, upstreamHead: Buffer) => {
       upstreamSocket.on("error", () => socket.destroy());
       socket.on("close", () => upstreamSocket.destroy());

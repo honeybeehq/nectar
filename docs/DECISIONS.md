@@ -956,7 +956,7 @@ companion capacity change. Requests read the current record without taking its l
 while serving; only a cold wake takes the lock. Activity writes remain throttled. Failed publishes release their route; the URL may
 change on the next publish, as before.
 
-## D37 — Available TCP ports, not 100-port preview slots
+## D37 — Available TCP ports across the full configured ranges
 
 **Chose:** widen the default upstream range to 4100–65535 and mesh range to
 8443–65535, migrating saved old defaults on read while preserving custom ranges.
@@ -1040,3 +1040,41 @@ Rollback: old relayd treats a static upstream as unreadable state and refuses st
 for the whole state file. Before downgrading, remove static public routes through the
 upgraded admin API/CLI; retain origin routes. Do not edit live state manually. Directory
 Location rewriting handles relative headers as emitted by the shared server today.
+
+## D39 — Reclaim idle runtime capacity before refusing a preview
+
+On memory admission or TCP exhaustion, retry after sleeping the least recently viewed
+running dynamic web preview. The daemon's live proxy activity wins over throttled
+on-disk view timestamps. Count requests before wake begins; active responses, streams
+and upgrades, pinned/keep previews and the main bench cannot be selected. Recheck under
+the environment lock. Unknown activity is protected. Keep files, listeners, routes and
+URLs; never delete or retire for capacity, and never select static previews. Sleeping
+cannot recover retained listener/tailnet ports, so true custom-range exhaustion can remain.
+
+If local recovery is exhausted, use only configured pool hosts, ordered by the existing
+least-loaded chooser, with its dependency and mesh-denied filters. Retry another host
+on capacity refusal; preserve sticky placement. Explicit --local/--host and received
+publishes do not bounce between hosts. No configured pool means an actionable capacity
+error naming `nectar pool add <host>`, memory and custom port bounds. We deliberately do
+not discover arbitrary tailnet hosts: reachability is not permission to ship code there.
+
+A wake may ship its exact published commit to the pool and retain the original URL as
+an HTTPS proxy to the returned mesh URL. Persist that target until republish; record
+host and URL in capacity.jsonl. Local runtime recovery records slept names there and
+returns them in x-nectar-slept-previews. Publish results include slept_previews,
+placed_on/placement_reason when moved and a top-level preview_url (also retained in
+packet_fields). Agents can copy that URL directly into proof.
+
+The explicit NECTAR_TEST_RUNTIME_MEMORY_BYTES daemon environment override replaces
+memory admission with a deterministic byte budget, charging 256 MiB for each actual
+running dynamic process plus the requested one. It is a fixture control, never a default
+count limit. Production continues to measure reclaimable host memory and its reserve.
+
+Concurrent cold wakes retain per-environment concurrency rather than holding a host-wide
+lock throughout app/dependency boot. Requests arriving during a capacity sleep wait
+before forwarding. Concurrent admissions can reclaim more than one runtime; memory
+admission remains a headroom estimate rather than an atomic memory reservation.
+Remote wake targets remain sticky until republish; recovery after a dead remote target
+and immediate remote teardown on local removal are not provided. The shipped copy has
+the remaining original TTL. The remote wake/HTTPS path requires a real cross-host check
+before rollout; this task could not start an isolated remote daemon due to SSH denial.

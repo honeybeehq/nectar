@@ -64,6 +64,10 @@ export class ProxyHub {
     return this.viewedAt;
   }
 
+  activity(name: string): { active: boolean; viewedAt?: number } {
+    return { active: this.proxies.get(name)?.busy ?? true, ...(this.viewedAt.has(name) ? { viewedAt: this.viewedAt.get(name)! } : {}) };
+  }
+
   ports(): Map<string, number> {
     return new Map([...this.proxies].map(([name, proxy]) => [name, proxy.port]));
   }
@@ -192,6 +196,7 @@ export class Supervisor {
     this.probe = options.probe ?? (async (serve) => probeLiveness(serve));
     this.log = options.log ?? (() => undefined);
     this.hub = options.front === true ? new ProxyHub(service, options.touchEveryMs ?? DEFAULT_TOUCH_EVERY_MS, this.log) : undefined;
+    if (this.hub !== undefined) service.setCapacityActivity?.((name) => this.hub!.activity(name));
   }
 
   async start(): Promise<void> {

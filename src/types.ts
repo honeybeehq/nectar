@@ -105,6 +105,7 @@ export interface ServeRecord {
   pgid: number;
   upstream_port?: number;
   upstream_host?: string;
+  capacity_remote_url?: string;
   tailnet_port?: number;
   proxy_port?: number;
   started_at?: string;

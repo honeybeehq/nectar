@@ -1016,3 +1016,28 @@ The expanded relay range still authorizes only the caller's own MagicDNS host. I
 is not evidence that a service belongs to Nectar. Hosts trusted to publish arbitrary
 recipes can already proxy other services on their own host; restricting port numbers
 is not a substitute for that trust boundary. Deployment ACLs remain operator policy.
+
+
+### Shared static public exposure (T10, 2026-10-24)
+
+Keep public URLs at their existing origin root. Accept only T2's literal
+`/s/<env>/<32 lowercase hex token>/` upstream prefix, validated before URL parsing;
+prepend it with Caddy's rewrite and strip it from directory Location headers. Caddy
+reverse_proxy still receives only the HTTPS origin. This preserves relative assets,
+directory navigation and password gating without letting callers submit arbitrary
+paths, credentials, queries, fragments or traversal. Rebuilt upstreams still require
+the caller's own MagicDNS host and ports 8443–65535 excluding the reserved service
+ports. Prototype property names and sanitized forms are refused as public names.
+Persisted routes and admin imports understand the same exact static path shape;
+legacy origin routes continue to render unchanged. Production requires a relayd
+upgrade, route rerender/reload, and ACL reachability for expanded preview ports.
+
+The shared server rejects raw dot segments, encoded slashes and backslashes before
+WHATWG URL normalization. Otherwise a public request could climb out of its rewritten
+prefix into a sibling preview with a known token. Real Caddy reproduced this escape
+and then refused literal, encoded and mixed-case variants after the fix.
+
+Rollback: old relayd treats a static upstream as unreadable state and refuses startup
+for the whole state file. Before downgrading, remove static public routes through the
+upgraded admin API/CLI; retain origin routes. Do not edit live state manually. Directory
+Location rewriting handles relative headers as emitted by the shared server today.

@@ -1,0 +1,17 @@
+
+> @trmd/nectar@0.0.0 typecheck /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+> tsc -p tsconfig.json --noEmit
+
+
+> @trmd/nectar@0.0.0 lint /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+> eslint .
+
+
+ RUN  v4.1.10 /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+
+
+ Test Files  3 passed (3)
+      Tests  32 passed (32)
+   Start at  16:47:49
+   Duration  17.36s (transform 1.22s, setup 343ms, import 1.56s, tests 21.85s, environment 0ms)
+

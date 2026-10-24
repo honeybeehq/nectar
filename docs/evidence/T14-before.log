@@ -1,0 +1,6 @@
+{"at":"2026-10-24T17:09:26.397Z","root":"/home/trmd/.hive/v2/cells/pws-t14-ebusy-e8b26d13709a/github-com-honeybeehq-nectar-2b94ee083bd1-space-e8b26d13709a/.audit/t14-nWhzIq","daemon":2375012,"baseline":true}
+{"at":"2026-10-24T17:09:28.761Z","phase":"held-lock","operation":0,"elapsedMs":1526,"status":"rejected","code":"E_BUSY","message":"Environment 'machine--ports' is busy; retry shortly","details":{"lock":"machine--ports"}}
+{"at":"2026-10-24T17:09:28.761Z","phase":"held-lock","operation":1,"elapsedMs":1526,"status":"rejected","code":"E_BUSY","message":"Environment 'machine--ports' is busy; retry shortly","details":{"lock":"machine--ports"}}
+{"at":"2026-10-24T17:09:28.761Z","phase":"held-lock","operation":2,"elapsedMs":1526,"status":"rejected","code":"E_BUSY","message":"Environment 'machine--ports' is busy; retry shortly","details":{"lock":"machine--ports"}}
+{"at":"2026-10-24T17:09:28.762Z","reproduced":true}
+{"at":"2026-10-24T17:09:28.826Z","cleanup":true}

@@ -1,0 +1,15 @@
+Typecheck, lint and build passed.
+Archived unchanged d5eeb86 and final changed source: each 358 passed, 8 failed, 3 skipped.
+Private network namespaces, two workers. No new failing names.
+
+Identical failing names:
+test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+
+Final source recheck after single-flight and static recipe fixes: docs/evidence/T7-suite-last.log, same exact failure names and 358/8/3.

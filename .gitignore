@@ -9,3 +9,9 @@ RESULT.json
 docs/LOCAL-SETUP.md
 *.local.md
 .nectar.local.json
+
+.audit/demand-*/
+.audit/baseline/
+.audit/T3.diff
+
+test/fixtures/.runs/

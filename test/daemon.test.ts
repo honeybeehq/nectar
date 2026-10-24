@@ -43,6 +43,7 @@ function fakeService(records: EnvRecord[]): {
     revive,
     giveUp,
     reassertMesh,
+    idleStop: () => Promise.resolve(),
     gc,
   } as unknown as NectarService;
   return { service, revive, giveUp, reassertMesh, gc };

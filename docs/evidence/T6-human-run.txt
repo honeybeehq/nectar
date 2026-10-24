@@ -1,0 +1,89 @@
+{"isolatedDaemon":2309209,"state":"/home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b/.audit/recovery-1792855795170/state"}
+{"normalJson":{"ok":true,"command":"publish","result":{"eid":"b2ab","env":"recovery--p01--web","mode":"web","branch":"p01","branch_source":"flag","commit":"3d91a7e5","ref":"nectar://trmd-metal-2/recovery--p01--web","urls":{"local":"http://127.0.0.1:33100","mesh":"https://trmd-metal-2.tailff9529.ts.net:33400","public":null},"packet_fields":{"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33400","testpack_ref":null,"dev_ref":null,"shell_recipe":null,"public_url":null},"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33400","evidence":[],"expires_at":"2026-10-31T15:29:55.936Z","warnings":[],"mesh_error":null,"deps":null,"slept_previews":[],"via":"nectard"}}}
+NORMAL HUMAN
+{
+  "eid": "b2ab",
+  "env": "recovery--p01--web",
+  "mode": "web",
+  "branch": "p01",
+  "branch_source": "flag",
+  "commit": "3d91a7e5",
+  "ref": "nectar://trmd-metal-2/recovery--p01--web",
+  "urls": {
+    "local": "http://127.0.0.1:33100",
+    "mesh": "https://trmd-metal-2.tailff9529.ts.net:33400",
+    "public": null
+  },
+  "packet_fields": {
+    "preview_url": "https://trmd-metal-2.tailff9529.ts.net:33400",
+    "testpack_ref": null,
+    "dev_ref": null,
+    "shell_recipe": null,
+    "public_url": null
+  },
+  "preview_url": "https://trmd-metal-2.tailff9529.ts.net:33400",
+  "evidence": [],
+  "expires_at": "2026-10-31T15:29:57.055Z",
+  "warnings": [],
+  "mesh_error": null,
+  "deps": null,
+  "slept_previews": [],
+  "via": "nectard"
+}
+Preview: https://trmd-metal-2.tailff9529.ts.net:33400
+
+{"publish":1,"url":"https://trmd-metal-2.tailff9529.ts.net:33400","status":200}
+{"publish":2,"url":"https://trmd-metal-2.tailff9529.ts.net:33401","status":200}
+{"publish":3,"url":"https://trmd-metal-2.tailff9529.ts.net:33402","status":200}
+{"publish":4,"url":"https://trmd-metal-2.tailff9529.ts.net:33403","status":200}
+{"publish":5,"url":"https://trmd-metal-2.tailff9529.ts.net:33404","status":200}
+{"publish":6,"url":"https://trmd-metal-2.tailff9529.ts.net:33405","status":200}
+{"publish":7,"url":"https://trmd-metal-2.tailff9529.ts.net:33406","status":200}
+{"publish":8,"url":"https://trmd-metal-2.tailff9529.ts.net:33407","status":200}
+{"publish":9,"url":"https://trmd-metal-2.tailff9529.ts.net:33408","status":200}
+{"publish":10,"url":"https://trmd-metal-2.tailff9529.ts.net:33409","status":200}
+{"publish":11,"url":"https://trmd-metal-2.tailff9529.ts.net:33410","status":200}
+{"publish":12,"url":"https://trmd-metal-2.tailff9529.ts.net:33411","status":200}
+RECOVERY HUMAN
+{
+  "eid": "1be6",
+  "env": "recovery--p13--web",
+  "mode": "web",
+  "branch": "p13",
+  "branch_source": "flag",
+  "commit": "3d91a7e5",
+  "ref": "nectar://trmd-metal-2/recovery--p13--web",
+  "urls": {
+    "local": "http://127.0.0.1:33105",
+    "mesh": "https://trmd-metal-2.tailff9529.ts.net:33412",
+    "public": null
+  },
+  "packet_fields": {
+    "preview_url": "https://trmd-metal-2.tailff9529.ts.net:33412",
+    "testpack_ref": null,
+    "dev_ref": null,
+    "shell_recipe": null,
+    "public_url": null
+  },
+  "preview_url": "https://trmd-metal-2.tailff9529.ts.net:33412",
+  "evidence": [],
+  "expires_at": "2026-10-31T15:30:16.805Z",
+  "warnings": [],
+  "mesh_error": null,
+  "deps": null,
+  "slept_previews": [
+    "recovery--p03--web"
+  ],
+  "via": "nectard"
+}
+Preview: https://trmd-metal-2.tailff9529.ts.net:33412
+Put to sleep: recovery--p03--web; their URLs wake them on a visit.
+
+{"thirteenthPublish":{"ok":true,"result":{"eid":"1be6","env":"recovery--p13--web","mode":"web","branch":"p13","branch_source":"flag","commit":"3d91a7e5","ref":"nectar://trmd-metal-2/recovery--p13--web","urls":{"local":"http://127.0.0.1:33105","mesh":"https://trmd-metal-2.tailff9529.ts.net:33412","public":null},"packet_fields":{"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33412","testpack_ref":null,"dev_ref":null,"shell_recipe":null,"public_url":null},"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33412","evidence":[],"expires_at":"2026-10-31T15:30:16.805Z","warnings":[],"mesh_error":null,"deps":null,"slept_previews":["recovery--p03--web"],"via":"nectard"}}}
+{"wakeResponse":"HTTP/2 200 \r\ndate: Sat, 24 Oct 2026 15:30:18 GMT\r\nx-nectar-slept-previews: recovery--p04--web\r\n\r\nawake:recovery--p03--web"}
+{"sleptUrlWakes":"https://trmd-metal-2.tailff9529.ts.net:33402","status":200,"capacityEvents":"{\"event\":\"wake_capacity\",\"env\":\"recovery--p03--web\",\"slept_previews\":[\"recovery--p04--web\"],\"at\":\"2026-10-24T15:30:18.785Z\"}\n"}
+FAILURE HUMAN
+E_PORTS: No available TCP port in configured range 33100-33100; widen custom port bounds or publish with --host <host>; no idle dynamic runtime can be put to sleep. Alternatively, configure nectar pool add <host> and publish without --local or --host for automatic host placement
+
+{"noEligibleRuntime":{"ok":false,"command":"publish","error":{"code":"E_PORTS","message":"No available TCP port in configured range 33100-33100; widen custom port bounds or publish with --host <host>; no idle dynamic runtime can be put to sleep. Alternatively, configure nectar pool add <host> and publish without --local or --host for automatic host placement","slept_previews":[]}}}
+{"cleanup":"own previews stopped; own daemon exited","remainingRoutes":[],"startedPidsGone":14,"root":"/home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b/.audit/recovery-1792855795170"}

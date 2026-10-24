@@ -91,6 +91,13 @@ export function classifyServeEntry(
   }
   const owner = serveEntryOwner(entry, records);
   const env = owner === undefined ? {} : { env: owner.name };
+  if (
+    owner === undefined &&
+    (config.tailnet_port_end - config.tailnet_port_start >= 100 || config.upstream_port_end - config.upstream_port_start >= 100) &&
+    (entry.tailnetPort > 8542 || upstream.upstreamPort > 4199)
+  ) {
+    return { ...base, class: "ambiguous", reason: "no env record proves Nectar owns this entry outside the legacy port ranges" };
+  }
   if (owner !== undefined && owner.serve?.upstream_port !== upstream.upstreamPort && owner.serve?.proxy_port !== upstream.upstreamPort) {
     return {
       ...base,
@@ -99,6 +106,7 @@ export function classifyServeEntry(
       reason: `env ${owner.name} holds :${entry.tailnetPort} but upstream ${owner.serve?.upstream_port ?? "none"}, not ${upstream.upstreamPort}`,
     };
   }
+  if (owner?.status === "warm" && owner.serve?.proxy_port === upstream.upstreamPort) return { ...base, ...env, class: "owned", reason: `env ${owner.name} retains its sleeping preview route` };
   if (owner !== undefined && !probe.answering && probe.appAnswers === true && owner.urls.local !== null) {
     return {
       ...base,
@@ -112,7 +120,7 @@ export function classifyServeEntry(
     return { ...base, ...env, class: "owned", reason: `env ${owner.name}'s own process still runs` };
   }
   if (probe.answering) {
-    if (owner !== undefined && holdsRuntime(owner.status)) {
+    if (owner !== undefined && (holdsRuntime(owner.status) || (owner.status === "warm" && owner.serve?.proxy_port === upstream.upstreamPort))) {
       return { ...base, ...env, class: "owned", reason: `env ${owner.name} is ${owner.status} and its upstream answers` };
     }
     return {

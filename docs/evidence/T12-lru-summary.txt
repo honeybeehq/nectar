@@ -1,0 +1,36 @@
+One final isolated real-daemon run on metal-3; HTTPS curl through issued preview URLs.
+All 15 routes confirmed through viewing proxies after restart.
+Simulated reboot: control ready before one own app finished a 2.5s startup.
+Memory budget = 15 x 256 MiB (synthetic admission, not physical RAM exhaustion).
+
+Trigger | Expected oldest eligible | Slept | Result
+E_QUOTA p16 | p01 | p01 | PASS
+E_QUOTA p01 | p02 | p02 | PASS
+E_QUOTA p02 | p03 | p03 | PASS
+E_QUOTA p03 | p05 | p05 | PASS
+E_QUOTA p05 | p09 | p09 | PASS
+E_PORTS publish | p08 | p08 | PASS
+E_QUOTA p08 | p10 | p10 | PASS
+E_PORTS publish | p11 | p11 | PASS
+E_QUOTA p11 | p12 | p12 | PASS
+E_PORTS publish | none (all protected) | none | PASS
+E_PORTS publish | none (all protected) | none | PASS
+
+p04 re-viewed within disk throttle: live time newer than saved time; p05 slept instead.
+p06 pinned, p07 active HTTPS stream, p08 lock held: each logged; p09 slept.
+Three internal proxy probes and a direct wake of running p06 leave saved view time unchanged.
+Two finite-range publishes return their exact chosen victim in slept_previews.
+All-pinned refusals log every candidate and reason. At 1024 bytes, log rotates with two previous files.
+Cleanup: all40 observed own app PIDs gone; no own Serve routes remain; own daemon stopped.
+
+Typecheck/lint/build pass. Final Linux suite:358 passed,8 known failures,3 skipped; exact names equal baseline.
+
+Raw ordered candidate lists: docs/evidence/T12-capacity.jsonl (current and two rotated files combined).
+Full asserted run: docs/evidence/T12-lru-run.log
+Before: docs/evidence/T12-before.log (p03 selected instead of p01 after restart).
+
+Historical T7 p10/p05 cannot be explained exactly: no candidate, skip or routing snapshots survived.
+Reproduced cause: early daemon hello + parallel Serve restoration exhausting ETag retries leave direct app routes.
+Those URL views bypass the activity map; recovery falls back to stale timestamps.
+Old records without last_viewed_at use published_at until a real request; live-only views can be lost on restart.
+Live evidence is Linux LocalAPI, not a macOS or remote-host ordering guarantee.

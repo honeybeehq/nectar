@@ -1,0 +1,351 @@
+
+ RUN  v4.1.10 /home/trmd/.hive/v2/cells/pws-t3-ondemand-7e584dbfea93/github-com-honeybeehq-nectar-2b94ee083bd1-space-7e584dbfea93/.audit/baseline
+
+ ✓ test/control.test.ts > nectard control socket > listens on a 0600 socket and says which home it serves 22ms
+ ✓ test/control.test.ts > nectard control socket > never steals a live socket, replaces a stale one, and refuses a shared directory 57ms
+ ✓ test/doctor.test.ts > serve entry classification > keeps live envs and envs whose own process still runs 2ms
+ ✓ test/doctor.test.ts > serve entry classification > marks dead Nectar targets as orphans 2ms
+ ✓ test/doctor.test.ts > serve entry classification > never treats non-Nectar targets as orphans 0ms
+ ✓ test/doctor.test.ts > serve entry classification > counts an env's nectard proxy port as its own and re-points a dead proxy at a live app 0ms
+ ✓ test/doctor.test.ts > serve entry classification > treats Tailscale Service entries as foreign 0ms
+ ✓ test/doctor.test.ts > serve entry classification > never removes an orphan that shares its port or is not the root mount 0ms
+ ✓ test/doctor.test.ts > serve entry classification > reports anything it cannot prove as ambiguous 0ms
+ ✓ test/doctor.test.ts > serve entry classification > reads every target under a port key, including TCP forwards and text handlers 7ms
+ ✓ test/doctor.test.ts > doctor helpers > extracts the tools a serve or build command runs 1ms
+ ✓ test/doctor.test.ts > doctor helpers > parses the program and environment back out of both unit formats 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > supervises only live, unexpired web envs that are not given up 3ms
+ ✓ test/daemon.test.ts > supervisor decisions > revives an env whose process exited and leaves serving ones alone 5ms
+ ✓ test/daemon.test.ts > supervisor decisions > backs off between revives and gives up after the crash-loop cap 4ms
+ ✓ test/daemon.test.ts > supervisor decisions > forgets old revives, so a rare crash is always revived 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > does not count a revive that lost a race with a publish 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > gives up with E_PORTS instead of re-pointing the mesh when a stranger answers on a dead env's port 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > restarts an unhealthy env only after N consecutive unhealthy probes 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > on start restores envs from before the boot without killing their stale pids and re-asserts live mesh entries 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > retries mesh re-assertion while tailscale is not up yet 1ms
+ ✓ test/daemon.test.ts > supervisor decisions > schedules liveness every interval and gc hourly, without overlapping cycles 7ms
+ × test/daemon.test.ts > supervisor against the real service > revives a killed serve on the same port and re-asserts its tailscale mapping 338ms
+   → expected 'crashed' to be 'serving' // Object.is equality
+ ✓ test/control.test.ts > nectard control socket > publishes a Cell's static dir into its own work dir, stamps the caller, and keeps serving after the source is gone 297ms
+ × test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url 422ms
+   → expected { Object (env, ref, ...) } to match object { mode: 'ios', …(4) }
+(29 matching properties omitted from actual)
+ ✓ test/control.test.ts > nectard control socket > gets a mesh URL from a tailscale CLI that refuses to act as the CLI inside nectard's launchd job 204ms
+ ✓ test/control.test.ts > nectard control socket > names the real tailscale failure in the publish warning and logs the call as one JSON line 205ms
+ × test/control.test.ts > nectard control socket > refuses sources outside the home and the Cell, through symlinks, and inside Nectar's own state 27ms
+   → expected NectarError: --worktree and --verify do n… { …(2) } to match object { code: 'E_CHECKOUT' }
+(2 matching properties omitted from actual)
+ ✓ test/control.test.ts > nectard control socket > serves only Nectar's own operations with checked arguments and the same NECTAR_HOME 19ms
+ ✓ test/daemon.test.ts > supervisor against the real service > revives a static env with a server command re-derived from this install, not the stale recorded path 438ms
+ ✓ test/ios.test.ts > ios publish > degrades to simpack-only when serve-sim fails (F12) 498ms
+ ✓ test/ios.test.ts > ios publish > opens an ios env into a scratch simulator on a sim-capable host 403ms
+ × test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url 95ms
+   → Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ✓ test/daemon.test.ts > supervisor against the real service > after a reboot, never signals a stranger on the port: drops only its own mesh entry and waits for a republish 710ms
+ ✓ test/control.test.ts > nectard control socket > never runs hooks, fsmonitor or filter drivers planted in a Cell repo's git config 840ms
+ ✓ test/control.test.ts > nectard control socket > refuses a partial clone so a planted promisor remote is never fetched from 68ms
+ ✓ test/control.test.ts > route selection > prefers a running nectard for the same home and honours --direct 1ms
+ ✓ test/control.test.ts > route selection > fails with E_DAEMON and the install hint when the home is read-only and nectard cannot help 2ms
+ ✓ test/control.test.ts > route selection > finds the Cell root from the working directory 0ms
+ ✓ test/daemon.test.ts > supervisor against the real service > does not re-point the mesh at a stranger answering on a dead env's port 366ms
+ ✓ test/integration.test.ts > fixture-backed web publish > publishes, preserves its URL on republish, scrubs secrets, and reports a killed serve 1943ms
+ × test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent 1148ms
+   → expected '2 dead or expired envs hold resources…' to deeply equal { Object ($$typeof, sample, ...) }
+ × test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run 1127ms
+   → expected 4 to be less than 0
+ ✓ test/doctor.test.ts > doctor --fix on a messy machine > reports a foreign 443 entry as a warning and stays healthy 561ms
+ ✓ test/doctor.test.ts > doctor --fix on a messy machine > flags a unit that runs another node or CLI and leaves another home's unit alone 101ms
+ ✓ test/doctor.test.ts > doctor --no-daemon > skips installing nectard, reports it as info, and --save keeps that until daemon install 203ms
+ ✓ test/doctor.test.ts > tailscale-serve doctor check > fails with the operator hint when tailscaled denies serve changes, and never changes the config 68ms
+ ✓ test/doctor.test.ts > republish next to a foreign serve entry > leaves a foreign entry on its old tailnet port alone and moves to a fresh port 620ms
+ × test/daemon.test.ts > supervisor against the real service > revives without re-pointing its tailnet port once something else took that port over 2466ms
+   → expected 'crashed' to be 'serving' // Object.is equality
+ ✓ test/daemon.test.ts > supervisor against the real service > restarting an unhealthy env never signals a recorded pid that is not the env's own process 492ms
+ ✓ test/integration.test.ts > fixture-backed web publish > refuses a same-named env from another repo, leaves it serving, and publishes beside it with --name 2353ms
+ × test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor 2756ms
+   → expected { dry_run: true, …(15) } to match object { branch: 'detached-edeb85a9', …(1) }
+(14 matching properties omitted from actual)
+ × test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url 61ms
+   → expected { dry_run: true, …(15) } to match object { branch: 'detached-798d6c3c', …(1) }
+(14 matching properties omitted from actual)
+ ✓ test/daemon.test.ts > supervisor against the real service > gives up on a crash loop: marks the env, removes its tailscale entry, keeps the record 2343ms
+ × test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry 478ms
+   → expected 'serving' to be 'expired' // Object.is equality
+ ✓ test/daemon.test.ts > process ownership > recognises a process by the NECTAR_ENV it was started with 156ms
+ ✓ test/daemon.test.ts > daemon pid file > refuses a second live daemon for the same NECTAR_HOME and releases on exit 5ms
+ ✓ test/daemon.test.ts > service units > renders a systemd --user unit that restarts nectard and never kills its serves 0ms
+ ✓ test/daemon.test.ts > service units > renders a launchd agent with KeepAlive, RunAtLoad and an abandoned process group 0ms
+ ✓ test/daemon.test.ts > service units > installs, reports and uninstalls the systemd unit through systemctl --user 30ms
+ ✓ test/daemon.test.ts > service units > installs and removes the launchd agent through launchctl bootstrap/bootout 22ms
+ ✓ test/daemon.test.ts > service units > uninstall waits until launchctl print no longer finds the agent and reports it 324ms
+ ✓ test/daemon.test.ts > service units > uninstall gives up waiting after its bound and says the agent is still loaded 327ms
+ ✓ test/daemon.test.ts > service units > reinstalling over a loaded agent waits for bootout to finish before bootstrapping 344ms
+ ✓ test/integration.test.ts > fixture-backed web publish > keeps the previous publish serving when a republish fails to install or check out 2555ms
+ ✓ test/integration.test.ts > fixture-backed web publish > implements F2 local-only fallback when Tailscale is down 566ms
+ ✓ test/daemon.test.ts > service units > retries bootstrap once on launchd's transient I/O error 5 and ends loaded 527ms
+ ✓ test/daemon.test.ts > service units > fails clearly, naming launchctl's error, when bootstrap keeps failing 1024ms
+ ✓ test/daemon.test.ts > service units > reinstalling an unchanged, running launchd agent restarts it in place 28ms
+ ✓ test/daemon.test.ts > service units > reinstalling the systemd unit twice restarts it and leaves it active with a pid 34ms
+ ✓ test/daemon.test.ts > service units > fails clearly when systemctl restart leaves the unit failed 12ms
+ ✓ test/daemon.test.ts > service units > daemon status reads the live pid from launchctl print right after install 19ms
+ ✓ test/daemon.test.ts > service units > daemon status falls back to nectard.pid and waits briefly for it while the unit is starting 321ms
+ ✓ test/daemon.test.ts > service units > daemon status does not wait when the unit is not running 6ms
+ ✓ test/daemon.test.ts > service units > fails clearly when there is no user systemd session 6ms
+ × test/integration.test.ts > fixture-backed web publish > rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT 1083ms
+   → expected { cmd: 'npm run dev', …(4) } to match object { upstream_port: 4500, …(1) }
+(3 matching properties omitted from actual)
+ ✓ test/integration.test.ts > fixture-backed web publish > accepts an IPv6-loopback server and routes Tailscale Serve to the healthy address 549ms
+ ✓ test/integration.test.ts > static sites > publishes a plain directory idempotently from a Nectar-owned copy that outlives the source 405ms
+ ✓ test/integration.test.ts > static sites > detects static sites only where no recipe applies, and honours --mode static, --name, and single files 1453ms
+ × test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption 220ms
+   → Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ✓ test/integration.test.ts > fixture-backed crystallized dev environments > publishes warm, verifies without leaking a process, reports staleness, opens with target/keep, and stops warm 563ms
+ ✓ test/integration.test.ts > fixture-backed crystallized dev environments > idle-stops an unpinned dev serve even after a recent resolve touch 287ms
+ ✓ test/integration.test.ts > fixture-backed crystallized dev environments > borrows an agent worktree without taking ownership of it 76ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > marks same-node resolves and opens their local URL while packet fields remain mesh-canonical 593ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > expires, revives on the same URL, stops, cools, and trashes an env 1185ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > defaults to a 7 day TTL, lists the expiry, and keeps viewed envs through gc 1203ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > gc skips a busy env instead of aborting, and implicit touches keep the publish TTL 601ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > doctor names the tailscale binary it used and only warns about a stopped pack server with no packs 33ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > doctor fixes only 8440 and reports a planted 443 entry 540ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > recognizes a healthy service Portless proxy 35ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > recognizes a healthy legacy Portless proxy 38ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > reports dead loopback Serve entries and cleans them through doctor --fix and gc 749ms
+ ✓ test/integration.test.ts > lifecycle, doctor, and cross-machine command adapters > resolves a mode-qualified remote ref through tailscale ssh and reports F9 27ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 12 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/control.test.ts > nectard control socket > refuses sources outside the home and the Cell, through symlinks, and inside Nectar's own state
+AssertionError: expected NectarError: --worktree and --verify do n… { …(2) } to match object { code: 'E_CHECKOUT' }
+(2 matching properties omitted from actual)
+
+- Expected
++ Received
+
+- {
+-   "code": "E_CHECKOUT",
++ NectarError {
++   "code": "E_USAGE",
+  }
+
+ ❯ test/control.test.ts:236:80
+    234|     await expect(publish({ path: path.join(cell, "missing") })).reject…
+    235|     await expect(publish({ path: "relative/site" })).rejects.toMatchOb…
+    236|     await expect(publish({ path: path.join(cell, "site"), worktree: ou…
+       |                                                                                ^
+    237|   });
+    238|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+ FAIL  test/daemon.test.ts > supervisor against the real service > revives a killed serve on the same port and re-asserts its tailscale mapping
+AssertionError: expected 'crashed' to be 'serving' // Object.is equality
+
+Expected: "serving"
+Received: "crashed"
+
+ ❯ test/daemon.test.ts:263:26
+    261|     await supervisor.sweep(false);
+    262|     const after = await service.store.readEnv(published.env);
+    263|     expect(after.status).toBe("serving");
+       |                          ^
+    264|     expect(after.serve?.upstream_port).toBe(before.serve?.upstream_por…
+    265|     expect(after.serve?.tailnet_port).toBe(before.serve?.tailnet_port);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/12]⎯
+
+ FAIL  test/daemon.test.ts > supervisor against the real service > revives without re-pointing its tailnet port once something else took that port over
+AssertionError: expected 'crashed' to be 'serving' // Object.is equality
+
+Expected: "serving"
+Received: "crashed"
+
+ ❯ test/daemon.test.ts:349:26
+    347|     await new Supervisor(service).sweep(false);
+    348|     const after = await service.store.readEnv(published.env);
+    349|     expect(after.status).toBe("serving");
+       |                          ^
+    350|     expect(after.urls.mesh).toBeNull();
+    351|     const pointed = (await readFile(tailscaleLog, "utf8")).split("\n")…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/12]⎯
+
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+AssertionError: expected 'serving' to be 'expired' // Object.is equality
+
+Expected: "expired"
+Received: "serving"
+
+ ❯ test/daemon.test.ts:403:28
+    401|     await supervisor.gc();
+    402|     const expired = await service.store.readEnv(published.env);
+    403|     expect(expired.status).toBe("expired");
+       |                            ^
+    404|     expect(pidAlive(before.serve?.pid ?? 0)).toBe(false);
+    405|     expect(await readFile(tailscaleLog, "utf8")).toContain(`serve --ht…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/12]⎯
+
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+AssertionError: expected '2 dead or expired envs hold resources…' to deeply equal { Object ($$typeof, sample, ...) }
+ ❯ test/doctor.test.ts:264:64
+    262|     expect(byName(diagnosed.checks, "serve-foreign")?.message).toEqual…
+    263|     expect(byName(diagnosed.checks, "serve-ambiguous")?.message).toEqu…
+    264|     expect(byName(diagnosed.checks, "env-resources")?.message).toEqual…
+       |                                                                ^
+    265|     expect(byName(diagnosed.checks, "nectard")).toMatchObject({ status…
+    266|     expect(byName(diagnosed.checks, "nectard")?.message).toContain("no…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/12]⎯
+
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+AssertionError: expected 4 to be less than 0
+ ❯ test/doctor.test.ts:402:55
+    400|     const order = actions.map((action) => `${action.action} ${action.t…
+    401|     expect(order.indexOf("remove-serve-entry :8845")).toBeGreaterThan(…
+    402|     expect(order.indexOf("remove-serve-entry :8846")).toBeLessThan(ord…
+       |                                                       ^
+    403|     expect(order.indexOf("remove-serve-entry :8846")).toBeGreaterThan(…
+    404|     expect(actions.find((action) => action.target === ":8845")?.reason…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+AssertionError: expected { dry_run: true, …(15) } to match object { branch: 'detached-edeb85a9', …(1) }
+(14 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "branch": "detached-edeb85a9",
+-   "branch_source": "detached",
++   "branch": "cell-fixture-active",
++   "branch_source": "session",
+  }
+
+ ❯ test/integration.test.ts:227:62
+    225|     await run(c, "commit", "-qm", "unpushed");
+    226|     const head = await run(c, "rev-parse", "HEAD");
+    227|     expect(await service.publish({ repo: c, dryRun: true })).toMatchOb…
+       |                                                              ^
+    228|     const detached = await service.publish({ repo: c, ttl: "1h" });
+    229|     track(service, detached.env as string);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+AssertionError: expected { dry_run: true, …(15) } to match object { branch: 'detached-798d6c3c', …(1) }
+(14 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "branch": "detached-798d6c3c",
+-   "branch_source": "detached",
++   "branch": "cell-fixture-active",
++   "branch_source": "session",
+  }
+
+ ❯ test/integration.test.ts:256:59
+    254|     const first = await commit("one.txt");
+    255|
+    256|     expect(await service.publish({ repo, dryRun: true })).toMatchObjec…
+       |                                                           ^
+    257|     vi.stubEnv("HIVE_BEE", "Agent/Slots_Bee");
+    258|     expect(await service.publish({ repo, dryRun: true })).toMatchObjec…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT
+AssertionError: expected { cmd: 'npm run dev', …(4) } to match object { upstream_port: 4500, …(1) }
+(3 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+    "tailnet_port": 8600,
+-   "upstream_port": 4500,
++   "upstream_port": 4502,
+  }
+
+ ❯ test/integration.test.ts:403:35
+    401|       serve: { upstream_port: number; tailnet_port: number };
+    402|     };
+    403|     expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500,…
+       |                                   ^
+    404|   });
+    405|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+NectarError: Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ❯ currentPlatform src/testpack.ts:19:11
+     17|   const arch = process.arch === "arm64" ? "arm64" : process.arch === "…
+     18|   if (process.platform !== "darwin") {
+     19|     throw new NectarError("E_PLATFORM", `Nectar v0 launches testpacks …
+       |           ^
+     20|   }
+     21|   return `darwin-${arch}`;
+ ❯ NectarService.buildTestpack src/service.ts:2010:22
+ ❯ src/service.ts:1899:39
+ ❯ StateStore.withLock src/state.ts:150:14
+ ❯ NectarService.publish src/service.ts:422:60
+ ❯ test/integration.test.ts:549:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: 'E_PLATFORM', details: {} }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/12]⎯
+
+ FAIL  test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+AssertionError: expected { Object (env, ref, ...) } to match object { mode: 'ios', …(4) }
+(29 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+    "ax_url": "http://127.0.0.1:4300/ax",
+    "bundle_id": "no.trmd.dummy",
+    "is_self": true,
+    "mode": "ios",
+-   "platform": "ios-sim-arm64",
++   "platform": "ios-sim-x64",
+  }
+
+ ❯ test/ios.test.ts:145:22
+    143|     // The port comes from the allocator, never a hardcoded low end of…
+    144|     const resolved = await service.resolve(`nectar://fixture/${env}`);
+    145|     expect(resolved).toMatchObject({
+       |                      ^
+    146|       mode: "ios",
+    147|       bundle_id: "no.trmd.dummy",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/12]⎯
+
+ FAIL  test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+NectarError: Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ❯ currentPlatform src/testpack.ts:19:11
+     17|   const arch = process.arch === "arm64" ? "arm64" : process.arch === "…
+     18|   if (process.platform !== "darwin") {
+     19|     throw new NectarError("E_PLATFORM", `Nectar v0 launches testpacks …
+       |           ^
+     20|   }
+     21|   return `darwin-${arch}`;
+ ❯ NectarService.buildTestpack src/service.ts:2010:22
+ ❯ src/service.ts:1899:39
+ ❯ StateStore.withLock src/state.ts:150:14
+ ❯ NectarService.publish src/service.ts:422:60
+ ❯ test/ios.test.ts:236:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: 'E_PLATFORM', details: {} }
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/12]⎯
+
+
+ Test Files  5 failed (5)
+      Tests  12 failed | 81 passed (93)
+   Start at  16:09:24
+   Duration  21.04s (transform 3.96s, setup 703ms, import 4.23s, tests 37.84s, environment 0ms)

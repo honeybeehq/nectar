@@ -25,6 +25,21 @@ function output(value: unknown, json: boolean): void {
   else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function sleptText(value: unknown): string {
+  return Array.isArray(value) && value.length > 0 ? `Put to sleep: ${value.join(", ")}; their URLs wake them on a visit.\n` : "";
+}
+
+function publishText(value: unknown): string {
+  if (typeof value !== "object" || value === null) return `${JSON.stringify(value, null, 2)}\n`;
+  const result = value as Record<string, unknown>;
+  const lines = [JSON.stringify(result, null, 2)];
+  if (typeof result.preview_url === "string") lines.push(`Preview: ${result.preview_url}`);
+  const slept = sleptText(result.slept_previews).trimEnd();
+  if (slept !== "") lines.push(slept);
+  if (typeof result.placed_on === "string") lines.push(`Published on ${result.placed_on}: ${typeof result.placement_reason === "string" ? result.placement_reason : "selected publishing host"}`);
+  return `${lines.join("\n")}\n`;
+}
+
 function directRequested(): boolean {
   return program.opts<{ direct?: boolean }>().direct === true;
 }
@@ -59,7 +74,7 @@ async function execute<T>(command: string, action: () => Promise<T>, text?: (res
   } catch (error) {
     const nectarError = asNectarError(error);
     if (json) output(errorEnvelope(command, nectarError), true);
-    else process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);
+    else process.stderr.write(`${nectarError.code}: ${nectarError.message}\n${sleptText(nectarError.details.slept_previews)}`);
     process.exitCode = 1;
   }
 }
@@ -140,7 +155,7 @@ program
           ...(options.local === undefined ? {} : { local: options.local }),
           ...(options.public === undefined ? {} : { public: options.public }),
         }), options.host !== undefined);
-      }),
+      }, publishText),
   );
 
 program
@@ -329,14 +344,11 @@ daemon
       const log = daemonLogger(service.paths, config.log_max_bytes, (line) => process.stdout.write(line));
       traceTailscale(log, { all: debugEnabled() });
       setDiscoveryMode("service");
-      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true });
-      const remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
-      const control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
-        log({ event: "control_unavailable", message: asNectarError(error).message });
-        return undefined;
-      });
+      const supervisor = new Supervisor(service, { intervalMs, gcIntervalMs, log, front: true, touchEveryMs: Math.min(5 * 60_000, config.idle_stop_ms / 4) });
+      let remote: ReturnType<typeof startRemoteListener> | undefined;
+      let control: Awaited<ReturnType<typeof startControlServer>> | undefined;
       const shutdown = async (): Promise<void> => {
-        await remote.close();
+        await remote?.close();
         await control?.close();
         await supervisor.stop();
         await release();
@@ -344,7 +356,13 @@ daemon
       };
       process.once("SIGTERM", () => void shutdown());
       process.once("SIGINT", () => void shutdown());
-      await supervisor.start();
+      await supervisor.start(async () => {
+        remote = startRemoteListener(service.paths, log, { listen: config.remote?.listen === true });
+        control = await startControlServer(service.paths, { log, remote: remote.state }).catch((error: unknown) => {
+          log({ event: "control_unavailable", message: asNectarError(error).message });
+          return undefined;
+        });
+      });
     } catch (error) {
       const nectarError = asNectarError(error);
       process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);
@@ -401,7 +419,7 @@ try {
           ? new NectarError("E_USAGE", "No command given; run nectar --help for the command list")
           : new NectarError("E_USAGE", error instanceof Error ? error.message : String(error));
     if (jsonRequested) output(errorEnvelope(requestedCommand, nectarError), true);
-    else process.stderr.write(`${nectarError.code}: ${nectarError.message}\n`);
+    else process.stderr.write(`${nectarError.code}: ${nectarError.message}\n${sleptText(nectarError.details.slept_previews)}`);
     process.exitCode = 1;
   }
 }

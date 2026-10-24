@@ -19,15 +19,21 @@ await writeFile(path.join(fixture, 'asset.js'), 'window.sharedStatic = true;');
 await writeFile(path.join(fixture, 'nested', 'index.html'), 'nested-static-ok');
 await mkdir(path.join(run, "bin"));
 await writeFile(path.join(run, "bin", "hive"), '#!/bin/sh\necho \'[{"id":"static-verification-owner","status":"running"}]\'\n', { mode: 0o700 });
+const lookup = path.join(run, 'proof-lookup');
+await writeFile(lookup, `#!${process.execPath}\nfor await (const chunk of process.stdin) {}\nconsole.log(JSON.stringify({state:'unlinked'}));\n`, {mode:0o700});
 const socketDir = await mkdtemp(path.join(os.tmpdir(), "nectar-t2-"));
-const env = { ...process.env, PATH: `${path.join(run, "bin")}:${process.env.PATH}`, HIVE_BEE: "static-verification-owner", HIVE_SESSION: "static-verification-owner", NECTAR_HOME: state, NECTAR_SOCKET: path.join(socketDir, "nectard.sock") };
+const env = { ...process.env, NECTAR_PROOF_LOOKUP:lookup, PATH: `${path.join(run, "bin")}:${process.env.PATH}`, HIVE_BEE: "static-verification-owner", HIVE_SESSION: "static-verification-owner", NECTAR_HOME: state, NECTAR_SOCKET: path.join(socketDir, "nectard.sock") };
 const log = path.join(run, 'evidence.log');
 const output = async (text) => { process.stdout.write(`${text}\n`); await appendFile(log, `${text}\n`); };
 const cli = async (...args) => {
-  const { stdout } = await exec(process.execPath, [path.join(root, 'dist/cli.js'), ...args, '--json'], { env, maxBuffer: 10 * 1024 * 1024 });
-  const envelope = JSON.parse(stdout);
-  if (!envelope.ok) throw new Error(stdout);
-  return envelope.result;
+  for (let attempt=0;attempt<100;attempt++) {
+    const result=await exec(process.execPath,[path.join(root,'dist/cli.js'),...args,'--json'],{env,maxBuffer:10*1024*1024}).catch(error=>({stdout:error.stdout}));
+    const envelope=JSON.parse(result.stdout);
+    if(envelope.ok)return envelope.result;
+    if(envelope.error?.code!=='E_BUSY'||attempt===99)throw new Error(result.stdout);
+    await output(`RETRY E_BUSY command=${args.join(' ')} attempt=${attempt+1} waitMs=100`);
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
 };
 const daemon = spawn(process.execPath, [path.join(root, 'dist/cli.js'), 'daemon', 'run', '--interval', '2s', '--gc-interval', '1h'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let daemonLog = '';
@@ -119,7 +125,7 @@ try {
   const { scrubbedEnvironment, spawnDetachedExecutable } = await import('../dist/commands.js');
   const { serveStatus, statusPorts, serveWeb } = await import('../dist/tailscale.js');
   const store = new StateStore(getPaths(state));
-  const record = await store.readEnv(legacyEnv);
+  let record = await store.readEnv(legacyEnv);
   const reserved = statusPorts(await serveStatus());
   const upstream = await allocatePort({ start: 4100, end: 4199, reserved });
   const tailnet = await allocatePort({ start: 8443, end: 8542, reserved });
@@ -134,10 +140,12 @@ try {
   await store.writeEnv(record);
   const served = await serveWeb(tailnet, record.urls.local);
   if (!served.ok) throw new Error(served.message);
+  for(let attempt=0;attempt<100;attempt++){const current=await store.readEnv(legacyEnv);if(current.serve?.proxy_port!==undefined){record=current;break;}await new Promise(resolve=>setTimeout(resolve,100));}
+  await store.withLock('machine--ports',async()=>{});
   const republishedLegacy = await cli('publish', fixture, '--mode', 'static', '--name', 'legacy-fixture', '--branch', 'static', '--local');
-  if (republishedLegacy.urls.local !== record.urls.local || republishedLegacy.urls.mesh !== record.urls.mesh) throw new Error('Legacy republish changed URL');
-  await exec('curl', ['--fail', '--silent', record.urls.local]);
-  await output(`PASS pre-upgrade static fixture retains local and mesh URLs on republish: ${record.urls.mesh}`);
+  if (republishedLegacy.urls.mesh !== record.urls.mesh) throw new Error('Legacy republish changed URL');
+  await exec('curl', ['--fail', '--silent', republishedLegacy.urls.local]);
+  await output(`PASS pre-upgrade static fixture retains mesh URL on republish; local URL uses daemon proxy: ${record.urls.mesh}`);
   const recipeRepo = path.join(run, 'recipe-fixture');
   await mkdir(path.join(recipeRepo, 'src'), { recursive: true });
   await mkdir(path.join(recipeRepo, 'dist'));
@@ -159,8 +167,10 @@ try {
   if (legacyEnv !== undefined) await cli('stop', legacyEnv);
   if (recipeEnv !== undefined) await cli('stop', recipeEnv);
   if (shared === undefined) shared = JSON.parse(await readFile(path.join(state, 'shared-static.json'), 'utf8').catch(() => 'null'));
-  if (shared !== null && shared !== undefined) process.kill(shared.pid, 'SIGTERM');
   daemon.kill('SIGTERM');
+  await new Promise(resolve=>daemon.once('exit',resolve));
+  shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8').catch(()=>'null'));
+  if(shared)try{process.kill(shared.pid,'SIGTERM');}catch(error){if(error.code!=='ESRCH')throw error;}
   if (shared?.tailnetPort !== undefined) {
     const { stopServe } = await import('../dist/tailscale.js');
     await stopServe(shared.tailnetPort);

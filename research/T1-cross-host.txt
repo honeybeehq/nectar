@@ -1,0 +1,7 @@
+Read-only checker on metal-3, session283df5ba-2f44-4e1e-bf0d-6ccc104184e0,2026-10-24T14:23:36Z
+Final revised-build returned URL on metal-2:
+curl --fail --max-time 10 --show-error --silent --write-out "\nHTTP_STATUS=%{http_code}\n" https://trmd-metal-2.tailff9529.ts.net:25104
+Exit0
+<h1>T1 isolated preview fixture</h1>
+HTTP_STATUS=200
+Earlier25000 URL was already retired when retried; returned connection refused. First routed-build run on25000 had previously returned200 frommetal3.

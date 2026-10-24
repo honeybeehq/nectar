@@ -1,0 +1,94 @@
+{
+  "run": "routed-legacy",
+  "events": [
+    {
+      "event": "start",
+      "root": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/test/fixtures/.runs/t1-legacy-1792851069833",
+      "legacy": true
+    },
+    {
+      "event": "daemon_hello",
+      "api": 1,
+      "ops": [
+        "publish",
+        "ls",
+        "show",
+        "resolve",
+        "touch",
+        "stop",
+        "rm",
+        "expose",
+        "unexpose"
+      ],
+      "nectar_home": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/test/fixtures/.runs/t1-legacy-1792851069833/state",
+      "pid": 2047024,
+      "program": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/dist/cli.js",
+      "remote": {
+        "listen": false,
+        "listening": false,
+        "address": null,
+        "port": 8441,
+        "last_error": null,
+        "last_reason": null,
+        "whois": null,
+        "since": null,
+        "discovery": {
+          "mode": "service",
+          "at": "2026-10-24T14:11:10.093Z",
+          "steps": [
+            {
+              "step": "socket",
+              "outcome": "found",
+              "ms": 0,
+              "found": 2
+            }
+          ],
+          "running": null,
+          "won": {
+            "step": "socket",
+            "endpoint": "unix:/var/run/tailscale/tailscaled.sock"
+          },
+          "next_discovery_in_ms": null
+        }
+      }
+    },
+    {
+      "event": "first_failure",
+      "index": 50,
+      "error": {
+        "code": "E_PORTS",
+        "message": "No free port in 24000-24099"
+      }
+    },
+    {
+      "event": "measurement",
+      "count": 50,
+      "first": {
+        "name": "t1-2047013-0--static--web",
+        "pid": 2047091,
+        "rss_kib": 65844,
+        "fd_count": 22,
+        "upstream": 24000,
+        "proxy": 24001,
+        "tailnet": 25000,
+        "disk_bytes": 36
+      },
+      "last": {
+        "name": "t1-2047013-49--static--web",
+        "pid": 2049967,
+        "rss_kib": 64336,
+        "fd_count": 22,
+        "upstream": 24098,
+        "proxy": 24099,
+        "tailnet": 25049,
+        "disk_bytes": 36
+      },
+      "proxy_count": 50,
+      "daemon_rss_kib": 163712,
+      "state_disk_bytes": 105816
+    }
+  ],
+  "published_count": 50,
+  "cleanup_count": 50,
+  "all_cleanups_ok": true
+}

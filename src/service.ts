@@ -362,7 +362,7 @@ function ownsLoopbackPort(serve: ServeRecord | undefined, port: number | undefin
 function loopbackPorts(records: EnvRecord[]): Set<number> {
   return new Set(
     records
-      .flatMap((record) => [record.serve?.upstream_port, record.serve?.proxy_port, ...depPorts(record)])
+      .flatMap((record) => [record.serve?.upstream_port, record.serve?.proxy_port, record.serve?.tailnet_port, ...depPorts(record)])
       .filter((port): port is number => port !== undefined),
   );
 }
@@ -1662,7 +1662,11 @@ export class NectarService {
       // consult the serve table so we never clobber one (F5). This env's own old
       // entry stays claimable, or republish would lose its stable URL.
       const status = await serveStatus();
-      for (const port of statusPorts(status)) reservedTailnet.add(port);
+      for (const port of statusPorts(status)) {
+        reservedTailnet.add(port);
+        reservedUpstream.add(port);
+      }
+      for (const port of reservedUpstream) reservedTailnet.add(port);
       const foreignPort = old?.serve !== undefined && (await this.foreignServeAt(old.serve, status)) ? old.serve.tailnet_port : undefined;
       if (old?.serve?.tailnet_port !== undefined && foreignPort === undefined) reservedTailnet.delete(old.serve.tailnet_port);
       const upstreamPort = await allocatePort({
@@ -1671,6 +1675,7 @@ export class NectarService {
         reserved: reservedUpstream,
         ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
       });
+      reservedTailnet.add(upstreamPort);
       const tailnetPort = await allocatePort({
         start: identity.config.tailnet_port_start,
         end: identity.config.tailnet_port_end,

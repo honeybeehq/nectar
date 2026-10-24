@@ -676,14 +676,18 @@ Caddy imports (D21), then asks for a reload. It has three listeners:
 
 Authorization, all on the relay: (1) the caller's stable node ID is on `allow`;
 (2) the upstream is `https://<the caller's own MagicDNS name>:<8443–65535>`, with no
-userinfo, path or other host, and relayd stores the URL it rebuilt, not the caller's
-string; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
+userinfo or other host; the only accepted path is an exact shared-static prefix
+`/s/<env-name>/<32 lowercase hex token>/`. Query strings, fragments, encoded paths and
+traversal are refused before URL normalization. Ports 443/8440/8441/8450/8451 remain
+reserved. Relayd stores the rebuilt URL; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
 socket can always remove); (4) the caller sends `name` (`<app>-<branch>`) and relayd
 sanitizes it to one DNS label of at most 54 characters, refuses reserved names (`www`,
 `api`, `app`, `auth`, `login`, `admin`, `mail`, … also as the first word) and appends 8
 random hex characters; a body naming its own `sub` is refused; (5) `gate: "none"` only
 for nodes on `ungated` (empty by default). Kill flags (relay-wide or per node) remove the
-routes they cover and refuse every PUT until `enable-all`. Hard caps: 30 days from
+routes they cover and refuse every PUT until `enable-all`.
+Static public routes require the upgraded relayd renderer. Prototype property names
+(including sanitized forms) are reserved public names. Hard caps: 30 days from
 creation for a gated route, 7 days ungated; a PATCH past the cap is clamped. relayd
 prunes expired routes hourly and at start; `nectar-relay prune` from cron asks again.
 Routes removed by `rm`, a kill flag or expiry leave a tombstone for 30 days, so
@@ -1067,7 +1071,12 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   A stopped route returns 410; a removed/unknown route returns 404. Existing TTL/touch
   and GC expire/cold/reap still own renewal and file cleanup; stopping/removing one
   preview never stops the shared listener or another preview. Public relay exposure
-  of shared paths requires updating its origin-only, 8443–8542 upstream contract.
+  accepts the exact shared-static prefix (§4.7). Its public URL stays at the origin root:
+  Caddy prepends the prefix to requests and removes it from directory Location headers.
+  Raw dot segments, encoded separators and backslashes are refused before URL
+  normalization, including public requests, so a request cannot escape its prefix.
+  Password gates and expiry apply as for dynamic previews. Root-absolute assets and
+  browser history paths resolve within this public preview; relative assets also work.
 - **Existing URLs.** Static records that already own `serve` keep their old server,
   ports and URLs, including on republish and supervisor revival, until normal retirement.
   Newly published static routes use the shared server. The envelope still supplies

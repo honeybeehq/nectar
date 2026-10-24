@@ -27,6 +27,8 @@ const DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+
 const DNS_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const PASSWORD_HASH = /^[A-Za-z0-9./$+=]{20,200}$/;
 const LEGACY_UPSTREAM = /^https:\/\/[a-zA-Z0-9._-]+(:[0-9]+)?$/;
+const STATIC_UPSTREAM = /^https:\/\/[a-z0-9.-]+:[0-9]{1,5}\/s\/[a-z0-9-]+\/[a-f0-9]{32}\/$/;
+const safeUpstream = (value: string): boolean => LEGACY_UPSTREAM.test(value) || STATIC_UPSTREAM.test(value);
 const MAX_BODY_BYTES = 16 * 1024;
 const WHOIS_DEADLINE_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -219,7 +221,7 @@ function checkRoute(sub: string, value: unknown): Route {
   const numbers = ["created_at", "expires_at", "cap_at", "generation"] as const;
   for (const key of numbers) if (typeof value[key] !== "number") throw new Error(`route ${sub} has no ${key}`);
   if (value.gate !== "password" && value.gate !== "none") throw new Error(`route ${sub} has no gate`);
-  if (typeof value.upstream !== "string" || !LEGACY_UPSTREAM.test(value.upstream)) throw new Error(`route ${sub} has a bad upstream`);
+  if (typeof value.upstream !== "string" || !safeUpstream(value.upstream)) throw new Error(`route ${sub} has a bad upstream`);
   if (value.gate === "password" && (typeof value.password_hash !== "string" || !PASSWORD_HASH.test(value.password_hash))) throw new Error(`route ${sub} has no password hash`);
   return {
     sub,
@@ -267,11 +269,11 @@ export function sanitizeName(name: string): string {
 
 export function reservedName(base: string): boolean {
   const first = base.split("-")[0] ?? "";
-  return RESERVED_NAMES.has(base) || RESERVED_NAMES.has(first) || base.startsWith("xn--");
+  return ["prototype", ...Object.getOwnPropertyNames(Object.prototype).map(sanitizeName)].includes(base) || RESERVED_NAMES.has(base) || RESERVED_NAMES.has(first) || base.startsWith("xn--");
 }
 
 export function renderRoute(route: Route, domain: string): string {
-  if (!SUB.test(route.sub) || !DOMAIN.test(domain) || !LEGACY_UPSTREAM.test(route.upstream)) throw new Error(`refusing to render route ${route.sub}`);
+  if (!SUB.test(route.sub) || !DOMAIN.test(domain) || !safeUpstream(route.upstream)) throw new Error(`refusing to render route ${route.sub}`);
   const lines = [
     "# nectar-relayd route — do not edit by hand",
     `# expires ${Math.floor(route.expires_at / 1000)}`,
@@ -284,7 +286,11 @@ export function renderRoute(route: Route, domain: string): string {
     if (route.password_hash === undefined || !PASSWORD_HASH.test(route.password_hash)) throw new Error(`refusing to render route ${route.sub} without a password hash`);
     lines.push("    basic_auth {", `        reviewer ${route.password_hash}`, "    }");
   }
-  lines.push(`    reverse_proxy ${route.upstream} {`);
+  const upstream = new URL(route.upstream);
+  const prefix = upstream.pathname === "/" ? "" : upstream.pathname.slice(0, -1);
+  if (prefix !== "") lines.push(`    rewrite * ${prefix}{uri}`);
+  lines.push(`    reverse_proxy ${upstream.origin} {`);
+  if (prefix !== "") lines.push(`        header_down Location ^${prefix}(/.*)$ $1`);
   if (route.gate === "password") lines.push("        header_up -Authorization");
   lines.push("        transport http {", "            tls", "        }", "    }", "}", "");
   return lines.join("\n");
@@ -294,7 +300,7 @@ export function parseLegacyRoute(sub: string, text: string, now: number): Route 
   if (!SUB.test(sub)) return undefined;
   const expires = /^# expires (\d{1,12})$/m.exec(text)?.[1];
   const upstream = /^# upstream (\S+)$/m.exec(text)?.[1];
-  if (expires === undefined || upstream === undefined || !LEGACY_UPSTREAM.test(upstream)) return undefined;
+  if (expires === undefined || upstream === undefined || !safeUpstream(upstream)) return undefined;
   const hash = /^\s*reviewer (\S+)\s*$/m.exec(text)?.[1];
   if (hash !== undefined && !PASSWORD_HASH.test(hash)) return undefined;
   const expiresAt = Number(expires) * 1000;
@@ -432,8 +438,8 @@ function epochSeconds(value: unknown, key: string): number {
 
 export function upstreamFor(peer: Peer, value: unknown): string {
   if (typeof value !== "string") throw new RelaydError(400, "E_USAGE", "upstream must be https://<your MagicDNS name>:<port>");
-  const match = /^https:\/\/([a-z0-9.-]+):(\d{1,5})\/?$/.exec(value.toLowerCase());
-  const host = match?.[1];
+  const match = /^https:\/\/([a-zA-Z0-9.-]+):(\d{1,5})(\/s\/[a-z0-9-]+\/[a-f0-9]{32}\/|\/)?$/.exec(value);
+  const host = match?.[1]?.toLowerCase();
   const portNumber = Number(match?.[2]);
   if (host === undefined || host !== peer.dns_name || !DNS_NAME.test(host)) {
     throw new RelaydError(403, "E_FORBIDDEN", `upstream must be on your own MagicDNS name (${peer.dns_name})`, { rule: "upstream_host" });
@@ -441,7 +447,7 @@ export function upstreamFor(peer: Peer, value: unknown): string {
   if (!Number.isInteger(portNumber) || portNumber < PREVIEW_PORT_MIN || portNumber > PREVIEW_PORT_MAX || RESERVED_SERVICE_PORTS.has(portNumber)) {
     throw new RelaydError(403, "E_FORBIDDEN", `upstream port must be a Nectar preview port (${PREVIEW_PORT_MIN}–${PREVIEW_PORT_MAX})`, { rule: "upstream_port" });
   }
-  return `https://${host}:${portNumber}`;
+  return `https://${host}:${portNumber}${match?.[3] === "/" ? "" : match?.[3] ?? ""}`;
 }
 
 export function peerFromWhoIs(found: WhoIsResult): Peer | string {
@@ -870,7 +876,7 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
     only(body, ["sub", "upstream", "expires_at", "gate", "password", "password_hash"]);
     const sub = typeof body.sub === "string" ? body.sub : "";
     if (!SUB.test(sub)) throw new RelaydError(400, "E_USAGE", "sub must be a DNS label");
-    const upstream = typeof body.upstream === "string" && LEGACY_UPSTREAM.test(body.upstream) ? body.upstream : undefined;
+    const upstream = typeof body.upstream === "string" && safeUpstream(body.upstream) ? body.upstream : undefined;
     if (upstream === undefined) throw new RelaydError(400, "E_USAGE", "upstream must be an https:// tailnet URL");
     const requested = epochSeconds(body.expires_at, "expires_at");
     return serialized(async () => {

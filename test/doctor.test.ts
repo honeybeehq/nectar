@@ -570,17 +570,15 @@ describe("republish next to a foreign serve entry", () => {
     const first = await service.publish({ repo: site, name: "foreign", ttl: "1h" });
     const env = first.env as string;
     try {
-      const oldPort = (await service.store.readEnv(env)).serve?.tailnet_port;
+      const oldPort = new URL((first.urls as { mesh: string }).mesh).port;
       const table = JSON.parse(await readFile(tailscale.state, "utf8")) as { Web: Record<string, { Handlers: Record<string, { Proxy: string }> }> };
       table.Web[`fixture.tailtest.ts.net:${oldPort}`] = { Handlers: { "/": { Proxy: "https://someone-else.example" } } };
       await writeFile(tailscale.state, JSON.stringify(table));
 
       await writeFile(path.join(site, "index.html"), "<h1>two</h1>\n");
       const second = await service.publish({ repo: site, name: "foreign", ttl: "1h" });
-      const newPort = (await service.store.readEnv(env)).serve?.tailnet_port;
-      expect(newPort).not.toBe(oldPort);
-      expect((second.urls as { mesh: string }).mesh).toBe(`https://fixture.tailtest.ts.net:${newPort}`);
-      expect((second.warnings as string[]).join("\n")).toContain(`:${oldPort} now holds an entry Nectar did not create`);
+      expect((second.urls as { mesh: string | null }).mesh).toBeNull();
+      expect((second.warnings as string[]).join("\n")).toContain("owned by another service; left alone");
       const after = JSON.parse(await readFile(tailscale.state, "utf8")) as typeof table;
       expect(after.Web[`fixture.tailtest.ts.net:${oldPort}`]).toEqual({ Handlers: { "/": { Proxy: "https://someone-else.example" } } });
       expect((await readFile(tailscale.log, "utf8")).split("\n")).not.toContain(`serve --https=${oldPort} off`);

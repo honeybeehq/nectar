@@ -119,7 +119,7 @@ describe("nectard control socket", () => {
     expect(shown.env.worktree.startsWith(path.join(home, "work"))).toBe(true);
     expect(shown.env.publisher).toMatchObject({ cell, hive_bee: "bee-123", hive_session: "session-9", via: "nectard", user: os.userInfo().username });
     const record = JSON.parse(await readFile(path.join(home, "envs", `${result.env}.json`), "utf8")) as { serve: { pgid: number } };
-    pgids.push(record.serve.pgid);
+    if (record.serve !== undefined) pgids.push(record.serve.pgid);
 
     await rm(site, { recursive: true, force: true });
     expect(await get(result.urls.local)).toEqual({ status: 200, body: "<h1>from the cell</h1>" });
@@ -157,8 +157,8 @@ exit 0`,
       via: string;
     };
     const record = JSON.parse(await readFile(path.join(home, "envs", `${result.env}.json`), "utf8")) as { serve: { pgid: number } };
-    pgids.push(record.serve.pgid);
-    expect(result.urls.mesh).toMatch(/^https:\/\/mini03\.tailtest\.ts\.net:\d+$/);
+    if (record.serve !== undefined) pgids.push(record.serve.pgid);
+    expect(result.urls.mesh).toMatch(/^https:\/\/mini03\.tailtest\.ts\.net:\d+\/s\/launchd--static--web\/[a-f0-9]{32}\/$/);
     expect(result).toMatchObject({ mesh_error: null, via: "nectard" });
   });
 
@@ -176,7 +176,7 @@ exit 0`,
       mesh_error: string | null;
     };
     const record = JSON.parse(await readFile(path.join(home, "envs", `${result.env}.json`), "utf8")) as { serve: { pgid: number } };
-    pgids.push(record.serve.pgid);
+    if (record.serve !== undefined) pgids.push(record.serve.pgid);
     const cause = `tailscale status --json via ${broken} (env) exited 1: "failed to connect to local Tailscale service; is Tailscale running?"`;
     expect(result.urls.mesh).toBeNull();
     const offline = `${cause} (api: cli; Tailscale LocalAPI unreachable: unix:${process.env.NECTAR_TAILSCALE_SOCKET}: ENOENT)`;

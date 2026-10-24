@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { vi } from "vitest";
-import { runCommand } from "../src/commands.js";
+import { stopProcessGroup, runCommand } from "../src/commands.js";
 import type { EnvRecord, Mode } from "../src/types.js";
 import type { Relayd, RelaydDeps } from "../src/relayd.js";
 
@@ -18,6 +18,8 @@ export async function tempDir(prefix: string): Promise<string> {
 // state/repo/fake-bin trees into os.tmpdir() forever.
 export async function cleanupTempDirs(): Promise<void> {
   for (const dir of createdTempDirs.splice(0)) {
+    const shared = await readFile(path.join(dir, "shared-static.json"), "utf8").then((text) => JSON.parse(text) as { pid: number }).catch(() => undefined);
+    if (shared !== undefined) await stopProcessGroup(shared.pid).catch(() => undefined);
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

@@ -1,7 +1,7 @@
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "coverage/**", "test/fixtures/**", "eslint.config.js"] },
+  { ignores: [".audit/**", "scripts/verify-shared-static.mjs", "dist/**", "coverage/**", "test/fixtures/**", "eslint.config.js"] },
   ...tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {

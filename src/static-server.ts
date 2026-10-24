@@ -72,48 +72,8 @@ async function locate(root: string, relative: string): Promise<Target> {
 }
 
 export async function startStaticServer(rootInput: string, port: number, host = "127.0.0.1"): Promise<Server> {
-  const root = await realpath(rootInput);
-  const handle = async (request: http.IncomingMessage, response: http.ServerResponse): Promise<void> => {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      send(response, 405, "method not allowed\n", { allow: "GET, HEAD" });
-      return;
-    }
-    let url: URL;
-    let relative: string;
-    try {
-      url = new URL(request.url ?? "/", "http://127.0.0.1");
-      relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-    } catch {
-      send(response, 400, "bad path\n");
-      return;
-    }
-    if (relative.includes("\0")) {
-      send(response, 404, "not found\n");
-      return;
-    }
-    let target = await locate(root, relative);
-    if (target.kind === "directory") {
-      if (relative !== "" && !url.pathname.endsWith("/")) {
-        send(response, 301, "moved\n", { location: `${url.pathname}/${url.search}` });
-        return;
-      }
-      target = await locate(root, path.join(relative, "index.html"));
-    }
-    if (target.kind !== "file") {
-      send(response, 404, "not found\n");
-      return;
-    }
-    response.writeHead(200, {
-      "content-type": TYPES[path.extname(target.file).toLowerCase()] ?? "application/octet-stream",
-      "content-length": target.size,
-      "cache-control": "no-cache",
-      "x-content-type-options": "nosniff",
-    });
-    if (request.method === "HEAD") response.end();
-    else createReadStream(target.file).on("error", () => response.destroy()).pipe(response);
-  };
   const server = http.createServer((request, response) => {
-    handle(request, response).catch(() => {
+    serveStatic(rootInput, request, response).catch(() => {
       if (!response.headersSent) send(response, 500, "internal error\n");
       else response.destroy();
     });
@@ -123,6 +83,47 @@ export async function startStaticServer(rootInput: string, port: number, host = 
     server.listen(port, host, resolve);
   });
   return server;
+}
+
+export async function serveStatic(rootInput: string, request: http.IncomingMessage, response: http.ServerResponse, mount = ""): Promise<void> {
+  const root = await realpath(rootInput);
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    send(response, 405, "method not allowed\n", { allow: "GET, HEAD" });
+    return;
+  }
+  let url: URL;
+  let relative: string;
+  try {
+    url = new URL(request.url ?? "/", "http://127.0.0.1");
+    relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+  } catch {
+    send(response, 400, "bad path\n");
+    return;
+  }
+  if (relative.includes("\0")) {
+    send(response, 404, "not found\n");
+    return;
+  }
+  let target = await locate(root, relative);
+  if (target.kind === "directory") {
+    if (relative !== "" && !url.pathname.endsWith("/")) {
+      send(response, 301, "moved\n", { location: `${mount}${url.pathname}/${url.search}` });
+      return;
+    }
+    target = await locate(root, path.join(relative, "index.html"));
+  }
+  if (target.kind !== "file") {
+    send(response, 404, "not found\n");
+    return;
+  }
+  response.writeHead(200, {
+    "content-type": TYPES[path.extname(target.file).toLowerCase()] ?? "application/octet-stream",
+    "content-length": target.size,
+    "cache-control": "no-cache",
+    "x-content-type-options": "nosniff",
+  });
+  if (request.method === "HEAD") response.end();
+  else createReadStream(target.file).on("error", () => response.destroy()).pipe(response);
 }
 
 const invoked = process.argv[1] !== undefined && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;

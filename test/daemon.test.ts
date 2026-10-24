@@ -1,5 +1,4 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pidAlive, processBelongsToEnv, spawnDetached, stopProcessGroup } from "../src/commands.js";
@@ -272,25 +271,22 @@ describe("supervisor against the real service", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("revives a static env with a server command re-derived from this install, not the stale recorded path", async () => {
+  it("restores the shared static server at the original URLs without per-preview runtimes", async () => {
     const { service } = await liveHarness();
-    vi.stubEnv("NECTAR_STATIC_SERVER_ENTRY", fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
     const site = path.join(await tempDir("daemon-static"), "proto");
     await mkdir(site, { recursive: true });
     await writeFile(path.join(site, "index.html"), "<h1>proto</h1>");
-    const published = (await service.publish({ repo: site, ttl: "1h" })) as { env: string };
+    const published = (await service.publish({ repo: site, ttl: "1h" })) as { env: string; urls: { local: string } };
     cleanups.push(async () => void (await service.stop(published.env)));
-    await service.store.updateEnv(published.env, (current) => {
-      if (current.serve !== undefined) current.serve.cmd = "exec '/gone/node' '/gone/nectar/dist/static-server.js'";
-    });
-    const before = await service.store.readEnv(published.env);
-    await stopProcessGroup(before.serve?.pgid ?? 0);
+    const sharedFile = path.join(service.paths.root, "shared-static.json");
+    const before = JSON.parse(await readFile(sharedFile, "utf8")) as { pid: number; port: number };
+    await stopProcessGroup(before.pid);
     await new Supervisor(service).sweep(false);
-    const after = await service.store.readEnv(published.env);
-    expect(after.status).toBe("serving");
-    expect(after.serve?.cmd).toContain(fileURLToPath(new URL("../src/static-server.ts", import.meta.url)));
-    expect(after.serve?.upstream_port).toBe(before.serve?.upstream_port);
-    const body = await fetch(`http://127.0.0.1:${after.serve?.upstream_port}/`).then(async (response) => response.text());
+    const after = JSON.parse(await readFile(sharedFile, "utf8")) as { pid: number; port: number };
+    expect(after.pid).not.toBe(before.pid);
+    expect(after.port).toBe(before.port);
+    expect((await service.store.readEnv(published.env)).serve).toBeUndefined();
+    const body = await fetch(published.urls.local).then(async (response) => response.text());
     expect(body).toContain("proto");
   });
 

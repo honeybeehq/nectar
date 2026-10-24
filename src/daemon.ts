@@ -214,6 +214,7 @@ export class Supervisor {
       this.log({ event: "error", phase: "sweep", message: asNectarError(error).message });
       return;
     }
+    if (records.some((record) => record.static_route !== undefined)) await this.service.restoreSharedStatic().catch((error: unknown) => this.log({ event: "error", phase: "shared_static", message: asNectarError(error).message }));
     const nowMs = Date.now();
     const names = new Set(records.map((record) => record.name));
     for (const name of this.watches.keys()) if (!names.has(name)) this.watches.delete(name);

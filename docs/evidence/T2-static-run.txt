@@ -1,0 +1,51 @@
+Isolated NECTAR_HOME=/home/trmd/.hive/v2/cells/pws-t2-static-c1a7b96ed5a4/github-com-honeybeehq-nectar-2b94ee083bd1-space-c1a7b96ed5a4/.audit/static-1792852037523/state; nectard PID=2134088
+PASS 1/32 curl http://127.0.0.1:43419/s/shared-fixture-0--static--web/ef71a503fc64c538ffe265bcf0f4061c/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-0--static--web/ef71a503fc64c538ffe265bcf0f4061c/
+PASS 2/32 curl http://127.0.0.1:43419/s/shared-fixture-1--static--web/b69eedbdf548f3a9177f691f3c59b076/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-1--static--web/b69eedbdf548f3a9177f691f3c59b076/
+PASS 3/32 curl http://127.0.0.1:43419/s/shared-fixture-2--static--web/486571ceb978d624161106a232856cce/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-2--static--web/486571ceb978d624161106a232856cce/
+PASS 4/32 curl http://127.0.0.1:43419/s/shared-fixture-3--static--web/0a69a2d6d58888b710c9272a2fa32e0c/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-3--static--web/0a69a2d6d58888b710c9272a2fa32e0c/
+PASS 5/32 curl http://127.0.0.1:43419/s/shared-fixture-4--static--web/9c3d19ab893d0cb6b5c1c50fc6c70f50/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-4--static--web/9c3d19ab893d0cb6b5c1c50fc6c70f50/
+PASS 6/32 curl http://127.0.0.1:43419/s/shared-fixture-5--static--web/c268258e16dae5aeee553a147afb2d52/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-5--static--web/c268258e16dae5aeee553a147afb2d52/
+PASS 7/32 curl http://127.0.0.1:43419/s/shared-fixture-6--static--web/74a1b1d7e778e1591ba3b0e60cc6ee2b/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-6--static--web/74a1b1d7e778e1591ba3b0e60cc6ee2b/
+PASS 8/32 curl http://127.0.0.1:43419/s/shared-fixture-7--static--web/40297205dd46fb6c88e57c0c3aec017e/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-7--static--web/40297205dd46fb6c88e57c0c3aec017e/
+PASS 9/32 curl http://127.0.0.1:43419/s/shared-fixture-8--static--web/df6b8112b080cca4143937568230e6f3/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-8--static--web/df6b8112b080cca4143937568230e6f3/
+PASS 10/32 curl http://127.0.0.1:43419/s/shared-fixture-9--static--web/6894cabb4a10d43281a3f9dca6d9153d/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-9--static--web/6894cabb4a10d43281a3f9dca6d9153d/
+PASS 11/32 curl http://127.0.0.1:43419/s/shared-fixture-10--static--web/95eb44cafc2fc6bea26e9eedd2da0a35/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-10--static--web/95eb44cafc2fc6bea26e9eedd2da0a35/
+PASS 12/32 curl http://127.0.0.1:43419/s/shared-fixture-11--static--web/dd02c00216982e1ff0d27240b8b4bb74/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-11--static--web/dd02c00216982e1ff0d27240b8b4bb74/
+PASS 13/32 curl http://127.0.0.1:43419/s/shared-fixture-12--static--web/6ae8bcc501cb3fa66dee9cfeb246140e/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-12--static--web/6ae8bcc501cb3fa66dee9cfeb246140e/
+PASS 14/32 curl http://127.0.0.1:43419/s/shared-fixture-13--static--web/d37ecb999b07fd74c8be46d8ac48cf44/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-13--static--web/d37ecb999b07fd74c8be46d8ac48cf44/
+PASS 15/32 curl http://127.0.0.1:43419/s/shared-fixture-14--static--web/cb08411bf0ff0079ceaa7886202d9e14/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-14--static--web/cb08411bf0ff0079ceaa7886202d9e14/
+PASS 16/32 curl http://127.0.0.1:43419/s/shared-fixture-15--static--web/41679b52ffad3709acf3c1b0348cda2c/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-15--static--web/41679b52ffad3709acf3c1b0348cda2c/
+PASS 17/32 curl http://127.0.0.1:43419/s/shared-fixture-16--static--web/6bb513f5280fe4059ca55c423aa382f5/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-16--static--web/6bb513f5280fe4059ca55c423aa382f5/
+PASS 18/32 curl http://127.0.0.1:43419/s/shared-fixture-17--static--web/1ddbc80f62706318ab8d19ceaba96a27/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-17--static--web/1ddbc80f62706318ab8d19ceaba96a27/
+PASS 19/32 curl http://127.0.0.1:43419/s/shared-fixture-18--static--web/22ae123bac6e8dc81779fbfb197393a2/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-18--static--web/22ae123bac6e8dc81779fbfb197393a2/
+PASS 20/32 curl http://127.0.0.1:43419/s/shared-fixture-19--static--web/0754e73243c7c0df6cb12c86e8409a47/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-19--static--web/0754e73243c7c0df6cb12c86e8409a47/
+PASS 21/32 curl http://127.0.0.1:43419/s/shared-fixture-20--static--web/f2d996c0134e54fa002fdaf9da81648b/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-20--static--web/f2d996c0134e54fa002fdaf9da81648b/
+PASS 22/32 curl http://127.0.0.1:43419/s/shared-fixture-21--static--web/2eb7d2c5260b9492ba3479d2d08f9252/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-21--static--web/2eb7d2c5260b9492ba3479d2d08f9252/
+PASS 23/32 curl http://127.0.0.1:43419/s/shared-fixture-22--static--web/3907b8c89d7f82d2735d6227519802a5/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-22--static--web/3907b8c89d7f82d2735d6227519802a5/
+PASS 24/32 curl http://127.0.0.1:43419/s/shared-fixture-23--static--web/714e31336295d46cf14c07a9debb4fe9/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-23--static--web/714e31336295d46cf14c07a9debb4fe9/
+PASS 25/32 curl http://127.0.0.1:43419/s/shared-fixture-24--static--web/d577a40eb7a11ca900bb8c53f41cde4f/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-24--static--web/d577a40eb7a11ca900bb8c53f41cde4f/
+PASS 26/32 curl http://127.0.0.1:43419/s/shared-fixture-25--static--web/b507d6665322e26036c8814b1a058f16/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-25--static--web/b507d6665322e26036c8814b1a058f16/
+PASS 27/32 curl http://127.0.0.1:43419/s/shared-fixture-26--static--web/df1ee091942bf9bb8d84eac298319ec2/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-26--static--web/df1ee091942bf9bb8d84eac298319ec2/
+PASS 28/32 curl http://127.0.0.1:43419/s/shared-fixture-27--static--web/4dc1a01b1968ae22eec671bf650ce2d5/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-27--static--web/4dc1a01b1968ae22eec671bf650ce2d5/
+PASS 29/32 curl http://127.0.0.1:43419/s/shared-fixture-28--static--web/6772dbd3088b00afd478abe48e5cacc4/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-28--static--web/6772dbd3088b00afd478abe48e5cacc4/
+PASS 30/32 curl http://127.0.0.1:43419/s/shared-fixture-29--static--web/fefaa554747b7b588c5c7975148585c1/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-29--static--web/fefaa554747b7b588c5c7975148585c1/
+PASS 31/32 curl http://127.0.0.1:43419/s/shared-fixture-30--static--web/389a21dbf050aa89d49db8255bf78f6d/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-30--static--web/389a21dbf050aa89d49db8255bf78f6d/
+PASS 32/32 curl http://127.0.0.1:43419/s/shared-fixture-31--static--web/699e0d93581000cb524cf6f65d2c24ff/ (HTML, relative JS, nested redirect); preview_url=https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-31--static--web/699e0d93581000cb524cf6f65d2c24ff/
+PASS 32 records, 0 per-preview processes/ports, 1 shared listener, 32 unique URLs=32
+PID    PPID COMMAND
+2134112 2134088 /opt/node-v24.18.0-linux-x64/bin/node /home/trmd/.hive/v2/cells/pws-t2-static-c1a7b96ed5a4/github-com-honeybeehq-nectar-2b94ee083bd1-space-c1a7b96ed5a4/dist/shared-static.js /home/trmd/.hive/v2/cells/pws-t2-static-c1a7b96ed5a4/github-com-honeybeehq-nectar-2b94ee083bd1-space-c1a7b96ed5a4/.audit/static-1792852037523/state 0 93b19f003f41e1f1404876f99e5b142f
+PASS republish keeps the same URL
+PASS stop affects only one preview: This static preview is stopped. Publish it again to restart it.
+
+410
+PASS expiry before GC: This static preview has expired. Publish it again to renew it.
+
+410
+PASS real GC transitions expired fixture to expired
+PASS nectard restored shared server PID=2134691 on same port=43419; original URL serves
+PASS nectard recovered hung owned server after repeated probes, PID=2134776; original preview_url preserved
+Mesh URL from envelope: https://trmd-metal-2.tailff9529.ts.net:10240/s/shared-fixture-0--static--web/ef71a503fc64c538ffe265bcf0f4061c/
+PASS pre-upgrade static fixture retains local and mesh URLs on republish: https://trmd-metal-2.tailff9529.ts.net:8443
+PASS recipe node src/static-server.ts dist uses shared server and serves the requested built root
+PASS verification complete
+Evidence: /home/trmd/.hive/v2/cells/pws-t2-static-c1a7b96ed5a4/github-com-honeybeehq-nectar-2b94ee083bd1-space-c1a7b96ed5a4/.audit/static-1792852037523/evidence.log

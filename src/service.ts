@@ -120,6 +120,7 @@ import {
 import { installUnit, onPath, readInstalledUnit, unitSpec, unitStatus } from "./daemon-unit.js";
 import { pidFile } from "./daemon.js";
 import { probeProxy } from "./proxy.js";
+import { ensureSharedStatic, staticPrefix } from "./shared-static.js";
 import { findStaticSite, stageStaticSite, STATIC_ROOTS, staticFiles, type StaticSite } from "./static-site.js";
 import { linksLeaving, MAX_TREE_BYTES, packFiles } from "./archive.js";
 import { describeDiscovery, discoveryReport } from "./localapi.js";
@@ -344,6 +345,11 @@ function staticWebRecipe(): WebRecipe {
   const entry = process.env.NECTAR_STATIC_SERVER_ENTRY ?? fileURLToPath(new URL("./static-server.js", import.meta.url));
   const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
   return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
+}
+
+function staticServeRoot(command: string, worktree: string): string {
+  const match = /(?:^|\s)(?:"[^"]*static-server\.(?:js|ts)"|'[^']*static-server\.(?:js|ts)'|[^\s'"]*static-server\.(?:js|ts))(?:\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+)))?/.exec(command);
+  return path.resolve(worktree, match?.[1] ?? match?.[2] ?? match?.[3] ?? ".");
 }
 
 function ownsLoopbackPort(serve: ServeRecord | undefined, port: number | undefined): boolean {
@@ -864,7 +870,7 @@ export class NectarService {
       stack: "static",
       reason: site.file === undefined ? `index.html in ${site.root}` : `single file ${site.file}`,
       build: null,
-      serve: "Nectar's bundled static server (copy of the files under work/<name>)",
+      serve: "Nectar's shared static server (copy of the files under work/<name>; no per-preview process or ports)",
       ready_path: "/",
       requires: [],
       missing: [],
@@ -1011,6 +1017,7 @@ export class NectarService {
       publisher: this.publisher ?? currentPublisher(),
       ...(options.packet === undefined ? {} : { packet_hint: options.packet }),
       ttl_ms: options.ttlMs,
+      ...(old?.static_route === undefined ? {} : { static_route: old.static_route }),
       evidence: old?.evidence ?? [],
       ...(old?.install_hash === undefined ? {} : { install_hash: old.install_hash }),
       ...(old?.pinned === undefined ? {} : { pinned: old.pinned }),
@@ -1248,7 +1255,7 @@ export class NectarService {
       ) {
         return this.republishWeb(options, old);
       }
-      if (!previewMemoryAvailable(await availableMemory())) {
+      if (!options.recipe.web?.serve.includes("static-server.") && !previewMemoryAvailable(await availableMemory())) {
         throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
@@ -1679,6 +1686,12 @@ export class NectarService {
     old: EnvRecord | undefined,
     depEnv: Record<string, string>,
   ): Promise<PublishedWeb> {
+    if (recipe.serve.includes("static-server.") && old?.serve === undefined) {
+      record.static_root = staticServeRoot(recipe.serve, record.worktree);
+      return this.startSharedStatic(record, identity);
+    }
+    delete record.static_route;
+    delete record.static_root;
     const log = await prepareLog(this.paths, record.name, identity.config.log_max_bytes);
     const { upstreamPort, tailnetPort, foreignPort } = await this.allocateAndSpawn(record, identity, old, (port) => {
       const childEnv = scrubbedEnvironment({
@@ -1714,6 +1727,39 @@ export class NectarService {
     delete record.liveness;
     await this.store.writeEnv(record);
     return { record, warnings, meshError: mesh === undefined ? (identity.offline ?? null) : mesh.ok ? null : `${mesh.message} ${apiNote(mesh.api, mesh.unreachable)}` };
+  }
+
+  private async startSharedStatic(record: EnvRecord, identity: MachineIdentity): Promise<PublishedWeb> {
+    const front = await ensureSharedStatic(this.store, identity.online ? identity.dnsName : undefined);
+    if (!identity.online && identity.offline !== undefined) front.error = identity.offline;
+    record.static_route ??= crypto.randomBytes(16).toString("hex");
+    const prefix = staticPrefix(record.name, record.static_route);
+    record.urls.local = `${front.local}${prefix}`;
+    record.urls.mesh = front.mesh === null ? null : `${front.mesh}${prefix}`;
+    record.status = "serving";
+    delete record.serve;
+    delete record.failure;
+    delete record.liveness;
+    await this.store.writeEnv(record);
+    return { record, warnings: front.error === null ? [] : [meshWarning(identity.online ? { ok: false, message: front.error, api: "localapi" } : undefined, `mesh URL unavailable; preview_url fell back to ${record.urls.local}`, front.error)], meshError: front.error };
+  }
+
+  async restoreSharedStatic(): Promise<void> {
+    const records = (await this.store.listEnvs()).filter((record) => record.static_route !== undefined && record.status === "serving" && Date.parse(record.expires_at) > Date.now());
+    if (records.length === 0) return;
+    const identity = await this.identity();
+    const front = await ensureSharedStatic(this.store, identity.online ? identity.dnsName : undefined);
+    for (const record of records) {
+      const prefix = staticPrefix(record.name, record.static_route!);
+      const local = `${front.local}${prefix}`;
+      const mesh = front.mesh === null ? null : `${front.mesh}${prefix}`;
+      if (record.urls.local === local && record.urls.mesh === mesh) continue;
+      await this.store.updateEnv(record.name, (current) => {
+        if (current.static_route !== record.static_route || current.status !== "serving") return;
+        current.urls.local = local;
+        current.urls.mesh = mesh;
+      }, { bestEffort: true });
+    }
   }
 
   private async waitReady(port: number, readyPath: string, timeoutMs: number): Promise<URL | undefined> {

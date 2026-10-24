@@ -129,7 +129,10 @@ describe("relayd authorization", () => {
     expect(await put(`https://${B.dnsName}:8443`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_host" } } });
     expect(await put(`https://${A.dnsName}:22`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_port" } } });
     expect(await put(`https://${A.dnsName}:8442`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_port" } } });
-    expect(await put(`https://${A.dnsName}:8543`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_port" } } });
+    expect(await put(`https://${A.dnsName}:65536`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_port" } } });
+    for (const port of [8450, 8451]) {
+      expect(await put(`https://${A.dnsName}:${port}`)).toMatchObject({ status: 403, body: { error: { rule: "upstream_port" } } });
+    }
     for (const upstream of [`http://${A.dnsName}:8443`, `https://x@${A.dnsName}:8443`, `https://${A.dnsName}:8443/admin`, `https://${A.dnsName}`, "https://100.64.0.2:8443", `https://${A.dnsName}.evil.com:8443`]) {
       expect((await put(upstream)).status).toBe(403);
     }

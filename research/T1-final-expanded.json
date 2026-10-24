@@ -1,0 +1,102 @@
+{
+  "run": "final-expanded",
+  "events": [
+    {
+      "event": "start",
+      "root": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/test/fixtures/.runs/t1-expanded-1792851612775",
+      "legacy": false
+    },
+    {
+      "event": "daemon_hello",
+      "api": 1,
+      "ops": [
+        "publish",
+        "ls",
+        "show",
+        "resolve",
+        "touch",
+        "stop",
+        "rm",
+        "expose",
+        "unexpose"
+      ],
+      "nectar_home": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/test/fixtures/.runs/t1-expanded-1792851612775/state",
+      "pid": 2109914,
+      "program": "/home/trmd/.hive/v2/cells/pws-t1-cap-ede21b63858b/github-com-honeybeehq-nectar-2b94ee083bd1-space-ede21b63858b/dist/cli.js",
+      "remote": {
+        "listen": false,
+        "listening": false,
+        "address": null,
+        "port": 8441,
+        "last_error": null,
+        "last_reason": null,
+        "whois": null,
+        "since": null,
+        "discovery": {
+          "mode": "service",
+          "at": "2026-10-24T14:20:13.033Z",
+          "steps": [
+            {
+              "step": "socket",
+              "outcome": "found",
+              "ms": 1,
+              "found": 2
+            }
+          ],
+          "running": null,
+          "won": {
+            "step": "socket",
+            "endpoint": "unix:/var/run/tailscale/tailscaled.sock"
+          },
+          "next_discovery_in_ms": null
+        }
+      }
+    },
+    {
+      "event": "measurement",
+      "count": 105,
+      "first": {
+        "name": "t1-2109899-0--static--web",
+        "pid": 2110011,
+        "rss_kib": 71140,
+        "fd_count": 22,
+        "upstream": 24000,
+        "proxy": 24001,
+        "tailnet": 25000,
+        "disk_bytes": 36
+      },
+      "last": {
+        "name": "t1-2109899-104--static--web",
+        "pid": 2121792,
+        "rss_kib": 64220,
+        "fd_count": 22,
+        "upstream": 24208,
+        "proxy": 24209,
+        "tailnet": 25104,
+        "disk_bytes": 36
+      },
+      "proxy_count": 105,
+      "daemon_rss_kib": 240240,
+      "state_disk_bytes": 218622
+    },
+    {
+      "event": "dev_measurement",
+      "name": "t1-dev-2109899--main--web",
+      "pid": 2125618,
+      "rss_kib": 63384,
+      "fd_count": 24,
+      "upstream": 24210,
+      "proxy": 24211,
+      "tailnet": 25105,
+      "disk_bytes": 398,
+      "urls": {
+        "local": "http://127.0.0.1:24210",
+        "mesh": "https://trmd-metal-2.tailff9529.ts.net:25105",
+        "public": null
+      }
+    }
+  ],
+  "published_count": 105,
+  "cleanup_count": 106,
+  "all_cleanups_ok": true
+}

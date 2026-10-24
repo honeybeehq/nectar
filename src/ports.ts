@@ -70,5 +70,5 @@ export async function allocatePort(options: {
     if (port < options.start || port > options.end || options.reserved.has(port) || RESERVED_SERVICE_PORTS.has(port) || port > 65535) continue;
     if (await portAvailable(port)) return port;
   }
-  throw new NectarError("E_PORTS", `No free port in ${options.start}-${options.end}`);
+  throw new NectarError("E_PORTS", `No available TCP port in configured range ${options.start}-${options.end}; widen custom port bounds or publish with --host <host>`);
 }

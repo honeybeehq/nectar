@@ -1,0 +1,9 @@
+
+ RUN  v4.1.10 /home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b
+
+
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+   Start at  17:20:58
+   Duration  3.46s (transform 190ms, setup 139ms, import 124ms, tests 2.99s, environment 0ms)
+

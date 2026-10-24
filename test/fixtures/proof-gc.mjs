@@ -99,7 +99,7 @@ try {
   assert.deepEqual(report.transitions,[{env:names[0],action:'reap'}]);
   assert.ok(report.skipped.some(s=>s.env===names[1] && s.reason.includes('waiting')));
   assert.ok(report.skipped.some(s=>s.env===names[2] && s.reason.includes('exited 1')));
-  await assert.rejects(fetch(record.urls.local));
+  assert.equal((await fetch(record.urls.local)).status,404);
   for (const name of names.slice(1)) {
     const kept=JSON.parse(await readFile(path.join(state,'envs',`${name}.json`),'utf8'));
     assert.match(await fetch(kept.urls.local).then(r=>r.text()),/T4 proof-aware/);
@@ -111,4 +111,6 @@ try {
     try { await cli('rm',name,'--force'); } catch {}
   }
   daemon.kill('SIGTERM'); await once(daemon,'exit');
+  const shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8').catch(()=>'null'));
+  if(shared)try{process.kill(shared.pid,'SIGTERM');}catch(error){if(error.code!=='ESRCH')throw error;}
 }

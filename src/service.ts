@@ -350,6 +350,10 @@ function staticWebRecipe(): WebRecipe {
   return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
 }
 
+function isStaticServe(command: string): boolean {
+  return command.includes("static-server.");
+}
+
 function staticServeRoot(command: string, worktree: string): string {
   const match = /(?:^|\s)(?:"[^"]*static-server\.(?:js|ts)"|'[^']*static-server\.(?:js|ts)'|[^\s'"]*static-server\.(?:js|ts))(?:\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+)))?/.exec(command);
   return path.resolve(worktree, match?.[1] ?? match?.[2] ?? match?.[3] ?? ".");
@@ -1798,7 +1802,7 @@ export class NectarService {
     depEnv: Record<string, string>,
     dynamic: boolean,
   ): Promise<PublishedWeb> {
-    if (!dynamic || (await runningDaemonPid(this.paths)) === undefined) return this.startWeb(record, recipe, identity, old, depEnv);
+    if (!dynamic || isStaticServe(recipe.serve) || (await runningDaemonPid(this.paths)) === undefined) return this.startWeb(record, recipe, identity, old, depEnv);
     const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, () => ({ pid: 0, pgid: 0, cmd: recipe.serve }));
     if (record.serve === undefined) throw new NectarError("E_INTERNAL", "Missing route allocation");
     delete record.serve.upstream_port;
@@ -1917,7 +1921,7 @@ export class NectarService {
     old: EnvRecord | undefined,
     depEnv: Record<string, string>,
   ): Promise<PublishedWeb> {
-    if (recipe.serve.includes("static-server.") && old?.serve === undefined) {
+    if (isStaticServe(recipe.serve) && old?.serve === undefined) {
       record.static_root = staticServeRoot(recipe.serve, record.worktree);
       return this.startSharedStatic(record, identity);
     }

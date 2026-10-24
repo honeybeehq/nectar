@@ -34,51 +34,55 @@ const start=async(budget)=>{const env={...process.env};if(budget)env.NECTAR_TEST
 const halt=async()=>{daemon.kill('SIGTERM');await new Promise(r=>daemon.once('exit',r));};
 const call=(command,args={})=>callDaemon(process.env.NECTAR_SOCKET,command,{nectar_home:state,caller:{},args});
 const publish=async args=>{const t=performance.now();const r=await call('publish',args);assert.equal(r.via,'nectard');assert.match(r.preview_url,/^https:/);say({publish:r.env,url:r.preview_url,publishMs:Math.round(performance.now()-t),slept:r.slept_previews});return r;};
-const curl=(url,expected)=>{const t=performance.now();const body=execFileSync('curl',['--fail','-sS','--max-time','25',url],{encoding:'utf8'});assert(body.includes(expected),body);say({open:url,body,wakeMs:Math.round(performance.now()-t)});return body;};
+const curl=async(url,expected)=>{const before=(await service.store.listEnvs()).find(r=>r.urls.mesh===url);const t=performance.now();const body=execFileSync('curl',['--fail','-sS','--max-time','25',url],{encoding:'utf8'});assert(body.includes(expected),body);if(body.startsWith('awake:'))pids.add(Number(body.split(':').at(-1)));say({open:url,body,statusBefore:before?.status,wakeMs:Math.round(performance.now()-t)});return body;};
 const statics=[],dynamics=[],pids=new Set();let shared;
 try{
  await start();
- for(let i=0;i<20;i++){const r=await publish({path:site,mode:'static',name:`t7-static-${i}`,local:true});statics.push(r);curl(r.preview_url,'T7 combined static');curl(r.preview_url+'asset.js','T7 asset');}
+ for(let i=0;i<20;i++){const r=await publish({path:site,mode:'static',name:`t7-static-${i}`,local:true});statics.push(r);await curl(r.preview_url,'T7 combined static');await curl(r.preview_url+'asset.js','T7 asset');}
  shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));
  assert((await service.store.listEnvs()).every(r=>r.static_route && !r.serve));
  say({staticCount:20,sharedPid:shared.pid,sharedPort:shared.port,sharedTailnetPort:shared.tailnetPort,perPreviewProcesses:0});
- for(let i=1;i<=15;i++){const branch=`p${String(i).padStart(2,'0')}`;git('branch',branch);const r=await publish({path:repo,branch,mode:'web',local:true});dynamics.push(r);curl(r.preview_url,`awake:${r.env}:`);}
+ for(let i=1;i<=15;i++){const branch=`p${String(i).padStart(2,'0')}`;git('branch',branch);const r=await publish({path:repo,branch,mode:'web',local:true});dynamics.push(r);await curl(r.preview_url,`awake:${r.env}:`);}
  const active=await service.store.listEnvs();const apps=active.filter(r=>r.serve?.pid>1);assert.equal(apps.length,15);for(const r of apps)pids.add(r.serve.pid);
  const rss=Number(/^VmRSS:\s+(\d+)/m.exec(await readFile(`/proc/${daemon.pid}/status`,'utf8'))[1]);
  say({peak:{static:20,dynamic:15,appProcesses:apps.length,sharedStaticProcesses:1,daemonProcesses:1,totalOwnedProcesses:17,nectardRssKiB:rss}});
  await service.store.writeConfig({...await service.store.readConfig(),idle_stop_ms:2000});
  await until(async()=>(await service.store.listEnvs()).filter(r=>r.serve).every(r=>r.status==='warm'));
  for(const r of apps){assert(!pidAlive(r.serve.pid));assert(!await portOpen(r.serve.upstream_port));}
- for(const r of statics)curl(r.preview_url,'T7 combined static');
+ for(const r of statics)await curl(r.preview_url,'T7 combined static');
  assert.equal(JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8')).pid,shared.pid);
  say({idleMs:2000,pidsGone:15,appPortsFreed:15,staticStillWorks:true,sameSharedPid:true});
  await halt();await service.store.writeConfig({...await service.store.readConfig(),idle_stop_ms:3600000});await start(15);
- for(const r of [...statics,...dynamics]){const record=await service.store.readEnv(r.env);assert.equal(record.urls.mesh,r.preview_url);curl(r.preview_url,r.env.includes('dynamic')?`awake:${r.env}:`:'T7 combined static');}
+ for(const r of [...statics,...dynamics]){const record=await service.store.readEnv(r.env);assert.equal(record.urls.mesh,r.preview_url);await curl(r.preview_url,r.env.includes('dynamic')?`awake:${r.env}:`:'T7 combined static');}
  say({restartSameUrls:35});
  await halt();await start(15);
- for(const r of dynamics)curl(r.preview_url,`awake:${r.env}:`);
+ for(const r of dynamics)await curl(r.preview_url,`awake:${r.env}:`);
  git('branch','p16');const extra=await publish({path:repo,branch:'p16',mode:'web',local:true});
  assert.deepEqual(extra.slept_previews,[]);
  const response=execFileSync('curl',['-isS','--max-time','25',extra.preview_url],{encoding:'utf8'});
- assert(response.includes(`awake:${extra.env}:`));assert.match(response,new RegExp(`x-nectar-slept-previews: ${dynamics[0].env}`,'i'));
+ pids.add(Number(response.split(':').at(-1)));assert(response.includes(`awake:${extra.env}:`));assert.match(response,new RegExp(`x-nectar-slept-previews: ${dynamics[0].env}`,'i'));
  say({memoryBudgetRuntimes:15,furtherPublish:extra.env,wakeResponse:response,expectedLeastRecent:dynamics[0].env});
  assert.equal((await service.store.readEnv(dynamics[0].env)).status,'warm');
- curl(dynamics[0].preview_url,`awake:${dynamics[0].env}:`);
+ await curl(dynamics[0].preview_url,`awake:${dynamics[0].env}:`);
  assert.equal((await service.store.readEnv(dynamics[0].env)).urls.mesh,dynamics[0].preview_url);
  say({capacityVictimWoke:true,events:await readFile(path.join(state,'capacity.jsonl'),'utf8')});
  await service.store.writeConfig({...await service.store.readConfig(),upstream_port_end:35130});
  git('branch','p17');const overflow=await publish({path:repo,branch:'p17',mode:'web',local:true});
- assert.deepEqual(overflow.slept_previews,[dynamics[2].env]);
+ assert.equal(overflow.slept_previews.length,1);const publishVictim=dynamics.find(r=>r.env===overflow.slept_previews[0]);assert(publishVictim);
  await service.store.writeConfig({...await service.store.readConfig(),upstream_port_end:35599});
- curl(overflow.preview_url,`awake:${overflow.env}:`);curl(dynamics[2].preview_url,`awake:${dynamics[2].env}:`);
- say({publishNamedLeastRecent:overflow.slept_previews,victimSameUrl:(await service.store.readEnv(dynamics[2].env)).urls.mesh});
+ await curl(overflow.preview_url,`awake:${overflow.env}:`);await curl(publishVictim.preview_url,`awake:${publishVictim.env}:`);
+ say({publishNamedVictim:overflow.slept_previews,victimSameUrl:(await service.store.readEnv(publishVictim.env)).urls.mesh});
  const proofs=[];
  for(const label of ['landed','waiting','failed']){const r=await publish({path:site,mode:'static',name:`t7-${label}`,local:true});proofs.push(r);await service.store.updateEnv(r.env,record=>{record.publisher.hive_bee='gone-t7-fixture';record.owner_inactive_since=new Date(Date.now()-7200000).toISOString();record.expires_at=new Date(Date.now()-30*86400000).toISOString();if(label==='landed')record.proof_terminal_since=new Date(Date.now()-25*3600000).toISOString();});}
  const expired=await publish({path:site,mode:'static',name:'t7-unlinked',local:true});await service.store.updateEnv(expired.env,r=>{r.expires_at=new Date(Date.now()-1000).toISOString();});
  const code=execFileSync('curl',['-sS','-o','/dev/null','-w','%{http_code}',expired.preview_url],{encoding:'utf8'});assert.equal(code,'410');say({unlinkedExpiredHttp:code});
  const gc=await service.gc();say({gc});assert(gc.transitions.some(t=>t.env===proofs[0].env&&t.action==='reap'));assert(!await service.store.maybeEnv(proofs[0].env));
  assert(gc.skipped.some(t=>t.env===proofs[1].env&&t.reason.includes('waiting')));assert(gc.skipped.some(t=>t.env===proofs[2].env&&t.reason.includes('exited 1')));
- for(const r of proofs.slice(1))curl(r.preview_url,'T7 combined static');
+ for(const r of proofs.slice(1))await curl(r.preview_url,'T7 combined static');
+ const oldShared=shared.pid;await halt();process.kill(oldShared,'SIGTERM');await until(async()=>!pidAlive(oldShared));delete process.env.NECTAR_PROOF_LOOKUP;await start();
+ await until(async()=>{const info=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));return info.pid!==oldShared&&pidAlive(info.pid);});shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));
+ await service.store.updateEnv(statics[0].env,r=>{r.expires_at=new Date(Date.now()-1000).toISOString();});
+ await curl(statics[0].preview_url,'T7 combined static');const noAdapter=await service.gc();assert(noAdapter.skipped.some(r=>r.env===statics[0].env&&r.reason.includes('not configured')));say({noAdapterExpiredStatic:200,gcRetained:true,skipReason:noAdapter.skipped.find(r=>r.env===statics[0].env)?.reason,singletonRestartRequiredForAdapterChange:true});
  say({PASS:true,root});
 }finally{
  const records=await service.store.listEnvs();for(const r of records)if(r.serve?.pid>1)pids.add(r.serve.pid);

@@ -65,7 +65,7 @@ try {
  await service.store.writeConfig({...await service.store.readConfig(),upstream_port_end:33123});
  git('branch','p14');
  let refused;try{await callDaemon(process.env.NECTAR_SOCKET,'publish',{nectar_home:state,caller:{},args:{path:repo,branch:'p14',mode:'web',local:true}});}catch(error){refused={ok:false,error:{code:error.code,message:error.message}};}
- assert.equal(refused.ok,false); assert.match(refused.error.message,/Configure nectar pool add/); assert(!refused.error.message.includes('slot'));
+ assert.equal(refused.ok,false); assert.match(refused.error.message,/[Cc]onfigure nectar pool add/); assert(!refused.error.message.includes('slot'));
  say({noEligibleRuntime:refused});
 } finally {
  const finalRecords=await service.store.listEnvs();

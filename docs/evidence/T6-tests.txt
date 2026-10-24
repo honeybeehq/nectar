@@ -1,0 +1,278 @@
+
+> @trmd/nectar@0.0.0 test /home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b
+> pnpm build && vitest run
+
+
+> @trmd/nectar@0.0.0 build /home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b
+> tsc -p tsconfig.build.json
+
+
+ RUN  v4.1.10 /home/trmd/.hive/v2/cells/pws-t6-docs-2d1dbce4fb8b/github-com-honeybeehq-nectar-2b94ee083bd1-space-2d1dbce4fb8b
+
+ ❯ test/localapi.test.ts (27 tests | 1 failed) 2946ms
+     × keeps the whole discovery inside its budget when every step hangs 514ms
+ ❯ test/ios.test.ts (4 tests | 2 failed) 3935ms
+     × packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url 1212ms
+     × starts the AX bridge and returns ax_url 200ms
+ ❯ test/remote.test.ts (54 tests | 1 failed) 7224ms
+     × ships only the committed tree of a repo, never .git, and publishes its recipe there 1035ms
+ ❯ test/proxy.test.ts (9 tests | 1 failed) 12636ms
+     × re-fronts an env whose republish moved it to a new upstream port 1800ms
+ ❯ test/daemon.test.ts (36 tests | 1 failed) 19147ms
+     × gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry 1677ms
+ ❯ test/doctor.test.ts (17 tests | 2 failed) 21701ms
+     × removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent 4252ms
+     × removes an entry that only becomes an orphan once release-env stops its process, in the same run 4565ms
+ ❯ test/integration.test.ts (24 tests | 4 failed) 65346ms
+     × derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor 8390ms
+     × keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url 194ms
+     × rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT 3155ms
+     × publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption 1231ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 12 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+AssertionError: expected 'serving' to be 'expired' // Object.is equality
+
+Expected: "expired"
+Received: "serving"
+
+ ❯ test/daemon.test.ts:400:28
+    398|     await supervisor.gc();
+    399|     const expired = await service.store.readEnv(published.env);
+    400|     expect(expired.status).toBe("expired");
+       |                            ^
+    401|     expect(pidAlive(before.serve?.pid ?? 0)).toBe(false);
+    402|     expect(await readFile(tailscaleLog, "utf8")).toContain(`serve --ht…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+AssertionError: expected '2 dead or expired envs hold resources…' to deeply equal { Object ($$typeof, sample, ...) }
+ ❯ test/doctor.test.ts:264:64
+    262|     expect(byName(diagnosed.checks, "serve-foreign")?.message).toEqual…
+    263|     expect(byName(diagnosed.checks, "serve-ambiguous")?.message).toEqu…
+    264|     expect(byName(diagnosed.checks, "env-resources")?.message).toEqual…
+       |                                                                ^
+    265|     expect(byName(diagnosed.checks, "nectard")).toMatchObject({ status…
+    266|     expect(byName(diagnosed.checks, "nectard")?.message).toContain("no…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/12]⎯
+
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+AssertionError: expected 4 to be less than 0
+ ❯ test/doctor.test.ts:402:55
+    400|     const order = actions.map((action) => `${action.action} ${action.t…
+    401|     expect(order.indexOf("remove-serve-entry :8845")).toBeGreaterThan(…
+    402|     expect(order.indexOf("remove-serve-entry :8846")).toBeLessThan(ord…
+       |                                                       ^
+    403|     expect(order.indexOf("remove-serve-entry :8846")).toBeGreaterThan(…
+    404|     expect(actions.find((action) => action.target === ":8845")?.reason…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+AssertionError: expected { dry_run: true, …(17) } to match object { branch: 'detached-78975223', …(1) }
+(16 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "branch": "detached-78975223",
+-   "branch_source": "detached",
++   "branch": "cell-fixture-active",
++   "branch_source": "session",
+  }
+
+ ❯ test/integration.test.ts:227:62
+    225|     await run(c, "commit", "-qm", "unpushed");
+    226|     const head = await run(c, "rev-parse", "HEAD");
+    227|     expect(await service.publish({ repo: c, dryRun: true })).toMatchOb…
+       |                                                              ^
+    228|     const detached = await service.publish({ repo: c, ttl: "1h" });
+    229|     track(service, detached.env as string);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+AssertionError: expected { dry_run: true, …(17) } to match object { branch: 'detached-1f9f6610', …(1) }
+(16 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "branch": "detached-1f9f6610",
+-   "branch_source": "detached",
++   "branch": "cell-fixture-active",
++   "branch_source": "session",
+  }
+
+ ❯ test/integration.test.ts:256:59
+    254|     const first = await commit("one.txt");
+    255|
+    256|     expect(await service.publish({ repo, dryRun: true })).toMatchObjec…
+       |                                                           ^
+    257|     vi.stubEnv("HIVE_BEE", "Agent/Slots_Bee");
+    258|     expect(await service.publish({ repo, dryRun: true })).toMatchObjec…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed web publish > rolls back the process, Serve entry, port claims, and runtime record after E_SERVE_TIMEOUT
+AssertionError: expected { cmd: 'npm run dev', …(5) } to match object { upstream_port: 4500, …(1) }
+(4 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+    "tailnet_port": 8600,
+-   "upstream_port": 4500,
++   "upstream_port": 4546,
+  }
+
+ ❯ test/integration.test.ts:403:35
+    401|       serve: { upstream_port: number; tailnet_port: number };
+    402|     };
+    403|     expect(recoveredRecord.serve).toMatchObject({ upstream_port: 4500,…
+       |                                   ^
+    404|   });
+    405|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/12]⎯
+
+ FAIL  test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+NectarError: Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ❯ currentPlatform src/testpack.ts:19:11
+     17|   const arch = process.arch === "arm64" ? "arm64" : process.arch === "…
+     18|   if (process.platform !== "darwin") {
+     19|     throw new NectarError("E_PLATFORM", `Nectar v0 launches testpacks …
+       |           ^
+     20|   }
+     21|   return `darwin-${arch}`;
+ ❯ NectarService.buildTestpack src/service.ts:2288:22
+ ❯ src/service.ts:2177:39
+ ❯ StateStore.withLock src/state.ts:152:14
+ ❯ NectarService.recoverCapacity src/service.ts:411:16
+ ❯ NectarService.publishPlaced src/service.ts:520:60
+ ❯ NectarService.publish src/service.ts:478:22
+ ❯ test/integration.test.ts:550:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/12]⎯
+
+ FAIL  test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+AssertionError: expected { Object (env, ref, ...) } to match object { mode: 'ios', …(4) }
+(29 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+    "ax_url": "http://127.0.0.1:4300/ax",
+    "bundle_id": "no.trmd.dummy",
+    "is_self": true,
+    "mode": "ios",
+-   "platform": "ios-sim-arm64",
++   "platform": "ios-sim-x64",
+  }
+
+ ❯ test/ios.test.ts:145:22
+    143|     // The port comes from the allocator, never a hardcoded low end of…
+    144|     const resolved = await service.resolve(`nectar://fixture/${env}`);
+    145|     expect(resolved).toMatchObject({
+       |                      ^
+    146|       mode: "ios",
+    147|       bundle_id: "no.trmd.dummy",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/12]⎯
+
+ FAIL  test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+NectarError: Nectar v0 launches testpacks only on darwin (this host is linux-x64)
+ ❯ currentPlatform src/testpack.ts:19:11
+     17|   const arch = process.arch === "arm64" ? "arm64" : process.arch === "…
+     18|   if (process.platform !== "darwin") {
+     19|     throw new NectarError("E_PLATFORM", `Nectar v0 launches testpacks …
+       |           ^
+     20|   }
+     21|   return `darwin-${arch}`;
+ ❯ NectarService.buildTestpack src/service.ts:2288:22
+ ❯ src/service.ts:2177:39
+ ❯ StateStore.withLock src/state.ts:152:14
+ ❯ NectarService.recoverCapacity src/service.ts:411:16
+ ❯ NectarService.publishPlaced src/service.ts:520:60
+ ❯ NectarService.publish src/service.ts:478:22
+ ❯ test/ios.test.ts:236:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/12]⎯
+
+ FAIL  test/localapi.test.ts > LocalAPI discovery bounds > keeps the whole discovery inside its budget when every step hangs
+AssertionError: expected [ [ 'lsof', 'timeout' ], …(3) ] to deeply equal [ [ 'lsof', 'timeout' ], …(3) ]
+
+- Expected
++ Received
+
+@@ -7,11 +7,11 @@
+      "macsys",
+      "timeout",
+    ],
+    [
+      "group-container",
+-     "skipped",
++     "timeout",
+    ],
+    [
+      "socket",
+      "skipped",
+    ],
+
+ ❯ test/localapi.test.ts:408:66
+    406|     });
+    407|     expect(Date.now() - started).toBeLessThan(900);
+    408|     expect(found.steps.map((step) => [step.step, step.outcome])).toEqu…
+       |                                                                  ^
+    409|       ["lsof", "timeout"],
+    410|       ["macsys", "timeout"],
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/12]⎯
+
+ FAIL  test/proxy.test.ts > nectard fronting the real service > re-fronts an env whose republish moved it to a new upstream port
+NectarError: No available TCP port in configured range 4970-4989; widen custom port bounds or publish with --host <host>; no idle dynamic runtime can be put to sleep. Configure nectar pool add <host>, free host memory, or widen custom port ranges
+ ❯ NectarService.recoverCapacity src/service.ts:434:27
+
+ ❯ NectarService.publishPlaced src/service.ts:520:60
+ ❯ NectarService.publish src/service.ts:478:22
+ ❯ test/proxy.test.ts:285:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/12]⎯
+
+ FAIL  test/remote.test.ts > tailnet listener over the LocalAPI socket > ships only the committed tree of a repo, never .git, and publishes its recipe there
+AssertionError: expected { status: 200, body: 'ok' } to deeply equal { status: 200, body: 'committed\n' }
+
+- Expected
++ Received
+
+  {
+-   "body": "committed
+- ",
++   "body": "ok",
+    "status": 200,
+  }
+
+ ❯ test/remote.test.ts:425:45
+    423|     expect(published).toMatchObject({ env: "webapp--main--web", ref: "…
+    424|     await track(b, published.env);
+    425|     expect(await get(published.urls.local)).toEqual({ status: 200, bod…
+       |                                             ^
+    426|     const inbox = path.join(b, "inbox");
+    427|     const [key] = await readdir(inbox);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/12]⎯
+
+
+ Test Files  7 failed | 23 passed (30)
+      Tests  12 failed | 357 passed (369)
+   Start at  17:18:01
+   Duration  67.25s (transform 24.33s, setup 5.00s, import 29.39s, tests 243.12s, environment 6ms)
+
+ ELIFECYCLE  Test failed. See above for more details.

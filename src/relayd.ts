@@ -642,9 +642,9 @@ export async function startRelayd(configFile: string, overrides: Partial<RelaydD
       const now = deps.now();
       if (requested <= now) throw new RelaydError(400, "E_USAGE", "expires_at is in the past");
       const all = Object.values(state.routes);
-      if (all.length >= config.max_routes) throw new RelaydError(429, "E_QUOTA", `the relay holds its maximum of ${config.max_routes} routes`);
+      if (all.length >= config.max_routes) throw new RelaydError(429, "E_QUOTA", "The public relay cannot accept another route; ask the relay operator to increase route capacity or use another exposure target");
       if (all.filter((route) => route.owner.node_id === peer.node_id).length >= config.max_routes_per_node) {
-        throw new RelaydError(429, "E_QUOTA", `your node holds its maximum of ${config.max_routes_per_node} routes`);
+        throw new RelaydError(429, "E_QUOTA", "The public relay cannot accept another route from this host; ask the relay operator to increase this host's route capacity or use another exposure target");
       }
       const gate = await gateFor(body.gate, peer, ungated, body.password);
       const sub = mintSub(base);

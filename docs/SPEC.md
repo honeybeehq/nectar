@@ -1732,7 +1732,7 @@ static site's files, never `.git`.
 
 | knob | default | on exceed |
 | --- | --- | --- |
-| serving web envs | Half of host RAM / 256 MiB (32 at 16 GiB, 64 at 32 GiB, 128 at 64 GiB) | Capacity estimate, not a fixed-count refusal; `E_QUOTA` only below 256 MiB free plus a reserve of min(1 GiB, RAM / 8) |
+| running dynamic web apps | Available host memory | No preview-count refusal; sleep eligible idle apps and try configured pool hosts before reporting `E_QUOTA`. Admission needs 256 MiB plus a reserve of min(1 GiB, RAM / 8); static previews bypass it |
 | streamed nectar simulators (ios) | 1 | `E_QUOTA` — serve-sim 0.1.45 cannot run two encoder instances (OQ8); raise when upstream fixes multi-instance |
 | tailnet ports | 8443–65535 | `E_PORTS` only when the configured range has no available port |
 | upstream ports | 4100–65535 | `E_PORTS` |
@@ -1973,9 +1973,15 @@ records wake placements (host, final remote URL) and slept preview names. A wake
 also names slept previews in x-nectar-slept-previews. Remote placement requires a reachable
 HTTPS mesh URL; local-only URLs are not accepted as remote destinations.
 
-Publish JSON and the CLI's formatted JSON include slept_previews and top-level
+Publish JSON includes slept_previews and top-level
 preview_url, equal to packet_fields.preview_url. Remote placement adds placed_on and
-placement_reason and returns the destination's URL directly. Existing pool defaults and
+placement_reason and returns the destination's URL directly. Human output prints the final
+`Preview: <URL>`, one `Put to sleep:` line naming any sleeping previews (which wake on a
+visit), and one `Published on <host>:` line with the placement reason. Failed publishes
+retain the exact error code and actionable message in both human and JSON output; human
+failures also name any previews put to sleep before the failure.
+Publishing never requires a free place in a preview count; do not remove previews to
+make room. Existing pool defaults and
 sticky routing still apply before local publishing. Static previews bypass runtime
 memory admission and are never capacity victims.
 

@@ -411,7 +411,7 @@ export class NectarService {
         return await action();
       } catch (error) {
         if (!(error instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(error.code)) throw error;
-        if (error.details.capacity_resource === "tailnet") throw new NectarError(error.code, `${error.message}; retained preview routes cannot be freed by sleeping. Widen custom tailnet port bounds or configure nectar pool add <host>`, { ...error.details, slept_previews: slept });
+        if (error.details.capacity_resource === "tailnet") throw new NectarError(error.code, `${error.message}; sleeping preserves existing URL routes and cannot release their TCP ports`, { ...error.details, slept_previews: slept });
         const eligible = (record: EnvRecord): boolean => record.name !== exclude && record.mode === "web" && holdsRuntime(record.status) && record.static_route === undefined && record.serve?.proxy_port !== undefined && record.serve.pid > 1 && !record.serve.cmd.includes("static-server.") && !protectedPreview(record) && !this.activity(record.name).active;
         const viewed = (record: EnvRecord): number => this.activity(record.name).viewedAt ?? Date.parse(record.last_opened_at ?? record.published_at);
         const candidates = (await this.store.listEnvs()).filter(eligible).sort((a, b) => viewed(a) - viewed(b) || a.name.localeCompare(b.name));
@@ -431,7 +431,7 @@ export class NectarService {
           }
           if (freed) break;
         }
-        if (!freed) throw new NectarError(error.code, `${error.message}; no idle dynamic runtime can be put to sleep. Configure nectar pool add <host>, free host memory, or widen custom port ranges`, { ...error.details, slept_previews: slept });
+        if (!freed) throw new NectarError(error.code, `${error.message}; no idle dynamic runtime can be put to sleep. Alternatively, configure nectar pool add <host> and publish without --local or --host for automatic host placement`, { ...error.details, slept_previews: slept });
       }
     }
   }
@@ -1348,7 +1348,7 @@ export class NectarService {
         return this.republishWeb(options, old);
       }
       if (!options.recipe.web?.serve.includes("static-server.") && (options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !(await this.memoryAvailable())) {
-        throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
+        throw new NectarError("E_QUOTA", "Insufficient host memory to start this preview; free host memory or publish on another host with --host <host>");
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
       const site = options.site;
@@ -1380,7 +1380,7 @@ export class NectarService {
   ): Promise<PublishedWeb> {
     const identity = await this.identity();
     const site = options.site;
-    if (site === undefined && (await runningDaemonPid(this.paths)) === undefined && !(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient host memory for another preview");
+    if (site === undefined && (await runningDaemonPid(this.paths)) === undefined && !(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient host memory to start this preview; free host memory or publish on another host with --host <host>");
     const slot = path.join(this.paths.work, old.name);
     const destination = site !== undefined ? old.worktree : old.worktree === slot ? `${slot}.alt` : slot;
     const record = this.nextRecord({ ...options, mode: "web" }, old.name, destination, identity, old);
@@ -1804,7 +1804,7 @@ export class NectarService {
     delete record.serve.upstream_port;
     record.status = "warm";
     const port = record.serve.proxy_port ?? upstreamPort;
-    if (port === undefined) throw new NectarError("E_PORTS", "Could not allocate preview listener");
+    if (port === undefined) throw new NectarError("E_PORTS", "Could not allocate a preview listener; widen custom port ranges or publish with --host <host>");
     record.serve.proxy_port = port;
     record.urls.local = `http://127.0.0.1:${port}`;
     const mesh = identity.online ? await serveWeb(tailnetPort, record.urls.local) : undefined;
@@ -1856,7 +1856,7 @@ export class NectarService {
       const record = await this.store.readEnv(name);
       if (record.mode !== "web" || record.serve === undefined) throw new NectarError("E_NOT_FOUND", "Preview unavailable");
       if (record.status === "warm") {
-        if (!(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient memory to wake preview");
+        if (!(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient host memory to wake this preview; free host memory or republish with --host <host>");
         const recipe = (await loadRecipe(record.worktree)).web;
         if (recipe === undefined) throw new NectarError("E_NO_RECIPE", "Missing web recipe");
         const old = structuredClone(record);
@@ -2339,7 +2339,7 @@ export class NectarService {
       );
       const config = await this.store.readConfig();
       if (activeSims.length >= config.serving_sim_limit) {
-        throw new NectarError("E_QUOTA", `Serving simulator quota (${config.serving_sim_limit}) reached; run nectar gc or stop an ios env`);
+        throw new NectarError("E_QUOTA", "Cannot start another simulator stream on this host; publish on another Mac or stop an iOS preview you no longer need");
       }
       const initial = await this.initialRecord({ ...options, mode: "ios" });
       if (initial.old?.sim_udid !== undefined) {

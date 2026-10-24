@@ -18,6 +18,8 @@ $ nectar publish --json
     "env": "acme--coupons-stack--web",
     "mode": "web",
     "urls":          { "mesh": "https://builder-1.tailnet.ts.net:8444" },
+    "preview_url": "https://builder-1.tailnet.ts.net:8444",
+    "slept_previews": [],
     "packet_fields": { "preview_url": "https://builder-1.tailnet.ts.net:8444" },
     "ref": "nectar://builder-1/acme--coupons-stack--web",
     "expires_at": "2026-07-23T12:04:11Z"
@@ -30,6 +32,20 @@ re-publish — the URL stays stable, so the packet's references keep working. A 
 that fails to check out, install or build leaves the previous version serving. Publishing
 a different repo whose app name and branch collide with a live env is refused with
 `E_USAGE`; pass `--name <app>` to publish it beside the other one.
+
+Publishing needs no free preview capacity by count. Static previews share one server and
+cost no per-preview process or port. Dynamic previews sleep when idle and wake on a visit
+at the same URL. Under pressure Nectar sleeps eligible idle apps or uses a configured pool
+host; it never retires a preview just to publish another.
+
+Use `result.preview_url` as returned (also `result.packet_fields.preview_url`). Human output
+prints `Preview: <final URL>`, plus one line each for `slept_previews` and host placement
+(`placed_on`, `placement_reason`) when present. Sleeping preserves URLs and files.
+If publishing fails, report the exact `error.code` and `error.message`; follow its resource
+or host guidance rather than removing a preview to make room.
+
+Previews linked to proofs waiting for review are kept. Configure `NECTAR_PROOF_LOOKUP`
+with a complete proof lookup adapter; missing or failed lookup conservatively keeps them.
 
 ## Five modalities, one grammar
 

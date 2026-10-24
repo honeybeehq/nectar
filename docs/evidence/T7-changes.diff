@@ -1,0 +1,299 @@
+diff --git a/scripts/verify-shared-static.mjs b/scripts/verify-shared-static.mjs
+index 57aaf6c..d6835ac 100644
+--- a/scripts/verify-shared-static.mjs
++++ b/scripts/verify-shared-static.mjs
+@@ -19,15 +19,21 @@ await writeFile(path.join(fixture, 'asset.js'), 'window.sharedStatic = true;');
+ await writeFile(path.join(fixture, 'nested', 'index.html'), 'nested-static-ok');
+ await mkdir(path.join(run, "bin"));
+ await writeFile(path.join(run, "bin", "hive"), '#!/bin/sh\necho \'[{"id":"static-verification-owner","status":"running"}]\'\n', { mode: 0o700 });
++const lookup = path.join(run, 'proof-lookup');
++await writeFile(lookup, `#!${process.execPath}\nfor await (const chunk of process.stdin) {}\nconsole.log(JSON.stringify({state:'unlinked'}));\n`, {mode:0o700});
+ const socketDir = await mkdtemp(path.join(os.tmpdir(), "nectar-t2-"));
+-const env = { ...process.env, PATH: `${path.join(run, "bin")}:${process.env.PATH}`, HIVE_BEE: "static-verification-owner", HIVE_SESSION: "static-verification-owner", NECTAR_HOME: state, NECTAR_SOCKET: path.join(socketDir, "nectard.sock") };
++const env = { ...process.env, NECTAR_PROOF_LOOKUP:lookup, PATH: `${path.join(run, "bin")}:${process.env.PATH}`, HIVE_BEE: "static-verification-owner", HIVE_SESSION: "static-verification-owner", NECTAR_HOME: state, NECTAR_SOCKET: path.join(socketDir, "nectard.sock") };
+ const log = path.join(run, 'evidence.log');
+ const output = async (text) => { process.stdout.write(`${text}\n`); await appendFile(log, `${text}\n`); };
+ const cli = async (...args) => {
+-  const { stdout } = await exec(process.execPath, [path.join(root, 'dist/cli.js'), ...args, '--json'], { env, maxBuffer: 10 * 1024 * 1024 });
+-  const envelope = JSON.parse(stdout);
+-  if (!envelope.ok) throw new Error(stdout);
+-  return envelope.result;
++  for (let attempt=0;attempt<100;attempt++) {
++    const result=await exec(process.execPath,[path.join(root,'dist/cli.js'),...args,'--json'],{env,maxBuffer:10*1024*1024}).catch(error=>({stdout:error.stdout}));
++    const envelope=JSON.parse(result.stdout);
++    if(envelope.ok)return envelope.result;
++    if(envelope.error?.code!=='E_BUSY'||attempt===99)throw new Error(result.stdout);
++    await output(`RETRY E_BUSY command=${args.join(' ')} attempt=${attempt+1} waitMs=100`);
++    await new Promise(resolve=>setTimeout(resolve,100));
++  }
+ };
+ const daemon = spawn(process.execPath, [path.join(root, 'dist/cli.js'), 'daemon', 'run', '--interval', '2s', '--gc-interval', '1h'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+ let daemonLog = '';
+@@ -119,7 +125,7 @@ try {
+   const { scrubbedEnvironment, spawnDetachedExecutable } = await import('../dist/commands.js');
+   const { serveStatus, statusPorts, serveWeb } = await import('../dist/tailscale.js');
+   const store = new StateStore(getPaths(state));
+-  const record = await store.readEnv(legacyEnv);
++  let record = await store.readEnv(legacyEnv);
+   const reserved = statusPorts(await serveStatus());
+   const upstream = await allocatePort({ start: 4100, end: 4199, reserved });
+   const tailnet = await allocatePort({ start: 8443, end: 8542, reserved });
+@@ -134,10 +140,12 @@ try {
+   await store.writeEnv(record);
+   const served = await serveWeb(tailnet, record.urls.local);
+   if (!served.ok) throw new Error(served.message);
++  for(let attempt=0;attempt<100;attempt++){const current=await store.readEnv(legacyEnv);if(current.serve?.proxy_port!==undefined){record=current;break;}await new Promise(resolve=>setTimeout(resolve,100));}
++  await store.withLock('machine--ports',async()=>{});
+   const republishedLegacy = await cli('publish', fixture, '--mode', 'static', '--name', 'legacy-fixture', '--branch', 'static', '--local');
+-  if (republishedLegacy.urls.local !== record.urls.local || republishedLegacy.urls.mesh !== record.urls.mesh) throw new Error('Legacy republish changed URL');
+-  await exec('curl', ['--fail', '--silent', record.urls.local]);
+-  await output(`PASS pre-upgrade static fixture retains local and mesh URLs on republish: ${record.urls.mesh}`);
++  if (republishedLegacy.urls.mesh !== record.urls.mesh) throw new Error('Legacy republish changed URL');
++  await exec('curl', ['--fail', '--silent', republishedLegacy.urls.local]);
++  await output(`PASS pre-upgrade static fixture retains mesh URL on republish; local URL uses daemon proxy: ${record.urls.mesh}`);
+   const recipeRepo = path.join(run, 'recipe-fixture');
+   await mkdir(path.join(recipeRepo, 'src'), { recursive: true });
+   await mkdir(path.join(recipeRepo, 'dist'));
+@@ -159,8 +167,10 @@ try {
+   if (legacyEnv !== undefined) await cli('stop', legacyEnv);
+   if (recipeEnv !== undefined) await cli('stop', recipeEnv);
+   if (shared === undefined) shared = JSON.parse(await readFile(path.join(state, 'shared-static.json'), 'utf8').catch(() => 'null'));
+-  if (shared !== null && shared !== undefined) process.kill(shared.pid, 'SIGTERM');
+   daemon.kill('SIGTERM');
++  await new Promise(resolve=>daemon.once('exit',resolve));
++  shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8').catch(()=>'null'));
++  if(shared)try{process.kill(shared.pid,'SIGTERM');}catch(error){if(error.code!=='ESRCH')throw error;}
+   if (shared?.tailnetPort !== undefined) {
+     const { stopServe } = await import('../dist/tailscale.js');
+     await stopServe(shared.tailnetPort);
+diff --git a/src/daemon.ts b/src/daemon.ts
+index 39fddf2..49dae2d 100644
+--- a/src/daemon.ts
++++ b/src/daemon.ts
+@@ -46,7 +46,7 @@ export function fronted(record: EnvRecord): record is FrontedRecord {
+   );
+ }
+ 
+-type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView"> & Partial<Pick<NectarService, "wakeWeb">>;
++type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView"> & Partial<Pick<NectarService, "wakeWeb" | "store">>;
+ 
+ export class ProxyHub {
+   private readonly proxies = new Map<string, EnvProxy>();
+@@ -73,7 +73,7 @@ export class ProxyHub {
+   }
+ 
+   sync(records: EnvRecord[]): Promise<string[]> {
+-    this.syncing = this.syncing.catch(() => []).then(() => this.reconcile(records));
++    this.syncing = this.syncing.catch(() => []).then(async () => this.reconcile(await this.service.store?.listEnvs() ?? records));
+     return this.syncing;
+   }
+ 
+diff --git a/src/service.ts b/src/service.ts
+index 9f3f767..a1ce57c 100644
+--- a/src/service.ts
++++ b/src/service.ts
+@@ -350,6 +350,10 @@ function staticWebRecipe(): WebRecipe {
+   return { serve: `exec ${quote(process.execPath)} ${quote(entry)}`, readyPath: "/", readyTimeoutMs: 15_000, env: {} };
+ }
+ 
++function isStaticServe(command: string): boolean {
++  return command.includes("static-server.");
++}
++
+ function staticServeRoot(command: string, worktree: string): string {
+   const match = /(?:^|\s)(?:"[^"]*static-server\.(?:js|ts)"|'[^']*static-server\.(?:js|ts)'|[^\s'"]*static-server\.(?:js|ts))(?:\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+)))?/.exec(command);
+   return path.resolve(worktree, match?.[1] ?? match?.[2] ?? match?.[3] ?? ".");
+@@ -1798,7 +1802,7 @@ export class NectarService {
+     depEnv: Record<string, string>,
+     dynamic: boolean,
+   ): Promise<PublishedWeb> {
+-    if (!dynamic || (await runningDaemonPid(this.paths)) === undefined) return this.startWeb(record, recipe, identity, old, depEnv);
++    if (!dynamic || isStaticServe(recipe.serve) || (await runningDaemonPid(this.paths)) === undefined) return this.startWeb(record, recipe, identity, old, depEnv);
+     const { upstreamPort, tailnetPort } = await this.allocateAndSpawn(record, identity, old, () => ({ pid: 0, pgid: 0, cmd: recipe.serve }));
+     if (record.serve === undefined) throw new NectarError("E_INTERNAL", "Missing route allocation");
+     delete record.serve.upstream_port;
+@@ -1917,7 +1921,7 @@ export class NectarService {
+     old: EnvRecord | undefined,
+     depEnv: Record<string, string>,
+   ): Promise<PublishedWeb> {
+-    if (recipe.serve.includes("static-server.") && old?.serve === undefined) {
++    if (isStaticServe(recipe.serve) && old?.serve === undefined) {
+       record.static_root = staticServeRoot(recipe.serve, record.worktree);
+       return this.startSharedStatic(record, identity);
+     }
+@@ -3221,7 +3225,7 @@ export class NectarService {
+       // put them so ls/resolve keep telling the truth.
+       if (
+         current.mode !== "dev" &&
+-        (holdsRuntime(current.status) || current.status === "publishing" || current.status === "crashed")
++        (holdsRuntime(current.status) || current.status === "warm" || current.status === "publishing" || current.status === "crashed")
+       ) {
+         current.status = "stopped";
+       }
+diff --git a/src/shared-static.ts b/src/shared-static.ts
+index 24aa9b1..db2cb37 100644
+--- a/src/shared-static.ts
++++ b/src/shared-static.ts
+@@ -8,6 +8,8 @@ import { NectarError } from "./errors.js";
+ import { getPaths } from "./paths.js";
+ import { allocatePort, portAvailable } from "./ports.js";
+ import { atomicJson, StateStore } from "./state.js";
++import type { EnvRecord } from "./types.js";
++import { previewProofState } from "./proofs.js";
+ import { serveStatic } from "./static-server.js";
+ import { serveEntries, rootMount, serveStatus, serveWeb, statusPorts } from "./tailscale.js";
+ 
+@@ -68,7 +70,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
+       const secret = crypto.randomBytes(16).toString("hex");
+       const entry = process.env.NECTAR_SHARED_STATIC_ENTRY ?? fileURLToPath(new URL("./shared-static.js", import.meta.url));
+       const child = spawnDetachedExecutable(process.execPath, [entry, store.paths.root, String(info !== undefined && await portAvailable(info.port) ? info.port : 0), secret], store.paths.root,
+-        scrubbedEnvironment(), path.join(store.paths.logs, "shared-static.log"));
++        scrubbedEnvironment(process.env.NECTAR_PROOF_LOOKUP === undefined ? {} : { NECTAR_PROOF_LOOKUP: process.env.NECTAR_PROOF_LOOKUP }), path.join(store.paths.logs, "shared-static.log"));
+       const deadline = Date.now() + 15_000;
+       while (Date.now() < deadline) {
+         const current = await metadata(store);
+@@ -124,6 +126,15 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
+ async function run(root: string, port: number, secret: string): Promise<void> {
+   const store = new StateStore(getPaths(root));
+   const previous = await metadata(store);
++  const proofLookups = new Map<string, ReturnType<typeof previewProofState>>();
++  const proofState = (record: EnvRecord): ReturnType<typeof previewProofState> => {
++    let lookup = proofLookups.get(record.name);
++    if (lookup === undefined) {
++      lookup = previewProofState(record).finally(() => proofLookups.delete(record.name));
++      proofLookups.set(record.name, lookup);
++    }
++    return lookup;
++  };
+   const reply = (response: http.ServerResponse, status: number, message: string): void => {
+     response.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+     response.end(message);
+@@ -138,7 +149,7 @@ async function run(root: string, port: number, secret: string): Promise<void> {
+       if (match === null) return reply(response, 404, "Static preview not found.\n");
+       const record = await store.maybeEnv(match[1]!);
+       if (record === undefined || record.static_route !== match[2]) return reply(response, 404, "Static preview not found.\n");
+-      if (Date.parse(record.expires_at) <= Date.now() || record.status === "expired" || record.status === "cold") {
++      if (record.status === "expired" || record.status === "cold" || (Date.parse(record.expires_at) <= Date.now() && (await proofState(record)).state === "unlinked")) {
+         return reply(response, 410, "This static preview has expired. Publish it again to renew it.\n");
+       }
+       if (record.status !== "serving") return reply(response, 410, "This static preview is stopped. Publish it again to restart it.\n");
+diff --git a/test/fixtures/proof-gc.mjs b/test/fixtures/proof-gc.mjs
+index a350278..7c6e28b 100644
+--- a/test/fixtures/proof-gc.mjs
++++ b/test/fixtures/proof-gc.mjs
+@@ -99,7 +99,7 @@ try {
+   assert.deepEqual(report.transitions,[{env:names[0],action:'reap'}]);
+   assert.ok(report.skipped.some(s=>s.env===names[1] && s.reason.includes('waiting')));
+   assert.ok(report.skipped.some(s=>s.env===names[2] && s.reason.includes('exited 1')));
+-  await assert.rejects(fetch(record.urls.local));
++  assert.equal((await fetch(record.urls.local)).status,404);
+   for (const name of names.slice(1)) {
+     const kept=JSON.parse(await readFile(path.join(state,'envs',`${name}.json`),'utf8'));
+     assert.match(await fetch(kept.urls.local).then(r=>r.text()),/T4 proof-aware/);
+@@ -111,4 +111,6 @@ try {
+     try { await cli('rm',name,'--force'); } catch {}
+   }
+   daemon.kill('SIGTERM'); await once(daemon,'exit');
++  const shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8').catch(()=>'null'));
++  if(shared)try{process.kill(shared.pid,'SIGTERM');}catch(error){if(error.code!=='ESRCH')throw error;}
+ }
+diff --git a/test/fixtures/verify-combined.mjs b/test/fixtures/verify-combined.mjs
+new file mode 100644
+index 0000000..f8d706d
+--- /dev/null
++++ b/test/fixtures/verify-combined.mjs
+@@ -0,0 +1,94 @@
++import assert from 'node:assert/strict';
++import { spawn, execFileSync } from 'node:child_process';
++import { mkdir, mkdtemp, writeFile, readFile, open, chmod } from 'node:fs/promises';
++import path from 'node:path';
++import { NectarService } from '../../dist/service.js';
++import { daemonHello, callDaemon } from '../../dist/control.js';
++import { pidAlive } from '../../dist/commands.js';
++import { portOpen } from '../../dist/ports.js';
++import { serveEntries, serveStatus, stopServe } from '../../dist/tailscale.js';
++const root = path.resolve(process.argv[2] ?? `.audit/combined-${Date.now()}`);
++await mkdir(root, {recursive:true});
++const state = path.join(root,'state');
++process.env.NECTAR_HOME = state;
++process.env.NECTAR_SOCKET = path.join(await mkdtemp('/tmp/nectar-t7-'),'control.sock');
++const lookup = path.join(root,'lookup.mjs');
++await writeFile(lookup,`#!${process.execPath}\nlet input='';for await(const chunk of process.stdin)input+=chunk;const {ref}=JSON.parse(input);if(!ref.includes('t7-'))process.exit(2);if(ref.includes('failed'))process.exit(1);console.log(JSON.stringify({state:ref.includes('landed')?'terminal':ref.includes('unlinked')?'unlinked':'waiting'}));\n`);
++await chmod(lookup,0o700);
++process.env.NECTAR_PROOF_LOOKUP = lookup;
++const service = new NectarService(state);
++await service.store.init();
++await service.store.writeConfig({...await service.store.readConfig(),upstream_port_start:35100,upstream_port_end:35599,tailnet_port_start:35600,tailnet_port_end:35999,pack_server_port:35099,idle_stop_ms:3600000});
++const repo=path.join(root,'repo');await mkdir(repo);
++const git=(...args)=>execFileSync('git',args,{cwd:repo,stdio:'pipe'});
++git('init','-b','main');git('config','user.email','fixture@example.invalid');git('config','user.name','Fixture');
++await writeFile(path.join(repo,'nectar.toml'),'name = "t7-dynamic"\n[web]\nserve = "exec node server.mjs"\nready_timeout = "5s"\n');
++await writeFile(path.join(repo,'server.mjs'),'import http from "node:http";http.createServer((req,res)=>res.end("awake:"+process.env.NECTAR_ENV+":"+process.pid)).listen(Number(process.env.PORT),"127.0.0.1");');
++git('add','.');git('commit','-m','Combined fixture');
++const site=path.join(root,'site');await mkdir(site);await writeFile(path.join(site,'index.html'),'T7 combined static');await writeFile(path.join(site,'asset.js'),'T7 asset');
++const log=await open(path.join(root,'daemon.log'),'a');let daemon;
++const wait=ms=>new Promise(r=>setTimeout(r,ms));
++const until=async(fn)=>{const end=Date.now()+30000;while(!await fn()){assert(Date.now()<end,'timeout');await wait(100);}};
++const say=x=>console.log(JSON.stringify({at:new Date().toISOString(),...x}));
++const start=async(budget)=>{const env={...process.env};if(budget)env.NECTAR_TEST_RUNTIME_MEMORY_BYTES=String(budget*256*1024**2);daemon=spawn(process.execPath,['dist/cli.js','daemon','run','--interval','500ms','--gc-interval','1h'],{env,stdio:['ignore',log.fd,log.fd]});await until(async()=>{try{return(await daemonHello(process.env.NECTAR_SOCKET)).pid===daemon.pid;}catch{return false;}});say({daemon:daemon.pid,state,budget});};
++const halt=async()=>{daemon.kill('SIGTERM');await new Promise(r=>daemon.once('exit',r));};
++const call=(command,args={})=>callDaemon(process.env.NECTAR_SOCKET,command,{nectar_home:state,caller:{},args});
++const publish=async args=>{const t=performance.now();const r=await call('publish',args);assert.equal(r.via,'nectard');assert.match(r.preview_url,/^https:/);say({publish:r.env,url:r.preview_url,publishMs:Math.round(performance.now()-t),slept:r.slept_previews});return r;};
++const curl=async(url,expected)=>{const before=(await service.store.listEnvs()).find(r=>r.urls.mesh===url);const t=performance.now();const body=execFileSync('curl',['--fail','-sS','--max-time','25',url],{encoding:'utf8'});assert(body.includes(expected),body);if(body.startsWith('awake:'))pids.add(Number(body.split(':').at(-1)));say({open:url,body,statusBefore:before?.status,wakeMs:Math.round(performance.now()-t)});return body;};
++const statics=[],dynamics=[],pids=new Set();let shared;
++try{
++ await start();
++ for(let i=0;i<20;i++){const r=await publish({path:site,mode:'static',name:`t7-static-${i}`,local:true});statics.push(r);await curl(r.preview_url,'T7 combined static');await curl(r.preview_url+'asset.js','T7 asset');}
++ shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));
++ assert((await service.store.listEnvs()).every(r=>r.static_route && !r.serve));
++ say({staticCount:20,sharedPid:shared.pid,sharedPort:shared.port,sharedTailnetPort:shared.tailnetPort,perPreviewProcesses:0});
++ for(let i=1;i<=15;i++){const branch=`p${String(i).padStart(2,'0')}`;git('branch',branch);const r=await publish({path:repo,branch,mode:'web',local:true});dynamics.push(r);await curl(r.preview_url,`awake:${r.env}:`);}
++ const active=await service.store.listEnvs();const apps=active.filter(r=>r.serve?.pid>1);assert.equal(apps.length,15);for(const r of apps)pids.add(r.serve.pid);
++ const rss=Number(/^VmRSS:\s+(\d+)/m.exec(await readFile(`/proc/${daemon.pid}/status`,'utf8'))[1]);
++ say({peak:{static:20,dynamic:15,appProcesses:apps.length,sharedStaticProcesses:1,daemonProcesses:1,totalOwnedProcesses:17,nectardRssKiB:rss}});
++ await service.store.writeConfig({...await service.store.readConfig(),idle_stop_ms:2000});
++ await until(async()=>(await service.store.listEnvs()).filter(r=>r.serve).every(r=>r.status==='warm'));
++ for(const r of apps){assert(!pidAlive(r.serve.pid));assert(!await portOpen(r.serve.upstream_port));}
++ for(const r of statics)await curl(r.preview_url,'T7 combined static');
++ assert.equal(JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8')).pid,shared.pid);
++ say({idleMs:2000,pidsGone:15,appPortsFreed:15,staticStillWorks:true,sameSharedPid:true});
++ await halt();await service.store.writeConfig({...await service.store.readConfig(),idle_stop_ms:3600000});await start(15);
++ for(const r of [...statics,...dynamics]){const record=await service.store.readEnv(r.env);assert.equal(record.urls.mesh,r.preview_url);await curl(r.preview_url,r.env.includes('dynamic')?`awake:${r.env}:`:'T7 combined static');}
++ say({restartSameUrls:35});
++ await halt();await start(15);
++ for(const r of dynamics)await curl(r.preview_url,`awake:${r.env}:`);
++ git('branch','p16');const extra=await publish({path:repo,branch:'p16',mode:'web',local:true});
++ assert.deepEqual(extra.slept_previews,[]);
++ const response=execFileSync('curl',['-isS','--max-time','25',extra.preview_url],{encoding:'utf8'});
++ pids.add(Number(response.split(':').at(-1)));assert(response.includes(`awake:${extra.env}:`));assert.match(response,new RegExp(`x-nectar-slept-previews: ${dynamics[0].env}`,'i'));
++ say({memoryBudgetRuntimes:15,furtherPublish:extra.env,wakeResponse:response,expectedLeastRecent:dynamics[0].env});
++ assert.equal((await service.store.readEnv(dynamics[0].env)).status,'warm');
++ await curl(dynamics[0].preview_url,`awake:${dynamics[0].env}:`);
++ assert.equal((await service.store.readEnv(dynamics[0].env)).urls.mesh,dynamics[0].preview_url);
++ say({capacityVictimWoke:true,events:await readFile(path.join(state,'capacity.jsonl'),'utf8')});
++ await service.store.writeConfig({...await service.store.readConfig(),upstream_port_end:35130});
++ git('branch','p17');const overflow=await publish({path:repo,branch:'p17',mode:'web',local:true});
++ assert.equal(overflow.slept_previews.length,1);const publishVictim=dynamics.find(r=>r.env===overflow.slept_previews[0]);assert(publishVictim);
++ await service.store.writeConfig({...await service.store.readConfig(),upstream_port_end:35599});
++ await curl(overflow.preview_url,`awake:${overflow.env}:`);await curl(publishVictim.preview_url,`awake:${publishVictim.env}:`);
++ say({publishNamedVictim:overflow.slept_previews,victimSameUrl:(await service.store.readEnv(publishVictim.env)).urls.mesh});
++ const proofs=[];
++ for(const label of ['landed','waiting','failed']){const r=await publish({path:site,mode:'static',name:`t7-${label}`,local:true});proofs.push(r);await service.store.updateEnv(r.env,record=>{record.publisher.hive_bee='gone-t7-fixture';record.owner_inactive_since=new Date(Date.now()-7200000).toISOString();record.expires_at=new Date(Date.now()-30*86400000).toISOString();if(label==='landed')record.proof_terminal_since=new Date(Date.now()-25*3600000).toISOString();});}
++ const expired=await publish({path:site,mode:'static',name:'t7-unlinked',local:true});await service.store.updateEnv(expired.env,r=>{r.expires_at=new Date(Date.now()-1000).toISOString();});
++ const code=execFileSync('curl',['-sS','-o','/dev/null','-w','%{http_code}',expired.preview_url],{encoding:'utf8'});assert.equal(code,'410');say({unlinkedExpiredHttp:code});
++ const gc=await service.gc();say({gc});assert(gc.transitions.some(t=>t.env===proofs[0].env&&t.action==='reap'));assert(!await service.store.maybeEnv(proofs[0].env));
++ assert(gc.skipped.some(t=>t.env===proofs[1].env&&t.reason.includes('waiting')));assert(gc.skipped.some(t=>t.env===proofs[2].env&&t.reason.includes('exited 1')));
++ for(const r of proofs.slice(1))await curl(r.preview_url,'T7 combined static');
++ const oldShared=shared.pid;await halt();process.kill(oldShared,'SIGTERM');await until(async()=>!pidAlive(oldShared));delete process.env.NECTAR_PROOF_LOOKUP;await start();
++ await until(async()=>{const info=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));return info.pid!==oldShared&&pidAlive(info.pid);});shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));
++ await service.store.updateEnv(statics[0].env,r=>{r.expires_at=new Date(Date.now()-1000).toISOString();});
++ await curl(statics[0].preview_url,'T7 combined static');const noAdapter=await service.gc();assert(noAdapter.skipped.some(r=>r.env===statics[0].env&&r.reason.includes('not configured')));say({noAdapterExpiredStatic:200,gcRetained:true,skipReason:noAdapter.skipped.find(r=>r.env===statics[0].env)?.reason,singletonRestartRequiredForAdapterChange:true});
++ say({PASS:true,root});
++}finally{
++ const records=await service.store.listEnvs();for(const r of records)if(r.serve?.pid>1)pids.add(r.serve.pid);
++ for(const r of records){await until(async()=>{try{await service.stop(r.name);return true;}catch(e){if(e.code!=='E_BUSY')throw e;return false;}});}
++ if(daemon?.exitCode===null&&daemon.signalCode===null)await halt();
++ if(shared){const owned=serveEntries(await serveStatus()).filter(e=>e.tailnetPort===shared.tailnetPort);assert(owned.every(e=>e.target===shared.tailnetTarget));await stopServe(shared.tailnetPort);if(pidAlive(shared.pid))process.kill(shared.pid,'SIGTERM');}
++ await log.close();await until(async()=>[...pids].every(pid=>!pidAlive(pid)));
++ const remaining=serveEntries(await serveStatus()).filter(e=>records.some(r=>r.serve?.tailnet_port===e.tailnetPort)||e.tailnetPort===shared?.tailnetPort);assert.equal(remaining.length,0);say({cleanup:true,appPidsGone:pids.size,remainingOwnedRoutes:0});
++}

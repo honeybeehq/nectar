@@ -46,7 +46,7 @@ export function fronted(record: EnvRecord): record is FrontedRecord {
   );
 }
 
-type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView"> & Partial<Pick<NectarService, "wakeWeb">>;
+type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView"> & Partial<Pick<NectarService, "wakeWeb" | "store">>;
 
 export class ProxyHub {
   private readonly proxies = new Map<string, EnvProxy>();
@@ -73,7 +73,7 @@ export class ProxyHub {
   }
 
   sync(records: EnvRecord[]): Promise<string[]> {
-    this.syncing = this.syncing.catch(() => []).then(() => this.reconcile(records));
+    this.syncing = this.syncing.catch(() => []).then(async () => this.reconcile(await this.service.store?.listEnvs() ?? records));
     return this.syncing;
   }
 

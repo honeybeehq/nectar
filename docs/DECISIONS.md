@@ -932,3 +932,9 @@ aliases instead (Project design/relayd-acl-diff.md). (d) lets one host take over
 squat another's URL and pick phishing names. (e) puts a tailnet-facing process at root;
 the path unit keeps the privilege in systemd. (f) one operator's few hundred routes fit
 in a file written atomically, like the route files themselves.
+
+## Proof-aware retirement (2026-10-24)
+
+GC retains previews while any linked proof waits for Tormod, independently of publisher session state and TTL. Terminal proofs receive 24 hours from the first successful terminal observation, persisted as `proof_terminal_since`. Waiting proofs reset that clock, so a reopened proof receives a fresh grace period. Failed reads preserve the clock but prevent retirement until a successful read. Unlinked previews retain the existing one-hour inactive-owner rule. Pinned and main bench previews remain protected.
+
+Apiary currently offers scoped Project reads and a Champion waiting list, neither a complete host-level preview lookup. Until it supplies that interface, `NECTAR_PROOF_LOOKUP` names an executable adapter, invoked directly without a shell. It receives versioned preview identity on stdin and returns a complete aggregate state. No adapter, timeout, invalid JSON or nonzero exit keeps the preview and records a reason. A missing service must cost storage rather than a reviewer's preview.

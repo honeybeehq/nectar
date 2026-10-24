@@ -224,6 +224,7 @@ export interface EnvRecord {
   dev?: DevRecord;
   pinned?: boolean;
   owner_inactive_since?: string;
+  proof_terminal_since?: string;
   last_opened_at?: string;
   sim_udid?: string;
   sim_device?: string;

@@ -1942,3 +1942,41 @@ Hosts configure `NECTAR_PROOF_LOOKUP` in nectard's environment (or the CLI envir
 The adapter must search all relevant Apiary proofs and Projects, including terminal Projects, by canonical URL or Nectar reference. It must match `previewUrl`, evidence `url`, and evidence `nectarRef`. Any waiting proof wins over terminal proofs. `terminal` means all linked proofs are accepted/landed, closed/refused/changes requested, or belong to a finished/dropped Project. `unlinked` requires a complete successful search finding no linked proof. A partial, unauthorized or unavailable search must fail, never claim `unlinked`.
 
 Run the isolated real-daemon fixture with `pnpm build && node test/fixtures/proof-gc.mjs`. It publishes three actual static previews, opens each local URL, then records GC output and environment listings for terminal, waiting and failing lookups. Tailscale and proof metadata are fixtures; no shared preview or host Serve entry is changed.
+
+### Capacity recovery and placement
+
+Dynamic web publish and wake retry E_QUOTA/E_PORTS by putting the least recently viewed
+eligible running app to sleep, one at a time. Live proxy activity supplements persisted
+last_opened_at (unvisited previews sort by published_at). Pinned/--keep previews, the
+main bench, active requests/streams/upgrades and static previews are excluded. Missing
+live activity protects a runtime. Recheck eligibility under its environment lock.
+Sleeping retains its files, stable URL listener and mesh route; a later visit wakes it.
+Capacity recovery never retires or deletes previews. Retained URL ports cannot be
+reclaimed by sleeping, so finite/custom port ranges can still exhaust.
+
+After local recovery, ordinary publishes can try configured pool hosts in least-loaded
+order, skipping unhealthy/mesh-denied hosts and retrying capacity refusals. No pool means
+an error explaining how to add one, free memory or widen custom port bounds; no automatic
+tailnet discovery. --local/--host and received shipments keep their explicit destination.
+A wake can place the exact published commit remotely and proxy HTTPS requests/upgrades
+through its original URL; the persisted remote target resets on republish. capacity.jsonl
+records wake placements (host, final remote URL) and slept preview names. A wake response
+also names slept previews in x-nectar-slept-previews. Remote placement requires a reachable
+HTTPS mesh URL; local-only URLs are not accepted as remote destinations.
+
+Publish JSON and the CLI's formatted JSON include slept_previews and top-level
+preview_url, equal to packet_fields.preview_url. Remote placement adds placed_on and
+placement_reason and returns the destination's URL directly. Existing pool defaults and
+sticky routing still apply before local publishing. Static previews bypass runtime
+memory admission and are never capacity victims.
+
+For isolated fixture runs only, NECTAR_TEST_RUNTIME_MEMORY_BYTES gives the daemon a
+synthetic byte budget: each running dynamic web process and the next admission charge
+256 MiB. Unset/invalid values use normal host-memory admission. This does not alter the
+production reserve or add a preview-count cap.
+
+Capacity sleeping gates newly arriving requests until the transition completes. Cold
+wakes remain concurrent across environments; admission does not reserve host RAM
+atomically. A persisted remote wake target stays until republish. Local removal does
+not immediately remove the shipped copy, whose TTL is bounded by the original remaining
+TTL; a dead remote target currently requires republish to place again.

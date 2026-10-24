@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { runningDaemonPid } from "./daemon.js";
 import { upstreamOf, type Upstream } from "./proxy.js";
 import os from "node:os";
-import { availableMemory, previewMemoryAvailable } from "./capacity.js";
+import { availableMemory, previewMemoryAvailable, PREVIEW_MEMORY_BYTES } from "./capacity.js";
 import { previewProofState, PROOF_GRACE_MS } from "./proofs.js";
 import { ownerState, protectedPreview } from "./owner.js";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import {
   archiveCommit,
   currentBranch,
@@ -381,9 +381,60 @@ function hostAliases(value: string | undefined): Set<string> {
   return new Set(short === undefined ? [normalized] : [normalized, short]);
 }
 
+const capacitySleeping = new Set<string>();
+const capacityActivity = new Map<string, (name: string) => { active: boolean; viewedAt?: number }>();
+
 export class NectarService {
   readonly paths: NectarPaths;
   readonly store: StateStore;
+
+  private activity(name: string): { active: boolean; viewedAt?: number } {
+    return capacityActivity.get(this.paths.root)?.(name) ?? { active: true };
+  }
+
+  setCapacityActivity(activity: (name: string) => { active: boolean; viewedAt?: number }): void {
+    capacityActivity.set(this.paths.root, activity);
+  }
+
+  private async memoryAvailable(): Promise<boolean> {
+    const budget = Number(process.env.NECTAR_TEST_RUNTIME_MEMORY_BYTES);
+    if (Number.isFinite(budget) && budget > 0) {
+      const running = (await this.store.listEnvs()).filter((record) => record.mode === "web" && record.static_route === undefined && record.serve !== undefined && !record.serve.cmd.includes("static-server.") && record.serve.pid > 1).length;
+      return (running + 1) * PREVIEW_MEMORY_BYTES <= budget;
+    }
+    return previewMemoryAvailable(await availableMemory());
+  }
+
+  private async recoverCapacity<T>(exclude: string | undefined, action: () => Promise<T>, slept: string[]): Promise<T> {
+    for (;;) {
+      try {
+        return await action();
+      } catch (error) {
+        if (!(error instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(error.code)) throw error;
+        if (error.details.capacity_resource === "tailnet") throw new NectarError(error.code, `${error.message}; retained preview routes cannot be freed by sleeping. Widen custom tailnet port bounds or configure nectar pool add <host>`, { ...error.details, slept_previews: slept });
+        const eligible = (record: EnvRecord): boolean => record.name !== exclude && record.mode === "web" && holdsRuntime(record.status) && record.static_route === undefined && record.serve?.proxy_port !== undefined && record.serve.pid > 1 && !record.serve.cmd.includes("static-server.") && !protectedPreview(record) && !this.activity(record.name).active;
+        const viewed = (record: EnvRecord): number => this.activity(record.name).viewedAt ?? Date.parse(record.last_opened_at ?? record.published_at);
+        const candidates = (await this.store.listEnvs()).filter(eligible).sort((a, b) => viewed(a) - viewed(b) || a.name.localeCompare(b.name));
+        let freed = false;
+        for (const candidate of candidates) {
+          try {
+            await this.store.withLock(candidate.name, async () => {
+              const current = await this.store.readEnv(candidate.name);
+              if (!eligible(current)) return;
+              const key = `${this.paths.root}\0${current.name}`;
+              capacitySleeping.add(key);
+              try { await this.sleepRuntime(current); } finally { capacitySleeping.delete(key); }
+              if (current.status === "warm" && current.serve?.pid === 0) { slept.push(current.name); freed = true; }
+            });
+          } catch (failure) {
+            if (!(failure instanceof NectarError) || failure.code !== "E_BUSY") throw failure;
+          }
+          if (freed) break;
+        }
+        if (!freed) throw new NectarError(error.code, `${error.message}; no idle dynamic runtime can be put to sleep. Configure nectar pool add <host>, free host memory, or widen custom port ranges`, { ...error.details, slept_previews: slept });
+      }
+    }
+  }
 
   private readonly publisher: Publisher | undefined;
   private readonly readOnly: string | undefined;
@@ -422,22 +473,60 @@ export class NectarService {
   }
 
   async publish(options: PublishOptions): Promise<Record<string, unknown>> {
+    const slept: string[] = [];
+    try {
+      const result = await this.publishPlaced(options, slept);
+      return { ...result, preview_url: result.preview_url ?? (result.packet_fields as Partial<PacketFields> | undefined)?.preview_url ?? null, slept_previews: [...slept, ...((result.slept_previews as string[] | undefined) ?? [])] };
+    } catch (error) {
+      if (!(error instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(error.code) || options.local === true || options.host !== undefined || options.received === true) throw error;
+      return this.placeForCapacity(options, error, slept);
+    }
+  }
+
+  private async placeForCapacity(options: PublishOptions, error: NectarError, slept: string[], source?: EnvRecord): Promise<Record<string, unknown>> {
+    const pool = poolSettings(await this.store.readConfig());
+    if (pool === undefined) throw error;
+    const shape = await this.publishShape(options);
+    if (shape.category !== "web" && shape.category !== "static") throw error;
+    const own = await this.ownPoolHosts(pool.hosts);
+    let remaining = pool.hosts.filter((host) => !own.has(host));
+    const failures: string[] = [];
+    while (remaining.length > 0) {
+      const probes = await Promise.all(remaining.map((host) => this.probePoolHost(host)));
+      const choice = choosePoolHost(probes, { postgres: shape.postgres }, "least-loaded");
+      if (choice.host === undefined) { failures.push(choice.reason); break; }
+      remaining = remaining.filter((host) => host !== choice.host);
+      try {
+        const shipment = await this.shipment(source === undefined ? options : { ...options, repo: source.worktree, branch: source.commit });
+        if (source !== undefined) shipment.payload.branch = source.branch;
+        const result = await this.ship(choice.host, shipment);
+        if (typeof result.env === "string") await updatePlacements(this.paths, (placements) => { placements[shape.key] = { host: choice.host!, env: result.env as string, at: new Date().toISOString() }; });
+        return { ...result, preview_url: result.preview_url ?? (result.packet_fields as Partial<PacketFields> | undefined)?.preview_url ?? null, slept_previews: [...slept, ...((result.slept_previews as string[] | undefined) ?? [])], placed_on: choice.host, placement_reason: `local capacity exhausted; ${choice.reason}` };
+      } catch (failure) {
+        if (!(failure instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(failure.code)) throw failure;
+        failures.push(`${choice.host}: ${failure.message}`);
+      }
+    }
+    throw new NectarError(error.code, `${error.message}; configured pool has no capacity: ${failures.join("; ")}`, { slept_previews: slept });
+  }
+
+  private async publishPlaced(options: PublishOptions, slept: string[]): Promise<Record<string, unknown>> {
     // Validate caller input before touching the repo — a bad --ttl is a usage
     // error, not a checkout problem.
     const ttlMs = parseDuration(options.ttl ?? DEFAULT_TTL, "ttl");
     if (options.host !== undefined && options.local === true) throw new NectarError("E_USAGE", "--host and --local exclude each other");
     if (options.host !== undefined && !(await this.isLocalHost(options.host))) return this.publishRemote(options.host, options);
     const placement = options.host === undefined ? await this.place(options) : undefined;
-    if (placement === undefined) return this.publishPublic(await this.publishHere(options, ttlMs), options);
+    if (placement === undefined) return this.publishPublic(await this.recoverCapacity(undefined, () => this.publishHere(options, ttlMs), slept), options);
     const placed = { placed_on: placement.host ?? (await this.identity()).host, placement_reason: placement.reason };
-    if (placement.host === undefined) return { ...(await this.publishPublic(await this.publishHere(options, ttlMs), options)), ...placed };
+    if (placement.host === undefined) return { ...(await this.publishPublic(await this.recoverCapacity(undefined, () => this.publishHere(options, ttlMs), slept), options)), ...placed };
     let shipment: Shipment;
     try {
       shipment = await this.shipment(options);
     } catch (error) {
       if (!(error instanceof NectarError)) throw error;
       const refusal = { placed_on: (await this.identity()).host, placement_reason: `not shipped to ${placement.host}: ${error.message}; published on this host` };
-      return { ...(await this.publishPublic(await this.publishHere(options, ttlMs), options)), ...refusal };
+      return { ...(await this.publishPublic(await this.recoverCapacity(undefined, () => this.publishHere(options, ttlMs), slept), options)), ...refusal };
     }
     const result = await this.ship(placement.host, shipment);
     if (options.dryRun !== true && placement.key !== undefined && this.readOnly === undefined && typeof result.env === "string") {
@@ -1258,7 +1347,7 @@ export class NectarService {
       ) {
         return this.republishWeb(options, old);
       }
-      if (!options.recipe.web?.serve.includes("static-server.") && (options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !previewMemoryAvailable(await availableMemory())) {
+      if (!options.recipe.web?.serve.includes("static-server.") && (options.site !== undefined || (await runningDaemonPid(this.paths)) === undefined) && !(await this.memoryAvailable())) {
         throw new NectarError("E_QUOTA", "Insufficient host memory for another preview (256 MiB plus host reserve required)");
       }
       const initial = await this.initialRecord({ ...options, mode: "web" });
@@ -1291,7 +1380,7 @@ export class NectarService {
   ): Promise<PublishedWeb> {
     const identity = await this.identity();
     const site = options.site;
-    if (site === undefined && (await runningDaemonPid(this.paths)) === undefined && !previewMemoryAvailable(await availableMemory())) throw new NectarError("E_QUOTA", "Insufficient host memory for another preview");
+    if (site === undefined && (await runningDaemonPid(this.paths)) === undefined && !(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient host memory for another preview");
     const slot = path.join(this.paths.work, old.name);
     const destination = site !== undefined ? old.worktree : old.worktree === slot ? `${slot}.alt` : slot;
     const record = this.nextRecord({ ...options, mode: "web" }, old.name, destination, identity, old);
@@ -1678,12 +1767,14 @@ export class NectarService {
         ...(old?.serve?.upstream_port === undefined ? {} : { preferred: old.serve.upstream_port }),
       });
       reservedTailnet.add(upstreamPort);
-      const tailnetPort = await allocatePort({
+      const retained = old?.serve?.tailnet_port;
+      const ownsRoute = retained !== undefined && foreignPort === undefined && retained >= identity.config.tailnet_port_start && retained <= identity.config.tailnet_port_end && !reservedTailnet.has(retained) && serveEntries(status).some((entry) => entry.tailnetPort === retained);
+      const tailnetPort = ownsRoute ? retained : await allocatePort({
         start: identity.config.tailnet_port_start,
         end: identity.config.tailnet_port_end,
         reserved: reservedTailnet,
-        ...(old?.serve?.tailnet_port === undefined ? {} : { preferred: old.serve.tailnet_port }),
-      });
+        ...(retained === undefined ? {} : { preferred: retained }),
+      }).catch((error: unknown) => { const failure = asNectarError(error); throw new NectarError(failure.code, failure.message, { ...failure.details, capacity_resource: "tailnet" }); });
       const spawned = spawnCommand(upstreamPort);
       record.serve = {
         cmd: spawned.cmd,
@@ -1728,16 +1819,44 @@ export class NectarService {
 
   async wakeWeb(name: string): Promise<Upstream> {
     const current = await this.store.readEnv(validateEnvName(name));
-    if ((holdsRuntime(current.status) || current.status === "crashed") && current.serve?.upstream_port !== undefined) {
-      return current.serve.upstream_host === undefined
-        ? upstreamOf(current.urls.local === `http://127.0.0.1:${current.serve.proxy_port}` ? null : current.urls.local, current.serve.upstream_port)
-        : { host: current.serve.upstream_host, port: current.serve.upstream_port };
+    if (capacitySleeping.has(`${this.paths.root}\0${name}`)) throw new NectarError("E_BUSY", "Preview is being put to sleep; retry");
+    const remoteUpstream = (url: string): Upstream => {
+      const parsed = new URL(url);
+      return { host: parsed.hostname, port: Number(parsed.port) || 443, protocol: "https:" };
+    };
+    if (current.serve?.capacity_remote_url !== undefined) return remoteUpstream(current.serve.capacity_remote_url);
+    if ((holdsRuntime(current.status) || current.status === "crashed") && current.serve?.upstream_port !== undefined) return current.serve.upstream_host === undefined ? upstreamOf(current.urls.local === `http://127.0.0.1:${current.serve.proxy_port}` ? null : current.urls.local, current.serve.upstream_port) : { host: current.serve.upstream_host, port: current.serve.upstream_port };
+    const slept: string[] = [];
+    let upstream: Upstream;
+    try {
+      upstream = await this.recoverCapacity(name, () => this.wakeHere(name), slept);
+    } catch (error) {
+      if (!(error instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(error.code)) throw error;
+      upstream = await this.store.withLock(name, async () => {
+        const record = await this.store.readEnv(name);
+        if (record.serve?.capacity_remote_url !== undefined) return remoteUpstream(record.serve.capacity_remote_url);
+        if (record.status !== "warm" || record.serve === undefined) throw new NectarError("E_BUSY", "Preview changed during capacity recovery; retry");
+        const result = await this.placeForCapacity({ repo: record.repo, branch: record.branch, mode: "web", name: record.app, ttl: `${Math.max(1000, Date.parse(record.expires_at) - Date.now())}ms` }, error, slept, record);
+        const targetUrl = result.preview_url ?? (result.packet_fields as Partial<PacketFields> | undefined)?.preview_url;
+        if (typeof targetUrl !== "string" || !targetUrl.startsWith("https://")) throw new NectarError("E_TAILNET_DOWN", "Remote preview did not return a reachable mesh URL");
+        record.serve.capacity_remote_url = targetUrl;
+        await this.store.writeEnv(record);
+        await appendFile(path.join(this.paths.root, "capacity.jsonl"), `${JSON.stringify({ event: "wake_placement", env: name, placed_on: result.placed_on, preview_url: targetUrl, slept_previews: slept })}\n`).catch(() => undefined);
+        return remoteUpstream(targetUrl);
+      });
     }
+    if (slept.length > 0) await appendFile(path.join(this.paths.root, "capacity.jsonl"), `${JSON.stringify({ event: "wake_capacity", env: name, slept_previews: slept, at: new Date().toISOString() })}\n`).catch(() => undefined);
+    return { ...upstream, slept_previews: slept };
+  }
+
+  private async wakeHere(name: string): Promise<Upstream> {
+    const current = await this.store.readEnv(validateEnvName(name));
+    if ((holdsRuntime(current.status) || current.status === "crashed") && current.serve?.upstream_port !== undefined) return { host: current.serve.upstream_host ?? "127.0.0.1", port: current.serve.upstream_port };
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
       if (record.mode !== "web" || record.serve === undefined) throw new NectarError("E_NOT_FOUND", "Preview unavailable");
       if (record.status === "warm") {
-        if (!previewMemoryAvailable(await availableMemory())) throw new NectarError("E_QUOTA", "Insufficient memory to wake preview");
+        if (!(await this.memoryAvailable())) throw new NectarError("E_QUOTA", "Insufficient memory to wake preview");
         const recipe = (await loadRecipe(record.worktree)).web;
         if (recipe === undefined) throw new NectarError("E_NO_RECIPE", "Missing web recipe");
         const old = structuredClone(record);
@@ -2389,6 +2508,7 @@ export class NectarService {
       ref: record.ref,
       urls: record.urls,
       packet_fields: packetFields,
+      preview_url: packetFields.preview_url,
       evidence: record.evidence,
       expires_at: record.expires_at,
       warnings,

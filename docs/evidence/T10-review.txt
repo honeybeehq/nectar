@@ -1,0 +1,5 @@
+Independent reviewer: claude-opus-5-5, session 6c0ca6a1-bed1-4b08-805f-efcd7fffe87c.
+Initial review found a likely request-side prefix escape and missing rollback documentation.
+Real Caddy reproduced the escape. The author fixed raw path validation before shared-server URL parsing and added literal, encoded, mixed-case and backslash real-run checks.
+Reviewer re-audit: no blocking flags. The reviewer inspected the fix but did not independently run it.
+Remaining nonblocking attention: malformed upstream paths use the generic upstream_host error rule; Location stripping handles relative headers emitted by today's shared static server. Old relayd refuses startup on state containing static routes; remove them through upgraded admin before downgrading.

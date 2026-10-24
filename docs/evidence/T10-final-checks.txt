@@ -1,0 +1,12 @@
+
+> @trmd/nectar@0.0.0 typecheck /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+> tsc -p tsconfig.json --noEmit
+
+
+> @trmd/nectar@0.0.0 lint /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+> eslint .
+
+
+> @trmd/nectar@0.0.0 build /home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867
+> tsc -p tsconfig.build.json
+

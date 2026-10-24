@@ -127,6 +127,8 @@ async function run(root: string, port: number, secret: string): Promise<void> {
   };
   const server = http.createServer((request, response) => {
     const handle = async (): Promise<void> => {
+      const rawPath = (request.url ?? "/").split("?")[0]!;
+      if (/(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)|\\|%2f|%5c/i.test(rawPath)) return reply(response, 400, "Invalid static preview path.\n");
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === `/_nectar/${secret}`) return reply(response, 200, secret);
       const match = /^\/s\/([a-z0-9-]+)\/([a-f0-9]{32})(\/.*)?$/.exec(url.pathname);

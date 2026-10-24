@@ -1,0 +1,4 @@
+Baseline: 357 passed, 12 failed. Final: 358 passed, 11 failed.
+New failing names: 0
+Baseline-only failure:
+ FAIL  test/pg-local.test.ts > [deps] lifecycle with fake local postgres tools > starts the cluster before nectard revives the app

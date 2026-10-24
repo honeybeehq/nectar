@@ -104,6 +104,7 @@ export interface ServeRecord {
   pid: number;
   pgid: number;
   upstream_port?: number;
+  upstream_host?: string;
   tailnet_port?: number;
   proxy_port?: number;
   started_at?: string;

@@ -28,11 +28,11 @@ export function gcTransition(
   // Resolve/touch may keep the record alive, but only an explicit open keeps a
   // dev process alive. The process clock therefore deliberately ignores touch.
   if (
-    record.mode === "dev" &&
+    (record.mode === "dev" || (record.mode === "web" && record.serve?.proxy_port !== undefined && !record.serve.cmd.includes("static-server.js"))) &&
     record.status === "serving" &&
     record.pinned !== true &&
-    record.last_opened_at !== undefined &&
-    nowMs - new Date(record.last_opened_at).getTime() >= devIdleStopMs
+    (record.mode !== "dev" || record.last_opened_at !== undefined) &&
+    nowMs - new Date(record.last_opened_at ?? record.published_at).getTime() >= devIdleStopMs
   ) {
     return "idle-stop";
   }

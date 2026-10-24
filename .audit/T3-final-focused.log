@@ -1,0 +1,29 @@
+
+ RUN  v4.1.10 /home/trmd/.hive/v2/cells/pws-t3-ondemand-7e584dbfea93/github-com-honeybeehq-nectar-2b94ee083bd1-space-7e584dbfea93
+
+ ❯ test/daemon.test.ts (36 tests | 1 failed) 8931ms
+     × gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry 462ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+AssertionError: expected 'serving' to be 'expired' // Object.is equality
+
+Expected: "expired"
+Received: "serving"
+
+ ❯ test/daemon.test.ts:404:28
+    402|     await supervisor.gc();
+    403|     const expired = await service.store.readEnv(published.env);
+    404|     expect(expired.status).toBe("expired");
+       |                            ^
+    405|     expect(pidAlive(before.serve?.pid ?? 0)).toBe(false);
+    406|     expect(await readFile(tailscaleLog, "utf8")).toContain(`serve --ht…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 49 passed (50)
+   Start at  16:22:28
+   Duration  10.00s (transform 1.98s, setup 462ms, import 1.89s, tests 14.70s, environment 0ms)

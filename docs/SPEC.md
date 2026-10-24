@@ -672,7 +672,7 @@ Caddy imports (D21), then asks for a reload. It has three listeners:
   `prune`, `health`, and the old `add` so the Tailscale SSH control path keeps working.
 
 Authorization, all on the relay: (1) the caller's stable node ID is on `allow`;
-(2) the upstream is `https://<the caller's own MagicDNS name>:<8443–8542>`, with no
+(2) the upstream is `https://<the caller's own MagicDNS name>:<8443–65535>`, with no
 userinfo, path or other host, and relayd stores the URL it rebuilt, not the caller's
 string; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
 socket can always remove); (4) the caller sends `name` (`<app>-<branch>`) and relayd
@@ -928,7 +928,7 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    local object sharing via `git worktree` when the repo is local, else a shallow clone).
    Install deps if the lockfile hash changed (`pnpm install --frozen-lockfile` / npm / yarn
    detected from lockfile).
-2. Allocate an **upstream port** from the machine's range (default 4100–4199) and spawn the
+2. Allocate an **upstream port** from the machine's range (default 4100–65535) and spawn the
    recipe's `serve` with `PORT=<p>`, detached, logs to `logs/<name>/serve.log`.
 3. Register the **local name** with portless so the same-machine URL follows portless
    grammar: `agent-coupons-stack.acme.localhost`. Nectar runs the serve command itself
@@ -938,7 +938,7 @@ The easy, important case: embed a live branch build in the desk's Test tab.
 4. Poll `ready_path` on both IPv4 (`127.0.0.1`) and IPv6 (`::1`) until one returns 200;
    retain the healthy loopback origin. `ready_timeout` fails with `E_SERVE_TIMEOUT` and the
    transactional rollback described in §4.4.
-5. Expose to the mesh: allocate a **tailnet port** from 8443–8542 and run
+5. Expose to the mesh: allocate a **tailnet port** from 8443–65535 and run
    `tailscale serve --bg --https=<tport> <healthy-loopback-origin>`.
    **The 443 caveat is load-bearing**: port 443 on nectar machines belongs to the portless
    proxy (launchd), so tailscale serve must always bind non-443 — nectar never allocates
@@ -1584,7 +1584,7 @@ hive integration surface. No hive API calls, no harness detection.
 ### 9.1 What the tailnet sees
 
 - Exposure = tailnet-only, on ports **8440** (pack store, read-only static) and
-  **8443–8542** (web envs). Nothing binds public interfaces; funnel is never used.
+  **8443–65535** (web envs). Nothing binds public interfaces; funnel is never used.
 - **8441** is nectard's tailnet listener, only when `remote.listen` is on (§4.5). It binds
   the node's Tailscale address only, identifies every caller with WhoIs, and serves only
   the allowlist (default: the node owner's own untagged nodes). An allowed node can run
@@ -1595,11 +1595,11 @@ hive integration surface. No hive API calls, no harness detection.
 - **8450** on the relay host is nectar-relayd's control port (§4.7). It binds the relay's
   Tailscale IPv4 only, identifies every caller with WhoIs and serves only listed stable
   node IDs; each node manages only routes to its own MagicDNS name and preview ports.
-  The ACL should let only pool hosts reach it and let the relay reach only 8443–8542 on
+  The ACL should let only pool hosts reach it and let the relay reach only 8443–65535 on
   pool hosts (design/relayd-acl-diff.md in the Project).
 - Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
   a shared external node (`shared-node`, user `mbtz@`). Deploy rule (ops task, not code):
-  ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`
+  ACL-restrict `8440-65535` on nectar hosts to the operator's own devices. `nectar doctor`
   reminds; it cannot verify ACLs.
 - Dev servers are dev servers: debug endpoints, sourcemaps, verbose errors. Acceptable
   inside the ACL boundary above; a nectar-side signed-token layer is the designated
@@ -1607,7 +1607,7 @@ hive integration surface. No hive API calls, no harness detection.
 - Streamed simulators (§6.5) are **interactive control surfaces** — anyone who can reach
   the port can tap, type, and drive the app under test. Same ACL boundary, but it raises
   the stakes of the ACL rule above from "can read a dev server" to "can operate a device";
-  the ios ports live in the same 8443–8542 block that rule already covers.
+  the ios ports live in the same 8443–65535 block that rule already covers.
 
 ### 9.2 Secrets
 
@@ -1681,11 +1681,28 @@ static site's files, never `.git`.
 | --- | --- | --- |
 | serving web envs | Half of host RAM / 256 MiB (32 at 16 GiB, 64 at 32 GiB, 128 at 64 GiB) | Capacity estimate, not a fixed-count refusal; `E_QUOTA` only below 256 MiB free plus a reserve of min(1 GiB, RAM / 8) |
 | streamed nectar simulators (ios) | 1 | `E_QUOTA` — serve-sim 0.1.45 cannot run two encoder instances (OQ8); raise when upstream fixes multi-instance |
-| tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
-| upstream ports | 4100–4199 | `E_PORTS` |
+| tailnet ports | 8443–65535 | `E_PORTS` only when the configured range has no available port |
+| upstream ports | 4100–65535 | `E_PORTS` |
 | pack store size | 10 GB | LRU prune at `gc`, never mid-publish below 1 pack |
 | evidence per env | 500 MB | oldest recordings pruned at `gc` |
 | serve log | 10 MB × 2 | rotate |
+
+The old default 100-port ranges are expanded on read, including saved copies of those
+defaults, even if those exact values were deliberately pinned; other custom ranges
+are preserved. The allocator skips occupied listeners on any
+local interface, recorded app/proxy/dependency/mesh ports, and existing Tailscale Serve
+entries. Pack/control ports 8440, 8441, 8450 and 8451 are excluded from preview
+allocation and relay routes. Port 443 is always excluded, even with a misconfigured
+range. Upstream and
+tailnet ranges may overlap; a publish reserves its chosen upstream before choosing its
+mesh port. A supervised web preview normally needs two upstream ports (app and viewing
+proxy) and one mesh port. There is no independent preview-count refusal. Real remaining
+limits are memory admission, available TCP ports, process/file-descriptor limits, disk,
+and the host's Tailscale/ACL policy. The relay accepts preview ports through 65535;
+operators must update relay deployments and any narrower tailnet ACLs before expecting
+higher mesh ports to be reachable. Doctor never removes an unrecorded entry outside the
+legacy ranges merely because its port falls inside an expanded range (more than
+100 configured ports).
 
 ### 10.2 GC policy
 

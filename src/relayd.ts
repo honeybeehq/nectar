@@ -5,11 +5,12 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { readStatus, whoIs as localWhoIs, type StatusRead, type WhoIsResult } from "./localapi.js";
+import { RESERVED_SERVICE_PORTS } from "./ports.js";
 
 export const RELAYD_CONTROL_PORT = 8450;
 export const RELAYD_VERIFY_PORT = 8451;
 export const PREVIEW_PORT_MIN = 8443;
-export const PREVIEW_PORT_MAX = 8542;
+export const PREVIEW_PORT_MAX = 65535;
 export const GATED_CAP_MS = 30 * 24 * 60 * 60_000;
 export const UNGATED_CAP_MS = 7 * 24 * 60 * 60_000;
 export const PRUNE_INTERVAL_MS = 60 * 60_000;
@@ -437,7 +438,7 @@ export function upstreamFor(peer: Peer, value: unknown): string {
   if (host === undefined || host !== peer.dns_name || !DNS_NAME.test(host)) {
     throw new RelaydError(403, "E_FORBIDDEN", `upstream must be on your own MagicDNS name (${peer.dns_name})`, { rule: "upstream_host" });
   }
-  if (!Number.isInteger(portNumber) || portNumber < PREVIEW_PORT_MIN || portNumber > PREVIEW_PORT_MAX) {
+  if (!Number.isInteger(portNumber) || portNumber < PREVIEW_PORT_MIN || portNumber > PREVIEW_PORT_MAX || RESERVED_SERVICE_PORTS.has(portNumber)) {
     throw new RelaydError(403, "E_FORBIDDEN", `upstream port must be a Nectar preview port (${PREVIEW_PORT_MIN}–${PREVIEW_PORT_MAX})`, { rule: "upstream_port" });
   }
   return `https://${host}:${portNumber}`;

@@ -9,3 +9,5 @@ RESULT.json
 docs/LOCAL-SETUP.md
 *.local.md
 .nectar.local.json
+
+test/fixtures/.runs/

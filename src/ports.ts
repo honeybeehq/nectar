@@ -1,11 +1,14 @@
 import net from "node:net";
+import os from "node:os";
 import { NectarError } from "./errors.js";
+
+export const RESERVED_SERVICE_PORTS: ReadonlySet<number> = new Set([443, 8440, 8441, 8450, 8451]);
 
 async function portAvailableOnHost(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
-    server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EADDRNOTAVAIL"));
+    server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EADDRNOTAVAIL" || error.code === "EAFNOSUPPORT"));
     server.listen({ host, port, exclusive: true }, () => {
       server.close(() => resolve(true));
     });
@@ -17,6 +20,9 @@ export async function portAvailable(port: number): Promise<boolean> {
   // process using SO_REUSEPORT), so bind-only probing can call an actively
   // served port "free". A successful connection is definitive occupancy.
   if (await portOpen(port)) return false;
+  const interfaces = Object.values(os.networkInterfaces()).flatMap((addresses) => addresses ?? []);
+  const addresses = [...new Set(interfaces.filter((address) => !address.internal).map((address) => address.address))];
+  if ((await Promise.all(addresses.map((address) => portOpenOnHost(port, address)))).some(Boolean)) return false;
   const [ipv4, ipv6] = await Promise.all([
     portAvailableOnHost(port, "127.0.0.1"),
     portAvailableOnHost(port, "::1"),
@@ -61,7 +67,7 @@ export async function allocatePort(options: {
     if (port !== options.preferred) candidates.push(port);
   }
   for (const port of candidates) {
-    if (port < options.start || port > options.end || options.reserved.has(port)) continue;
+    if (port < options.start || port > options.end || options.reserved.has(port) || RESERVED_SERVICE_PORTS.has(port) || port > 65535) continue;
     if (await portAvailable(port)) return port;
   }
   throw new NectarError("E_PORTS", `No free port in ${options.start}-${options.end}`);

@@ -1,0 +1,57 @@
+pnpm typecheck: passed
+pnpm lint: passed
+pnpm build: passed
+Full-suite comparisons ran in an isolated network namespace; baseline restored unchanged source for that run, then restored the task diff.
+Scoped: ports/state/relayd. Serial fixtures: deps/remote --maxWorkers 1.
+
+=== baseline-checks ===
+⎯⎯⎯⎯⎯⎯ Failed Tests 10 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+ FAIL  test/expose.test.ts > expose through relayd > nectard's hourly sync PATCHes the expiry, never recreates, and marks a removed route revoked
+ FAIL  test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+ FAIL  test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+ FAIL  test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+ FAIL  test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+ FAIL  test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+ FAIL  test/remote.test.ts > tailnet listener over the LocalAPI token port > publishes a static dir on another node, resolves, shows, lists, touches and removes it by ref
+ Test Files  6 failed | 24 passed (30)
+      Tests  10 failed | 356 passed | 3 skipped (369)
+   Duration  42.70s (transform 22.06s, setup 4.10s, import 28.28s, tests 147.18s, environment 7ms)
+=== final-checks ===
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+ FAIL  test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+ FAIL  test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+ FAIL  test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+ FAIL  test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+ FAIL  test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+ Test Files  4 failed | 26 passed (30)
+      Tests  8 failed | 358 passed | 3 skipped (369)
+   Duration  41.50s (transform 23.21s, setup 4.20s, import 29.00s, tests 148.38s, environment 6ms)
+=== latest-checks ===
+⎯⎯⎯⎯⎯⎯ Failed Tests 10 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+ FAIL  test/deps.test.ts > [deps] lifecycle with a fake docker > copies a sqlite file per env, keeps it on republish, and re-copies on --fresh
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+ FAIL  test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+ FAIL  test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+ FAIL  test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+ FAIL  test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+ FAIL  test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
+ FAIL  test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+ FAIL  test/remote.test.ts > tailnet listener over the LocalAPI token port > publishes a static dir on another node, resolves, shows, lists, touches and removes it by ref
+ Test Files  6 failed | 24 passed (30)
+      Tests  10 failed | 356 passed | 3 skipped (369)
+   Duration  42.81s (transform 23.07s, setup 4.15s, import 29.05s, tests 149.41s, environment 7ms)
+=== scoped-checks ===
+ Test Files  3 passed (3)
+      Tests  29 passed (29)
+   Duration  5.87s (transform 463ms, setup 335ms, import 363ms, tests 5.47s, environment 0ms)
+=== serial-fixtures ===
+ Test Files  2 passed (2)
+      Tests  75 passed (75)
+   Duration  24.49s (transform 787ms, setup 177ms, import 1.23s, tests 22.70s, environment 0ms)

@@ -286,7 +286,7 @@ describe("nectard fronting the real service", () => {
     const moved = await service.store.readEnv(published.env);
     expect(moved.serve?.upstream_port).not.toBe(before.serve?.upstream_port);
     expect(moved.serve?.proxy_port).toBe(before.serve?.proxy_port);
-    expect((await serveCalls(tailscaleLog, moved.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${moved.serve?.upstream_port}`);
+    expect((await serveCalls(tailscaleLog, moved.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${moved.serve?.proxy_port}`);
     await supervisor.sweep(false);
     expect((await serveCalls(tailscaleLog, moved.serve?.tailnet_port)).at(-1)).toContain(`http://127.0.0.1:${moved.serve?.proxy_port}`);
     expect((await get(moved.serve?.proxy_port ?? 0, "/", html)).body).toContain(published.env);

@@ -1,0 +1,29 @@
+T3 verification
+
+Typecheck, lint, build: pass.
+Existing proxy/gc tests: 14/14 pass.
+Focused proxy/gc/daemon run: 49/50 pass. The failure is daemon.test.ts:
+"gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry"
+Expected expired, received serving. The same assertion fails on unchanged baseline
+28c8ad0, captured from a git archive within this Cell in T3-baseline.log.
+
+The full suite is NOT green: attempted runs hang after existing CLI/remote/platform
+failures. T3-suite.log and T3-suite-without-hanging-cli.log retain the attempted output.
+No claim that the full suite passed. No new unit test cases were added: the human task
+standing order says "No unit tests beyond what the repo requires, and no code comments."
+Existing test mocks/expectations were adjusted for changed behavior. New branches are
+covered by the real daemon fixture lever and pure doctor classification.
+
+Real product: node test/fixtures/verify-demand.mjs
+16 published warm previews, zero app PIDs/upstream ports before visit. All visited
+through real tailnet HTTPS URLs. All 16 app PIDs gone and upstream ports freed after
+3-second idle. Restart retained sleeping state. Failed wake503 then repaired visit200.
+Cold upgrade client reset survived. Two further tailnet idle/wake cycles succeeded.
+12 concurrent requests share one PID, 136ms. During a one-second dependency install,
+republish served 61 GETs with zero non-2xx responses, max178ms. Non-GET traffic during
+republish was not measured. Daemon-down GC retains16 routes; pure doctor classification
+of the actual sleeping records returns owned. Full same-run output: T3-live.log.
+
+Limitations: each sleeping dynamic URL retains a daemon listener and tailnet port;
+T1 widens the pool. A failed publish releases its route, as before. Docker dependency
+wakes were not exercised. Full doctor --fix was not run against host-global services.

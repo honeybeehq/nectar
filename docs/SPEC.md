@@ -245,7 +245,7 @@ navigation (`GET` with `Sec-Fetch-Dest: document`/`iframe`, or without fetch met
 the same way, at most once per env per 5 min, after forwarding and without waiting for it.
 Without nectard the mesh URL points straight at the app and only the verbs touch. Active review never
 gets reaped mid-session: `gc` skips envs touched in the last 6 h. Dev envs keep their
-separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view moves only the record's
+separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view also records the last real HTTP request and moves the record's
 expiry, never the process clock.
 
 ### 4.5 `nectard`
@@ -948,6 +948,27 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    443 and `nectar doctor` reports any existing 443 serve entry as a warning (§10.5); it never
    touches it, since portless or another service may publish there on purpose.
 6. Write the env record; emit the envelope.
+
+**On-demand dynamic web previews.** With nectard running, recipe-backed web publishes
+prepare and build the checkout, then return a stable daemon proxy URL in `warm` state.
+No app process or upstream port is retained until a real HTTP request arrives. The proxy
+holds the request until the recipe is ready, including WebSocket upgrade requests;
+concurrent requests share the wake. Memory admission applies when starting the app,
+not when registering a sleeping preview. Failed wakes return 503 with Retry-After and
+leave the URL available for another attempt. Without nectard, publish retains the
+existing eager-start behavior.
+
+The default idle window is 45 minutes (`idle_stop_ms`). Real requests update
+`last_opened_at`; metadata resolve/touch does not keep the app running. On each daemon
+cycle, idle dynamic web apps and Electron dev apps stop. Web routes retain their proxy
+and tailnet listener, release the upstream port and app process, and wake on the next
+request. Pinned/`open --keep` previews and the main bench are protected. `--keep` persists
+until the preview is removed; republish preserves it. Static previews
+are excluded. Electron `[dev]` apps have no HTTP URL and continue to wake through
+`nectar open`. Explicit stop, expiry and removal disable the HTTP route. Restarting
+nectard restores sleeping listeners without starting their apps. Local fallback URLs
+remain stable once fronted. Long-lived HTTP streams and WebSockets count as activity.
+A stopped daemon cannot serve its listeners; warm routes are retained for its restart. Port 443 is never allocated.
 
 **Republish of a live env (amendment · 2026-10-14, DECISIONS D26).** When the env is
 `serving` or `unhealthy` and Nectar owns its worktree, steps 1 and the build step (§6.1.2)

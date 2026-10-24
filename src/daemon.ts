@@ -1,4 +1,5 @@
 import os from "node:os";
+import { watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { appendFile, open, readFile, unlink } from "node:fs/promises";
 import { pidAlive } from "./commands.js";
@@ -33,23 +34,25 @@ interface Watch {
 }
 
 type SupervisedRecord = EnvRecord & { serve: ServeRecord };
-type FrontedRecord = SupervisedRecord & { serve: { upstream_port: number; tailnet_port: number } };
+type FrontedRecord = SupervisedRecord & { serve: { tailnet_port: number } };
 
 export function fronted(record: EnvRecord): record is FrontedRecord {
   return (
     record.mode === "web" &&
-    hasProbeableServe(record) &&
+    record.serve !== undefined &&
+    (hasProbeableServe(record) || record.status === "warm" || (record.status === "publishing" && record.serve.proxy_port !== undefined)) &&
     !givenUp(record) &&
-    record.serve.upstream_port !== undefined &&
     record.serve.tailnet_port !== undefined
   );
 }
 
-type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView">;
+type FrontingService = Pick<NectarService, "assignProxyPort" | "releaseProxyPort" | "unfront" | "touchView"> & Partial<Pick<NectarService, "wakeWeb">>;
 
 export class ProxyHub {
   private readonly proxies = new Map<string, EnvProxy>();
   private readonly touchedAt = new Map<string, number>();
+  private readonly viewedAt = new Map<string, number>();
+  private syncing: Promise<string[]> = Promise.resolve([]);
 
   constructor(
     private readonly service: FrontingService,
@@ -57,16 +60,26 @@ export class ProxyHub {
     private readonly log: (event: Record<string, unknown>) => void,
   ) {}
 
+  views(): ReadonlyMap<string, number> {
+    return this.viewedAt;
+  }
+
   ports(): Map<string, number> {
     return new Map([...this.proxies].map(([name, proxy]) => [name, proxy.port]));
   }
 
-  async sync(records: EnvRecord[]): Promise<string[]> {
+  sync(records: EnvRecord[]): Promise<string[]> {
+    this.syncing = this.syncing.catch(() => []).then(() => this.reconcile(records));
+    return this.syncing;
+  }
+
+  private async reconcile(records: EnvRecord[]): Promise<string[]> {
     const wanted = new Map(records.filter(fronted).map((record) => [record.name, record]));
     for (const [name, proxy] of this.proxies) {
       if (wanted.has(name)) continue;
       this.proxies.delete(name);
       this.touchedAt.delete(name);
+      this.viewedAt.delete(name);
       await proxy.close();
       this.log({ event: "proxy_closed", env: name, port: proxy.port });
     }
@@ -84,7 +97,7 @@ export class ProxyHub {
   }
 
   private async ensure(record: FrontedRecord): Promise<boolean> {
-    const upstream = upstreamOf(record.urls.local, record.serve.upstream_port);
+    const upstream = record.serve.upstream_host === undefined ? upstreamOf(record.urls.local === `http://127.0.0.1:${record.serve.proxy_port}` ? null : record.urls.local, record.serve.upstream_port ?? 0) : { host: record.serve.upstream_host, port: record.serve.upstream_port ?? 0 };
     const existing = this.proxies.get(record.name);
     if (existing !== undefined && (record.serve.proxy_port === undefined || existing.port === record.serve.proxy_port)) {
       const moved = existing.upstream.port !== upstream.port || existing.upstream.host !== upstream.host;
@@ -97,7 +110,7 @@ export class ProxyHub {
       this.proxies.delete(record.name);
       await existing.close();
     }
-    const proxy = new EnvProxy(record.name, port, upstream, () => this.viewed(record.name));
+    const proxy = new EnvProxy(record.name, port, upstream, () => this.viewed(record.name), this.service.wakeWeb === undefined ? undefined : () => this.service.wakeWeb!(record.name));
     try {
       await proxy.listen();
     } catch (error) {
@@ -112,6 +125,7 @@ export class ProxyHub {
 
   private viewed(name: string): void {
     const nowMs = Date.now();
+    this.viewedAt.set(name, nowMs);
     const last = this.touchedAt.get(name);
     if (last !== undefined && nowMs - last < this.touchEveryMs) return;
     this.touchedAt.set(name, nowMs);
@@ -119,8 +133,9 @@ export class ProxyHub {
       .touchView(name)
       .then((expiresAt) => {
         if (expiresAt !== undefined) this.log({ event: "touch", env: name, expires_at: expiresAt });
+        else if (this.touchedAt.get(name) === nowMs) this.touchedAt.delete(name);
       })
-      .catch(() => undefined);
+      .catch(() => { if (this.touchedAt.get(name) === nowMs) this.touchedAt.delete(name); });
   }
 
   async close(): Promise<void> {
@@ -159,6 +174,9 @@ export class Supervisor {
   private cycling: Promise<void> | undefined;
   private lastGcAt = 0;
   private stopped = false;
+  private watcher: FSWatcher | undefined;
+  private frontSync: Promise<void> | undefined;
+  private frontDirty = false;
 
   constructor(
     readonly service: NectarService,
@@ -178,6 +196,10 @@ export class Supervisor {
 
   async start(): Promise<void> {
     this.log({ event: "start", interval_ms: this.intervalMs, gc_interval_ms: this.gcIntervalMs, boot_at: new Date(this.bootTimeMs).toISOString() });
+    if (this.hub !== undefined) {
+      this.watcher = watch(this.service.paths.envs, () => this.syncFront());
+      this.watcher.on("error", (error) => this.log({ event: "error", phase: "front_watch", message: error.message }));
+    }
     await this.sweep(true);
     await this.gc();
     this.schedule();
@@ -185,10 +207,25 @@ export class Supervisor {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.watcher?.close();
+    await this.frontSync;
     if (this.timer !== undefined) clearTimeout(this.timer);
     await this.cycling;
     await this.hub?.close();
     this.log({ event: "stop" });
+  }
+
+  private syncFront(): void {
+    this.frontDirty = true;
+    if (this.frontSync !== undefined || this.stopped) return;
+    this.frontSync = (async () => {
+      while (this.frontDirty && !this.stopped) {
+        this.frontDirty = false;
+        const records = await this.service.store.listEnvs();
+        for (const name of await this.hub?.sync(records) ?? []) this.pendingMesh.add(name);
+      }
+    })().catch((error: unknown) => this.log({ event: "error", phase: "front_sync", message: asNectarError(error).message }))
+      .finally(() => { this.frontSync = undefined; });
   }
 
   private schedule(): void {
@@ -204,6 +241,7 @@ export class Supervisor {
   private async cycle(): Promise<void> {
     await this.sweep(false);
     if (Date.now() - this.lastGcAt >= this.gcIntervalMs) await this.gc();
+    else await this.service.idleStop(this.hub?.views());
   }
 
   async sweep(restore: boolean): Promise<void> {
@@ -240,8 +278,10 @@ export class Supervisor {
   }
 
   private async inspect(record: EnvRecord, restore: boolean, nowMs: number): Promise<void> {
+    if (record.status === "warm" && record.mode === "web" && record.serve !== undefined && (restore || this.pendingMesh.has(record.name))) await this.reassertMesh(record as SupervisedRecord);
     if (!supervised(record, nowMs)) {
-      this.forget(record.name);
+      this.watches.delete(record.name);
+      if (record.status !== "warm") this.pendingMesh.delete(record.name);
       return;
     }
     if (Date.parse(record.serve.started_at ?? record.published_at) < this.bootTimeMs) {
@@ -332,7 +372,8 @@ export class Supervisor {
   async gc(): Promise<void> {
     this.lastGcAt = Date.now();
     try {
-      const report = await this.service.gc();
+      const views = this.hub?.views();
+      const report = await this.service.gc(views === undefined ? {} : { viewedAt: views });
       this.log({ event: "gc", transitions: report.transitions, serve_orphans: report.serve_orphans, skipped: report.skipped, exposures: report.exposures });
     } catch (error) {
       this.log({ event: "error", phase: "gc", message: asNectarError(error).message });

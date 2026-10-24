@@ -1,12 +1,14 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { open, readFile, readdir, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { link, open, readFile, readdir, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { pidAlive } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { ensureLayout, type NectarPaths } from "./paths.js";
 import { validateEnvName } from "./refs.js";
 import type { EnvRecord, MachineConfig } from "./types.js";
 import { servingCapacity } from "./capacity.js";
+
+const lockAcquisitions = new Map<string, Promise<FileHandle>>();
 
 export const DEFAULT_CONFIG: MachineConfig = {
   upstream_port_start: 4100,
@@ -116,10 +118,33 @@ export class StateStore {
   }
 
   private async acquireLock(lockPath: string): Promise<FileHandle> {
+    const previous = lockAcquisitions.get(lockPath) ?? Promise.resolve();
+    const acquiring = previous.catch(() => undefined).then(() => this.tryAcquireLock(lockPath));
+    lockAcquisitions.set(lockPath, acquiring);
     try {
-      const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${process.pid}\n`);
-      return handle;
+      return await acquiring;
+    } finally {
+      if (lockAcquisitions.get(lockPath) === acquiring) lockAcquisitions.delete(lockPath);
+    }
+  }
+
+  private async tryAcquireLock(lockPath: string): Promise<FileHandle> {
+    const create = async (): Promise<FileHandle> => {
+      const temporary = `${lockPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(`${process.pid}\n`);
+        await link(temporary, lockPath);
+        return handle;
+      } catch (error) {
+        await handle.close();
+        throw error;
+      } finally {
+        await unlink(temporary).catch(() => undefined);
+      }
+    };
+    try {
+      return await create();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
@@ -130,13 +155,11 @@ export class StateStore {
         const pid = Number(content.trim());
         return !Number.isInteger(pid) || pid <= 1 || !pidAlive(pid);
       })
-      .catch((error: NodeJS.ErrnoException) => error.code === "ENOENT");
+      .catch(() => false);
     if (stale) {
       await unlink(lockPath).catch(() => undefined);
       try {
-        const handle = await open(lockPath, "wx", 0o600);
-        await handle.writeFile(`${process.pid}\n`);
-        return handle;
+        return await create();
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
@@ -146,8 +169,20 @@ export class StateStore {
 
   async withLock<T>(name: string, action: () => Promise<T>): Promise<T> {
     await this.init();
-    const lockPath = path.join(this.paths.locks, `${validateEnvName(name)}.lock`);
-    const handle = await this.acquireLock(lockPath);
+    const lockPath = path.resolve(this.paths.locks, `${validateEnvName(name)}.lock`);
+    const deadline = performance.now() + 30_000;
+    let handle: FileHandle;
+    for (;;) {
+      try {
+        handle = await this.acquireLock(lockPath);
+        break;
+      } catch (error) {
+        if (name !== "machine--ports" || !(error instanceof NectarError) || error.code !== "E_BUSY") throw error;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new NectarError("E_BUSY", "Timed out after 30000ms waiting for the machine port lock; another publish, wake, or recovery is still using it", { lock: name, timeout_ms: 30_000 });
+        await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
+      }
+    }
     try {
       return await action();
     } finally {

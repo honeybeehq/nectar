@@ -11,3 +11,5 @@ test/integration.test.ts > fixture-backed web publish > keeps one session slot a
 test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
 test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url
 test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+
+Final source recheck after single-flight and static recipe fixes: docs/evidence/T7-suite-last.log, same exact failure names and 358/8/3.

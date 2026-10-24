@@ -1,0 +1,17 @@
+Cross-model audit: claude-opus-5-5, session d6a657ef-080a-413d-afa9-6248f5ec5b00.
+Read Project-uploaded committed diff, fixtures, decision trail, reports, canonical log and parent transcript; no live previews touched and no independent replay claimed.
+
+Initial objections and disposition:
+- No-adapter expiry now preserves static URLs indefinitely until proof authority is configured: explicitly documented, verified no-adapter200 + GC skip, needsJudgement in proof.
+- Old static/proof fixtures skipped: both rerun successfully. Explicit unlinked adapter; shared404 adaptation; legacy seed waits for daemon proxy; final static run no retries.
+- Expired asset traffic could spawn many adapters: one in-flight lookup per preview now shared, no decision cache. Distinct-preview concurrency remains a documented limit.
+- Extra unit tests suggested: not added under the human's no-additional-unit-tests standing order. Existing suite and real fixtures run instead.
+- Initial timings overlapped suites/build: superseded by sequential final isolated run, recorded pre-request status used for cold timing.
+- ProxyHub store path now refreshes instead of supplied records: disclosed production behavior; supplied records remain test-double fallback.
+- Possible diagnostic routes: own p02 stale route stopped through Nectar; first/second shared metadata targets were39921/45717. Current10258 target46179 does not appear in either run log and was left untouched. Final owned route checks pass.
+- Adapter captured at singleton spawn: restart requirement documented and exercised.
+- Recipe-backed static bypass found during old fixture rerun: guard/helper fix reviewed with no blockers; legacy eager behavior and substring heuristic limitation documented.
+- Port-pressure victim order and later memory victim order are not proven. First memory eviction p01 verified, later p10 unexplained. Final report corrected; no general LRU claim.
+
+Reviewer final status: conditional pass, requiring correction of overclaimed p02/LRU and replacement of stale suite claim. Both corrections applied. Final source suite-last matches archived base:358 pass/8fail/3skip and identical names. Reviewer verified33 cold warm-state visits,20 static with assets,15 idle stops,35 restartURLs, named recovery/wake, landed retirement, waiting/failure200,unlinked410,34 appPIDs gone and0 routes.
+Minor evidence gap: no-adapter log prints GC-retained boolean; fixture asserts skip includes 'not configured'. Future fixture output now also includes reason.

@@ -67,6 +67,7 @@ export async function runCommand(file: string, args: string[], options: RunOptio
       }
       resolve({ exitCode: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString(), signal });
     });
+    child.stdin?.once("error", reject);
     if (options.input !== undefined) child.stdin?.end(options.input);
     else child.stdin?.end();
   });

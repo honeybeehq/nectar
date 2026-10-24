@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import { availableMemory, previewMemoryAvailable } from "./capacity.js";
+import { previewProofState, PROOF_GRACE_MS } from "./proofs.js";
 import { ownerState, protectedPreview } from "./owner.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3275,8 +3276,20 @@ export class NectarService {
     const owners = new Map<string, Promise<Awaited<ReturnType<typeof ownerState>>>>();
     for (const snapshot of await this.store.listEnvs()) {
       if (protectedPreview(snapshot)) continue;
+      const proof = await previewProofState(snapshot);
+      if (proof.state === "unknown" || proof.state === "waiting") {
+        if (!options.dryRun && proof.state === "waiting" && snapshot.proof_terminal_since !== undefined) {
+          await this.store.withLock(snapshot.name, async () => {
+            const record = await this.store.readEnv(snapshot.name);
+            delete record.proof_terminal_since;
+            await this.store.writeEnv(record);
+          }).catch(() => undefined);
+        }
+        skipped.push({ env: snapshot.name, reason: proof.state === "waiting" ? "proof waiting for Tormod; left alone" : `proof lookup unresolved: ${proof.reason}; left alone` });
+        continue;
+      }
       let owner: Awaited<ReturnType<typeof ownerState>> | undefined;
-      if (snapshot.status === "serving") {
+      if (snapshot.status === "serving" && proof.state === "unlinked") {
         const key = JSON.stringify([snapshot.publisher.node_name, snapshot.publisher.hive_bee, snapshot.publisher.hive_session]);
         let lookup = owners.get(key);
         if (lookup === undefined) {
@@ -3291,17 +3304,20 @@ export class NectarService {
       }
       const transition = (record: EnvRecord): GcTransition | undefined => {
         if (protectedPreview(record)) return undefined;
+        if (proof.state === "terminal") return record.proof_terminal_since !== undefined && now.getTime() - Date.parse(record.proof_terminal_since) >= PROOF_GRACE_MS ? "reap" : undefined;
         if (record.status === "serving" && owner === "inactive") {
           return record.owner_inactive_since !== undefined && now.getTime() - Date.parse(record.owner_inactive_since) >= 60 * 60_000 ? "reap" : undefined;
         }
         return gcTransition(record, now, config.idle_stop_ms);
       };
       const action = transition(snapshot);
-      if (!options.dryRun && ((owner === "inactive" && snapshot.owner_inactive_since === undefined) || (owner === "active" && snapshot.owner_inactive_since !== undefined))) {
+      if (!options.dryRun && ((proof.state === "terminal" && snapshot.proof_terminal_since === undefined) || (proof.state === "unlinked" && snapshot.proof_terminal_since !== undefined) || (owner === "inactive" && snapshot.owner_inactive_since === undefined) || (owner === "active" && snapshot.owner_inactive_since !== undefined))) {
         try {
           await this.store.withLock(snapshot.name, async () => {
             const record = await this.store.readEnv(snapshot.name);
             if (record.publisher.hive_bee !== snapshot.publisher.hive_bee || record.publisher.hive_session !== snapshot.publisher.hive_session || record.published_at !== snapshot.published_at) return;
+            if (proof.state === "terminal") record.proof_terminal_since ??= now.toISOString();
+            else delete record.proof_terminal_since;
             if (owner === "inactive") record.owner_inactive_since ??= now.toISOString();
             else delete record.owner_inactive_since;
             await this.store.writeEnv(record);
@@ -3323,6 +3339,15 @@ export class NectarService {
         await this.store.withLock(snapshot.name, async () => {
           const record = await this.store.readEnv(snapshot.name);
           if (record.published_at !== snapshot.published_at || record.publisher.hive_bee !== snapshot.publisher.hive_bee || record.publisher.hive_session !== snapshot.publisher.hive_session) return;
+          const confirmed = await previewProofState(record);
+          if (confirmed.state !== proof.state) {
+            if (confirmed.state === "waiting" || confirmed.state === "unlinked") {
+              delete record.proof_terminal_since;
+              await this.store.writeEnv(record);
+            }
+            skipped.push({ env: record.name, reason: "proof state changed or unresolved; left alone" });
+            return;
+          }
           const currentAction = transition(record);
           if (currentAction === undefined) return;
           if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve.pgid, record.name))) {

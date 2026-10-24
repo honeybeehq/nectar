@@ -3221,7 +3221,7 @@ export class NectarService {
       // put them so ls/resolve keep telling the truth.
       if (
         current.mode !== "dev" &&
-        (holdsRuntime(current.status) || current.status === "publishing" || current.status === "crashed")
+        (holdsRuntime(current.status) || current.status === "warm" || current.status === "publishing" || current.status === "crashed")
       ) {
         current.status = "stopped";
       }

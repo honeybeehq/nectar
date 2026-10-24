@@ -8,6 +8,7 @@ import { NectarError } from "./errors.js";
 import { getPaths } from "./paths.js";
 import { allocatePort, portAvailable } from "./ports.js";
 import { atomicJson, StateStore } from "./state.js";
+import { previewProofState } from "./proofs.js";
 import { serveStatic } from "./static-server.js";
 import { serveEntries, rootMount, serveStatus, serveWeb, statusPorts } from "./tailscale.js";
 
@@ -68,7 +69,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
       const secret = crypto.randomBytes(16).toString("hex");
       const entry = process.env.NECTAR_SHARED_STATIC_ENTRY ?? fileURLToPath(new URL("./shared-static.js", import.meta.url));
       const child = spawnDetachedExecutable(process.execPath, [entry, store.paths.root, String(info !== undefined && await portAvailable(info.port) ? info.port : 0), secret], store.paths.root,
-        scrubbedEnvironment(), path.join(store.paths.logs, "shared-static.log"));
+        scrubbedEnvironment(process.env.NECTAR_PROOF_LOOKUP === undefined ? {} : { NECTAR_PROOF_LOOKUP: process.env.NECTAR_PROOF_LOOKUP }), path.join(store.paths.logs, "shared-static.log"));
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         const current = await metadata(store);
@@ -138,7 +139,7 @@ async function run(root: string, port: number, secret: string): Promise<void> {
       if (match === null) return reply(response, 404, "Static preview not found.\n");
       const record = await store.maybeEnv(match[1]!);
       if (record === undefined || record.static_route !== match[2]) return reply(response, 404, "Static preview not found.\n");
-      if (Date.parse(record.expires_at) <= Date.now() || record.status === "expired" || record.status === "cold") {
+      if (record.status === "expired" || record.status === "cold" || (Date.parse(record.expires_at) <= Date.now() && (await previewProofState(record)).state === "unlinked")) {
         return reply(response, 410, "This static preview has expired. Publish it again to renew it.\n");
       }
       if (record.status !== "serving") return reply(response, 410, "This static preview is stopped. Publish it again to restart it.\n");

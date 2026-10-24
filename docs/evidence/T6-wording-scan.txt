@@ -1,0 +1,70 @@
+docs/V0.2.md:235:4. **`drop`** (tailnet-only) — small, immediately useful, slots anywhere.
+docs/SPEC.md:63:  before remote-tracking, then by name), else a per-session slot `cell-<session>` when the
+docs/SPEC.md:979:run in the env's other worktree slot (`work/<name>` and `work/<name>.alt` alternate) while
+docs/SPEC.md:981:and build succeed does Nectar stop the old serve, write the new record, remove the old slot
+docs/SPEC.md:983:staging slot and returns its code (`E_CHECKOUT`, `E_INSTALL`, …) with the log tail; the
+docs/SPEC.md:986:stops. Republishing a stopped or crashed env works in place, in whichever slot it holds, and
+docs/SPEC.md:987:removes the other slot if one is left over; a borrowed `--worktree` works in place as
+docs/SPEC.md:988:before. A slot starts without the other slot's `node_modules` or `.nectar/` caches, so a
+docs/SPEC.md:1372:(`--branch`, else the current branch, else the D29 slot for a detached HEAD) plus the
+docs/SPEC.md:1698:HEAD's slot (§3); it grants nothing, and a different repo that lands on the same slot is
+docs/FUTURE-nctr-cloud.md:152:   `nctr-cloud` slots in without a rewrite; (b) build **`drop` with a cloud-storage
+src/types.ts:128:// v0.2 ships the `relay` kind (the nctr.site relay, D21); other kinds are schema slots.
+docs/DECISIONS.md:457:and builds in a second worktree slot (`work/<name>` ↔ `work/<name>.alt`) and stops the old
+docs/DECISIONS.md:458:serve only after that succeeds; the old slot is then removed. (SPEC §3, §6.1.)
+docs/DECISIONS.md:468:node_modules shims and framework caches can embed absolute paths. Alternating slots keeps
+docs/DECISIONS.md:470:on a live republish, because the new slot starts without the other slot's caches. (c)
+docs/DECISIONS.md:479:the branch slot is a local branch whose tip is HEAD, else a remote-tracking branch whose
+docs/DECISIONS.md:488:so an evicted Cell can still be matched. Nectar's old slot belongs to the old clone, so a
+docs/DECISIONS.md:489:republish from another clone checks out a fresh slot and trashes the old one.
+docs/DECISIONS.md:492:into nectard's work dir so slots never belong to a Cell repo. **Why:** Honeybee exposes no
+docs/DECISIONS.md:507:another clone takes an env over, Nectar removes its old slot through the old clone if
+docs/DECISIONS.md:510:**Amendment · 2026-10-14 (a session slot for a detached HEAD):** a Cell whose HEAD is past
+docs/DECISIONS.md:513:branch containing HEAD, the slot is `cell-<session>` when the publisher is a Honeybee
+docs/DECISIONS.md:518:space name; (c) put the session slot ahead of the branch rules. **Why:** (a) is easy to
+docs/DECISIONS.md:521:not. (c) would split two Cells of one branch that should share `main`. The slot is only
+docs/DECISIONS.md:523:session lands on the same slot is refused as before, and two sessions get two slots.
+docs/DECISIONS.md:525:to its session slot once.
+docs/DECISIONS.md:629:and alternates slots, so it is a follow-up and not part of this slice.
+src/git.ts:148:  const slot = sessionSlot(session);
+src/git.ts:149:  if (slot !== undefined) return { branch: slot, source: "session", commit };
+src/service.ts:574:    const slot = await resolveBranch(repo, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
+src/service.ts:575:    const branch = slot.branch;
+src/service.ts:579:    if (options.dryRun === true) return this.recipePlan(recipe, mode, repo, slot);
+src/service.ts:591:      slot,
+src/service.ts:684:    const slot = await resolveBranch(repo, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
+src/service.ts:688:    const env = envName(recipe.name, slot.branch, mode);
+src/service.ts:689:    const source = `roots:${(await sourceIdentity(repo, slot.commit ?? slot.branch)).roots.join(",")}`;
+src/service.ts:849:      const slot = await resolveBranch(root, options.branch, (this.publisher ?? currentPublisher()).hive_bee);
+src/service.ts:850:      const commit = slot.commit ?? (await this.shippedCommit(root, slot.branch, site));
+src/service.ts:854:        throw new NectarError("E_USAGE", `${within} is not in the committed tree of ${slot.branch}; --host ships only committed files, so commit it first`);
+src/service.ts:868:      args = { kind: "git", source, dir: sourceDir(path.basename(root)), branch: slot.branch, commit, mode: options.mode, ...(within === "" ? {} : { path: within }), ...common };
+src/service.ts:928:  private recipePlan(recipe: Recipe, mode: Mode, repo: string, slot: BranchSlot): Record<string, unknown> {
+src/service.ts:933:      name: envName(recipe.name, slot.branch, mode),
+src/service.ts:934:      branch: slot.branch,
+src/service.ts:935:      branch_source: slot.source,
+src/service.ts:1019:    slot?: BranchSlot;
+src/service.ts:1028:    if (old !== undefined) await this.assertSameSource(old, options.repo, options.recipe.source === "static", options.branch, options.slot);
+src/service.ts:1030:    const slot = path.join(this.paths.work, name);
+src/service.ts:1031:    const owned = old !== undefined && !old.borrowed_worktree && old.worktree === `${slot}.alt` ? old.worktree : slot;
+src/service.ts:1038:      const other = owned === slot ? `${slot}.alt` : slot;
+src/service.ts:1047:  private async assertSameSource(old: EnvRecord, repo: string, isStatic: boolean, branch: string, slot?: BranchSlot): Promise<void> {
+src/service.ts:1048:    if (isStatic ? path.resolve(old.repo) === path.resolve(repo) : await this.sameGitSource(old, repo, branch, slot?.commit ?? branch)) return;
+src/service.ts:1081:    options: { repo: string; branch: string; slot?: BranchSlot; recipe: Recipe; mode: Mode; ttlMs: number; worktree?: string; packet?: string },
+src/service.ts:1095:      ...(options.slot === undefined ? {} : { branch_source: options.slot.source }),
+src/service.ts:1321:    slot?: BranchSlot;
+src/service.ts:1342:      if (old !== undefined) await this.assertSameSource(old, options.repo, options.site !== undefined, options.branch, options.slot);
+src/service.ts:1358:        record = await this.checkout(record, initial.old, options.worktree, initial.identity.config.worktree_cache_allowlist, options.slot?.commit);
+src/service.ts:1378:    options: { repo: string; branch: string; slot?: BranchSlot; recipe: Recipe; ttlMs: number; packet?: string; site?: StaticSite; fresh?: boolean },
+src/service.ts:1384:    const slot = path.join(this.paths.work, old.name);
+src/service.ts:1385:    const destination = site !== undefined ? old.worktree : old.worktree === slot ? `${slot}.alt` : slot;
+src/service.ts:1393:        await this.checkoutInto(record, old, undefined, identity.config.worktree_cache_allowlist, options.slot?.commit);
+src/service.ts:2018:    slot?: BranchSlot;
+src/service.ts:2034:        options.slot?.commit,
+src/service.ts:2144:    slot?: BranchSlot;
+src/service.ts:2172:        options.slot?.commit,
+src/service.ts:2324:    slot?: BranchSlot;
+src/service.ts:2355:        options.slot?.commit,
+src/service.ts:3273:    const slot = path.join(inbox, key);
+src/service.ts:3274:    const others = (await this.store.listEnvs()).some((other) => other.name !== record.name && path.relative(slot, other.repo).split(path.sep)[0] !== "..");
+src/service.ts:3275:    if (!others) await rm(slot, { recursive: true, force: true });

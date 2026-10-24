@@ -1,0 +1,22 @@
+Cross-model audit: claude-opus-5-5, Claude harness, session 2ff2a00d-ad37-400e-96d1-a75fc43c447a.
+Reviewed submitted patch, trail and actual CLI logs against own d5eeb86 baseline.
+Could not access metal-2 Cell directly; artifacts sent using authenticated agent_send.
+
+Findings corrected:
+- Duplicate capacity advice consolidated; pool placement is explicitly an alternative to --host.
+- Human failures now share success sleeping-name formatter.
+- SPEC documents failure sleeping names.
+- Trail records message/docs policy, failed fixture setup and suite comparison.
+
+Final reviewer message (2026-10-24 15:25:54 UTC):
+The 'Alternatively, configure nectar pool add <host> and publish without --local or --host…'
+wording fixes item 1. It isn't a blocker. With the SPEC clause and the inspected-only notes
+in research/T6.md, the audit is closed on my side. The only thing left is your planned rerun,
+so the saved run logs show the final wording.
+
+Attention:
+- Real daemon/CLI/Tailscale/HTTP, synthetic memory admission budget, owned fixture routes cleaned.
+- No cross-host placement run; human placement line inspected only.
+- Public top-level/nested preview URL equality and failure-after-partial-sleep output inspected only.
+- Kit skill work is covered by its own proof; not reviewed by this auditor.
+- Linux full suite has 11 baseline failures; final full comparison matches names/counts.

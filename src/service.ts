@@ -84,7 +84,7 @@ import {
 import { assertRuntimes, missingCommands } from "./fallbacks.js";
 import { getPaths, type NectarPaths } from "./paths.js";
 import { StateStore } from "./state.js";
-import { logTail, prepareLog } from "./logs.js";
+import { logTail, prepareLog, rotateLog } from "./logs.js";
 import {
   apiNote,
   loopbackProxy,
@@ -386,17 +386,18 @@ function hostAliases(value: string | undefined): Set<string> {
 }
 
 const capacitySleeping = new Set<string>();
-const capacityActivity = new Map<string, (name: string) => { active: boolean; viewedAt?: number }>();
+const capacityLogs = new Map<string, Promise<void>>();
+const capacityActivity = new Map<string, (name: string) => { active: boolean; viewedAt?: number; known?: boolean }>();
 
 export class NectarService {
   readonly paths: NectarPaths;
   readonly store: StateStore;
 
-  private activity(name: string): { active: boolean; viewedAt?: number } {
-    return capacityActivity.get(this.paths.root)?.(name) ?? { active: true };
+  private activity(name: string): { active: boolean; viewedAt?: number; known?: boolean } {
+    return capacityActivity.get(this.paths.root)?.(name) ?? { active: true, known: false };
   }
 
-  setCapacityActivity(activity: (name: string) => { active: boolean; viewedAt?: number }): void {
+  setCapacityActivity(activity: (name: string) => { active: boolean; viewedAt?: number; known?: boolean }): void {
     capacityActivity.set(this.paths.root, activity);
   }
 
@@ -409,32 +410,77 @@ export class NectarService {
     return previewMemoryAvailable(await availableMemory());
   }
 
+  private logCapacity(event: Record<string, unknown>): Promise<void> {
+    const file = path.join(this.paths.root, "capacity.jsonl");
+    const writing = (capacityLogs.get(this.paths.root) ?? Promise.resolve()).then(async () => {
+      const config = await this.store.readConfig();
+      await rotateLog(file, config.log_max_bytes, this.paths.root);
+      await appendFile(file, `${JSON.stringify(event)}\n`);
+    }).catch(() => undefined);
+    capacityLogs.set(this.paths.root, writing);
+    return writing;
+  }
+
   private async recoverCapacity<T>(exclude: string | undefined, action: () => Promise<T>, slept: string[]): Promise<T> {
     for (;;) {
       try {
         return await action();
       } catch (error) {
         if (!(error instanceof NectarError) || !["E_QUOTA", "E_PORTS"].includes(error.code)) throw error;
-        if (error.details.capacity_resource === "tailnet") throw new NectarError(error.code, `${error.message}; sleeping preserves existing URL routes and cannot release their TCP ports`, { ...error.details, slept_previews: slept });
-        const eligible = (record: EnvRecord): boolean => record.name !== exclude && record.mode === "web" && holdsRuntime(record.status) && record.static_route === undefined && record.serve?.proxy_port !== undefined && record.serve.pid > 1 && !record.serve.cmd.includes("static-server.") && !protectedPreview(record) && !this.activity(record.name).active;
-        const viewed = (record: EnvRecord): number => this.activity(record.name).viewedAt ?? Date.parse(record.last_opened_at ?? record.published_at);
-        const candidates = (await this.store.listEnvs()).filter(eligible).sort((a, b) => viewed(a) - viewed(b) || a.name.localeCompare(b.name));
+        const viewed = (record: EnvRecord): number => Math.max(this.activity(record.name).viewedAt ?? 0, record.last_viewed_at === undefined ? 0 : Date.parse(record.last_viewed_at)) || Date.parse(record.published_at);
+        const skipped = (record: EnvRecord): string | null => {
+          if (record.name === exclude) return "requested_preview";
+          if (record.mode !== "web") return "not_web";
+          if (record.static_route !== undefined || record.serve?.cmd.includes("static-server.")) return "static";
+          if (!holdsRuntime(record.status) || record.serve === undefined || record.serve.pid <= 1) return "not_running";
+          if (record.serve.proxy_port === undefined) return "no_proxy";
+          if (protectedPreview(record)) return record.pinned === true ? "pinned" : "main_bench";
+          const activity = this.activity(record.name);
+          if (activity.known === false) return "activity_unknown";
+          if (activity.active) return "active_request";
+          return null;
+        };
+        const candidates = (await this.store.listEnvs()).sort((a, b) => viewed(a) - viewed(b) || a.name.localeCompare(b.name)).map((record) => ({
+          env: record.name,
+          last_viewed_at: new Date(viewed(record)).toISOString(),
+          view_source: this.activity(record.name).viewedAt === viewed(record) ? "live" : record.last_viewed_at !== undefined ? "persisted" : "published_fallback",
+          persisted_last_viewed_at: record.last_viewed_at ?? null,
+          skip_reason: skipped(record),
+          decision: "not_needed",
+        }));
         let freed = false;
-        for (const candidate of candidates) {
-          try {
-            await this.store.withLock(candidate.name, async () => {
-              const current = await this.store.readEnv(candidate.name);
-              if (!eligible(current)) return;
-              const key = `${this.paths.root}\0${current.name}`;
-              capacitySleeping.add(key);
-              try { await this.sleepRuntime(current); } finally { capacitySleeping.delete(key); }
-              if (current.status === "warm" && current.serve?.pid === 0) { slept.push(current.name); freed = true; }
-            });
-          } catch (failure) {
-            if (!(failure instanceof NectarError) || failure.code !== "E_BUSY") throw failure;
+        let reconsider = false;
+        try {
+          for (const candidate of candidates) {
+            if (error.details.capacity_resource === "tailnet") candidate.skip_reason ??= "url_ports_retained";
+            if (candidate.skip_reason !== null) { candidate.decision = "skipped"; continue; }
+            if (freed) continue;
+            try {
+              await this.store.withLock(candidate.env, async () => {
+                const current = await this.store.readEnv(candidate.env);
+                candidate.skip_reason = skipped(current);
+                if (candidate.skip_reason !== null) { candidate.decision = "skipped"; return; }
+                if (viewed(current) !== Date.parse(candidate.last_viewed_at)) {
+                  candidate.skip_reason = "view_changed"; candidate.decision = "skipped"; reconsider = true; return;
+                }
+                const key = `${this.paths.root}\0${current.name}`;
+                capacitySleeping.add(key);
+                try { await this.sleepRuntime(current); } finally { capacitySleeping.delete(key); }
+                if (current.status === "warm" && current.serve?.pid === 0) { slept.push(current.name); freed = true; candidate.decision = "slept"; }
+                else { candidate.skip_reason = "runtime_not_slept"; candidate.decision = "skipped"; }
+              });
+            } catch (failure) {
+              if (!(failure instanceof NectarError) || failure.code !== "E_BUSY") { candidate.skip_reason = "sleep_failed"; candidate.decision = "failed"; throw failure; }
+              candidate.skip_reason = failure.details.lock !== undefined ? "lock_held" : "runtime_busy";
+              candidate.decision = "skipped";
+            }
+            if (reconsider) break;
           }
-          if (freed) break;
+        } finally {
+          await this.logCapacity({ event: "capacity_recovery", at: new Date().toISOString(), env: exclude ?? null, code: error.code, capacity_resource: error.details.capacity_resource ?? null, candidates, slept_previews: slept.slice() });
         }
+        if (error.details.capacity_resource === "tailnet") throw new NectarError(error.code, `${error.message}; sleeping preserves existing URL routes and cannot release their TCP ports`, { ...error.details, slept_previews: slept });
+        if (reconsider) continue;
         if (!freed) throw new NectarError(error.code, `${error.message}; no idle dynamic runtime can be put to sleep. Alternatively, configure nectar pool add <host> and publish without --local or --host for automatic host placement`, { ...error.details, slept_previews: slept });
       }
     }
@@ -1118,6 +1164,7 @@ export class NectarService {
       ...(old?.install_hash === undefined ? {} : { install_hash: old.install_hash }),
       ...(old?.pinned === undefined ? {} : { pinned: old.pinned }),
       ...(old?.last_opened_at === undefined ? {} : { last_opened_at: old.last_opened_at }),
+      ...(old?.last_viewed_at === undefined ? {} : { last_viewed_at: old.last_viewed_at }),
       ...(old?.deps === undefined ? {} : { deps: old.deps }),
     };
   }
@@ -1845,11 +1892,11 @@ export class NectarService {
         if (typeof targetUrl !== "string" || !targetUrl.startsWith("https://")) throw new NectarError("E_TAILNET_DOWN", "Remote preview did not return a reachable mesh URL");
         record.serve.capacity_remote_url = targetUrl;
         await this.store.writeEnv(record);
-        await appendFile(path.join(this.paths.root, "capacity.jsonl"), `${JSON.stringify({ event: "wake_placement", env: name, placed_on: result.placed_on, preview_url: targetUrl, slept_previews: slept })}\n`).catch(() => undefined);
+        await this.logCapacity({ event: "wake_placement", env: name, placed_on: result.placed_on, preview_url: targetUrl, slept_previews: slept });
         return remoteUpstream(targetUrl);
       });
     }
-    if (slept.length > 0) await appendFile(path.join(this.paths.root, "capacity.jsonl"), `${JSON.stringify({ event: "wake_capacity", env: name, slept_previews: slept, at: new Date().toISOString() })}\n`).catch(() => undefined);
+    if (slept.length > 0) await this.logCapacity({ event: "wake_capacity", env: name, slept_previews: slept, at: new Date().toISOString() });
     return { ...upstream, slept_previews: slept };
   }
 
@@ -1878,7 +1925,6 @@ export class NectarService {
         }
       }
       if ((!holdsRuntime(record.status) && record.status !== "crashed") || record.serve.upstream_port === undefined) throw new NectarError("E_NOT_FOUND", "Preview unavailable");
-      record.last_opened_at = new Date().toISOString();
       await this.store.writeEnv(record);
       return { host: record.serve.upstream_host ?? "127.0.0.1", port: record.serve.upstream_port };
     });
@@ -2699,7 +2745,7 @@ export class NectarService {
 
   async touchView(name: string): Promise<string | undefined> {
     const now = new Date();
-    await this.store.updateEnv(name, (record) => { record.last_opened_at = now.toISOString(); }, { bestEffort: true });
+    await this.store.updateEnv(name, (record) => { record.last_opened_at = now.toISOString(); record.last_viewed_at = now.toISOString(); }, { bestEffort: true });
     return (await this.touchRecord(name, now))?.expires_at;
   }
 

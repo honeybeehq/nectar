@@ -141,7 +141,7 @@ export class StateStore {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
     }
-    throw new NectarError("E_BUSY", `Environment '${path.basename(lockPath, ".lock")}' is busy; retry shortly`);
+    throw new NectarError("E_BUSY", `Environment '${path.basename(lockPath, ".lock")}' is busy; retry shortly`, { lock: path.basename(lockPath, ".lock") });
   }
 
   async withLock<T>(name: string, action: () => Promise<T>): Promise<T> {

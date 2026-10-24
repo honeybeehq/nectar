@@ -1,0 +1,19 @@
+{"at":"2026-10-24T17:15:10.690Z","root":"/home/trmd/.hive/v2/cells/pws-t14-ebusy-e8b26d13709a/github-com-honeybeehq-nectar-2b94ee083bd1-space-e8b26d13709a/.audit/t14-R3E5ZD","daemon":2388198,"baseline":false}
+{"at":"2026-10-24T17:15:14.846Z","phase":"held-lock","operation":0,"elapsedMs":3305,"status":"fulfilled","env":"t14--held-a--web","awake":false}
+{"at":"2026-10-24T17:15:14.847Z","phase":"held-lock","operation":1,"elapsedMs":3306,"status":"fulfilled","env":"t14--held-b--web","awake":false}
+{"at":"2026-10-24T17:15:14.847Z","phase":"held-lock","operation":2,"elapsedMs":3306,"status":"fulfilled","awake":true}
+{"at":"2026-10-24T17:15:16.937Z","phase":"concurrent","round":0,"statuses":["fulfilled","fulfilled","fulfilled","fulfilled"],"errors":[]}
+{"at":"2026-10-24T17:15:18.075Z","phase":"unique-ports","records":5,"uniqueClaims":13}
+{"at":"2026-10-24T17:15:20.335Z","phase":"concurrent","round":1,"statuses":["fulfilled","fulfilled","fulfilled","fulfilled"],"errors":[]}
+{"at":"2026-10-24T17:15:21.436Z","phase":"unique-ports","records":7,"uniqueClaims":17}
+{"at":"2026-10-24T17:15:23.660Z","phase":"concurrent","round":2,"statuses":["fulfilled","fulfilled","fulfilled","fulfilled"],"errors":[]}
+{"at":"2026-10-24T17:15:24.751Z","phase":"unique-ports","records":9,"uniqueClaims":21}
+{"at":"2026-10-24T17:15:27.028Z","phase":"concurrent","round":3,"statuses":["fulfilled","fulfilled","fulfilled","fulfilled"],"errors":[]}
+{"at":"2026-10-24T17:15:28.147Z","phase":"unique-ports","records":11,"uniqueClaims":25}
+{"at":"2026-10-24T17:15:30.533Z","phase":"concurrent","round":4,"statuses":["fulfilled","fulfilled","fulfilled","fulfilled"],"errors":[]}
+{"at":"2026-10-24T17:15:31.653Z","phase":"unique-ports","records":13,"uniqueClaims":28}
+{"at":"2026-10-24T17:15:31.655Z","phase":"recovery","portRecoveries":3,"memoryRecoveries":16,"eventLog":"/home/trmd/.hive/v2/cells/pws-t14-ebusy-e8b26d13709a/github-com-honeybeehq-nectar-2b94ee083bd1-space-e8b26d13709a/.audit/t14-R3E5ZD/state/capacity.jsonl"}
+{"at":"2026-10-24T17:16:01.708Z","phase":"timeout-wake","elapsedMs":30049,"status":503,"body":"Nectar: Timed out after 30000ms waiting for the machine port lock; another publish, wake, or recovery is still using it\n"}
+{"at":"2026-10-24T17:16:01.836Z","phase":"timeout-publish","elapsedMs":30177,"code":"E_BUSY","message":"Timed out after 30000ms waiting for the machine port lock; another publish, wake, or recovery is still using it","details":{"lock":"machine--ports","timeout_ms":30000}}
+{"at":"2026-10-24T17:16:01.837Z","PASS":true,"rounds":5}
+{"at":"2026-10-24T17:16:02.223Z","cleanup":true}

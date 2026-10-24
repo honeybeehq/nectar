@@ -2,6 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import type { Socket } from "node:net";
 import { pipeline } from "node:stream";
+import { NectarError } from "./errors.js";
 
 export const PROXY_HEADER = "x-nectar-proxy";
 const UPSTREAM_HEADER = "x-nectar-upstream";
@@ -100,6 +101,7 @@ export class EnvProxy {
         try {
           return await this.prepare!();
         } catch (error) {
+          if (error instanceof NectarError && error.details.lock === "machine--ports" && error.details.timeout_ms !== undefined) throw error;
           if (!(error instanceof Error) || !("code" in error) || error.code !== "E_BUSY" || Date.now() >= deadline) throw error;
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
@@ -119,7 +121,7 @@ export class EnvProxy {
       if (this.prepare !== undefined) this.upstream = await this.ready();
     } catch (error) {
       response.writeHead(503, { "content-type": "text/plain; charset=utf-8", "retry-after": "2" });
-      const capacity = error instanceof Error && "code" in error && ["E_QUOTA", "E_PORTS"].includes(String(error.code));
+      const capacity = error instanceof Error && "code" in error && (["E_QUOTA", "E_PORTS"].includes(String(error.code)) || error instanceof NectarError && error.details.lock === "machine--ports");
       response.end(capacity ? `Nectar: ${error.message}\n` : `Nectar: ${this.env} could not wake; retry shortly.\n`);
       return;
     }

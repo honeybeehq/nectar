@@ -1,0 +1,18 @@
+Build/typecheck/lint: passed.
+Before: two publishes and one wake reproduced machine--ports E_BUSY during a 1.5s hold.
+After: 3 isolated runs x 5 concurrent rounds; zero failures; every port unique; route targets correct.
+Each run: 3 port recoveries and 16 memory recoveries.
+Dead-holder recovery: 8 contenders, peak 1 holder.
+Long hold: clear publish timeout30177ms and HTTP503 timeout30049ms.
+Final combined real daemon fixture: passed; cleanup34appPIDs, zero owned routes.
+Final full Linux suite: 358 passed / 8 known failed / 3 skipped.
+Exact failing names equal docs/evidence/T7-checks.txt; no new failing names.
+
+test/daemon.test.ts > supervisor against the real service > gc on the supervisor schedule expires an env past its TTL and drops its tailscale entry
+test/doctor.test.ts > doctor --fix on a messy machine > removes an entry that only becomes an orphan once release-env stops its process, in the same run
+test/doctor.test.ts > doctor --fix on a messy machine > removes only orphaned Nectar entries, stops only Nectar's processes, and is idempotent
+test/integration.test.ts > fixture-backed desktop testpacks > publishes two records for embed mode, verifies/caches/launches, and retries F8 corruption
+test/integration.test.ts > fixture-backed web publish > derives a detached Cell's branch slot and republishes from another clone of the same origin, but not from an impostor
+test/integration.test.ts > fixture-backed web publish > keeps one session slot across a detached Cell's commits, apart per session, and drops a dead env's preview_url
+test/ios.test.ts > desktop open ax bridge > starts the AX bridge and returns ax_url
+test/ios.test.ts > ios publish > packs a simpack, drives simctl, streams via serve-sim, and exposes ax_url

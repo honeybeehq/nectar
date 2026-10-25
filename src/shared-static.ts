@@ -44,7 +44,7 @@ async function healthy(info: SharedStatic, timeoutMs = 1_000): Promise<boolean> 
 }
 
 export async function ensureSharedStatic(store: StateStore, dnsName?: string): Promise<{ local: string; mesh: string | null; error: string | null }> {
-  const ensure = async (): Promise<{ local: string; mesh: string | null; error: string | null }> => store.withLock("machine--static", async () => {
+  const ensure = async (): Promise<{ local: string; mesh: string | null; error: string | null }> => store.withLock("machine--ports", async () => store.withLock("machine--static", async () => {
     let info = await metadata(store);
     let responsive = info !== undefined && await healthy(info);
     if (info !== undefined && pidAlive(info.pid) && !responsive) {
@@ -88,8 +88,11 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
     if (info.tailnetPort === undefined) {
       const config = await store.readConfig();
       const reserved = statusPorts(await serveStatus());
-      for (let port = config.tailnet_port_start; port <= config.tailnet_port_end; port += 1) reserved.add(port);
-      for (let port = config.upstream_port_start; port <= config.upstream_port_end; port += 1) reserved.add(port);
+      for (const record of await store.listEnvs()) {
+        for (const port of [record.serve?.upstream_port, record.serve?.proxy_port, record.serve?.tailnet_port, ...Object.values(record.deps ?? {}).map((dep) => dep.port)]) {
+          if (port !== undefined) reserved.add(port);
+        }
+      }
       reserved.add(config.pack_server_port);
       reserved.add(info.port);
       info.tailnetPort = await allocatePort({ start: 10240, end: 65535, reserved });
@@ -108,7 +111,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
       await atomicJson(metadataFile(store), info);
     }
     return { local, mesh: result.ok ? `https://${dnsName}:${info.tailnetPort}` : null, error: result.ok ? null : result.message };
-  });
+  }));
   const deadline = Date.now() + 30_000;
   for (;;) {
     try {
@@ -164,6 +167,13 @@ async function run(root: string, port: number, secret: string): Promise<void> {
     });
   });
   const config = await store.readConfig();
+  const reserved = new Set([443, 8440, 8441, 8450, 8451, config.pack_server_port]);
+  for (const record of await store.listEnvs()) {
+    for (const candidate of [record.serve?.upstream_port, record.serve?.proxy_port, record.serve?.tailnet_port, ...Object.values(record.deps ?? {}).map((dep) => dep.port)]) {
+      if (candidate !== undefined) reserved.add(candidate);
+    }
+  }
+  if (previous?.tailnetPort !== undefined) reserved.add(previous.tailnetPort);
   for (;;) {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -174,8 +184,8 @@ async function run(root: string, port: number, secret: string): Promise<void> {
     });
     const bound = server.address();
     if (bound === null || typeof bound === "string") throw new Error("Missing shared static listener");
-    const inRange = (start: number, end: number): boolean => bound.port >= start && bound.port <= end;
-    if (port !== 0 || (!inRange(config.upstream_port_start, config.upstream_port_end) && !inRange(config.tailnet_port_start, config.tailnet_port_end) && bound.port !== config.pack_server_port)) break;
+    if (!reserved.has(bound.port)) break;
+    port = 0;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   const address = server.address();

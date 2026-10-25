@@ -104,6 +104,8 @@ export interface ServeRecord {
   pid: number;
   pgid: number;
   upstream_port?: number;
+  upstream_host?: string;
+  capacity_remote_url?: string;
   tailnet_port?: number;
   proxy_port?: number;
   started_at?: string;
@@ -226,7 +228,9 @@ export interface EnvRecord {
   dev?: DevRecord;
   pinned?: boolean;
   owner_inactive_since?: string;
+  proof_terminal_since?: string;
   last_opened_at?: string;
+  last_viewed_at?: string;
   sim_udid?: string;
   sim_device?: string;
   urls: EnvUrls;

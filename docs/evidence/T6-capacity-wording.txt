@@ -1,0 +1,3 @@
+Capacity wording scan of src/**/*.ts, README.md, docs/**/*.md (excluding historical evidence/research)
+Pattern: (capacity|quota|fixed.count).{0,60}\bslots?\b or reverse, case insensitive
+No matches. Remaining branch/worktree/schema/prose terms listed in T6-wording-scan.txt.

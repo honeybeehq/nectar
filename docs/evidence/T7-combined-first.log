@@ -1,0 +1,88 @@
+{"at":"2026-10-24T15:13:09.874Z","daemon":2225124,"state":"/home/trmd/.hive/v2/cells/pws-t7-e2e-4074519ca7da/github-com-honeybeehq-nectar-2b94ee083bd1-space-4074519ca7da/.audit/combined-1792854789496/state"}
+{"at":"2026-10-24T15:13:10.565Z","publish":"t7-static-0--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-0--static--web/ccc69638189671c9f3bf3524f81c9a21/","publishMs":689,"slept":[]}
+{"at":"2026-10-24T15:13:10.625Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-0--static--web/ccc69638189671c9f3bf3524f81c9a21/","body":"T7 combined static","wakeMs":60}
+{"at":"2026-10-24T15:13:10.677Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-0--static--web/ccc69638189671c9f3bf3524f81c9a21/asset.js","body":"T7 asset","wakeMs":52}
+{"at":"2026-10-24T15:13:10.746Z","publish":"t7-static-1--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-1--static--web/16266915b3b3eb96fa742f3d0cb32cc1/","publishMs":69,"slept":[]}
+{"at":"2026-10-24T15:13:10.802Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-1--static--web/16266915b3b3eb96fa742f3d0cb32cc1/","body":"T7 combined static","wakeMs":55}
+{"at":"2026-10-24T15:13:10.856Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-1--static--web/16266915b3b3eb96fa742f3d0cb32cc1/asset.js","body":"T7 asset","wakeMs":54}
+{"at":"2026-10-24T15:13:10.923Z","publish":"t7-static-2--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-2--static--web/20f4e2a7a8bcf5a2d44d5e0b77fcae5a/","publishMs":67,"slept":[]}
+{"at":"2026-10-24T15:13:10.975Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-2--static--web/20f4e2a7a8bcf5a2d44d5e0b77fcae5a/","body":"T7 combined static","wakeMs":53}
+{"at":"2026-10-24T15:13:11.030Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-2--static--web/20f4e2a7a8bcf5a2d44d5e0b77fcae5a/asset.js","body":"T7 asset","wakeMs":54}
+{"at":"2026-10-24T15:13:11.099Z","publish":"t7-static-3--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-3--static--web/b9cd366882a16dabb98f6fb9c58f36c2/","publishMs":69,"slept":[]}
+{"at":"2026-10-24T15:13:11.152Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-3--static--web/b9cd366882a16dabb98f6fb9c58f36c2/","body":"T7 combined static","wakeMs":53}
+{"at":"2026-10-24T15:13:11.207Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-3--static--web/b9cd366882a16dabb98f6fb9c58f36c2/asset.js","body":"T7 asset","wakeMs":55}
+{"at":"2026-10-24T15:13:11.280Z","publish":"t7-static-4--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-4--static--web/5e6b7f370fd1a561f21a042e59a2dd07/","publishMs":72,"slept":[]}
+{"at":"2026-10-24T15:13:11.335Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-4--static--web/5e6b7f370fd1a561f21a042e59a2dd07/","body":"T7 combined static","wakeMs":55}
+{"at":"2026-10-24T15:13:11.389Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-4--static--web/5e6b7f370fd1a561f21a042e59a2dd07/asset.js","body":"T7 asset","wakeMs":53}
+{"at":"2026-10-24T15:13:11.452Z","publish":"t7-static-5--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-5--static--web/81640f540bf3ba472b198fd4af3534d4/","publishMs":63,"slept":[]}
+{"at":"2026-10-24T15:13:11.501Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-5--static--web/81640f540bf3ba472b198fd4af3534d4/","body":"T7 combined static","wakeMs":49}
+{"at":"2026-10-24T15:13:11.554Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-5--static--web/81640f540bf3ba472b198fd4af3534d4/asset.js","body":"T7 asset","wakeMs":52}
+{"at":"2026-10-24T15:13:11.629Z","publish":"t7-static-6--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-6--static--web/5d45d7f17560d6b299d4453ada8c2056/","publishMs":75,"slept":[]}
+{"at":"2026-10-24T15:13:11.681Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-6--static--web/5d45d7f17560d6b299d4453ada8c2056/","body":"T7 combined static","wakeMs":52}
+{"at":"2026-10-24T15:13:11.733Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-6--static--web/5d45d7f17560d6b299d4453ada8c2056/asset.js","body":"T7 asset","wakeMs":52}
+{"at":"2026-10-24T15:13:11.806Z","publish":"t7-static-7--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-7--static--web/21b47b83b61ca42dbce6a889f6eeab22/","publishMs":73,"slept":[]}
+{"at":"2026-10-24T15:13:11.857Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-7--static--web/21b47b83b61ca42dbce6a889f6eeab22/","body":"T7 combined static","wakeMs":50}
+{"at":"2026-10-24T15:13:11.908Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-7--static--web/21b47b83b61ca42dbce6a889f6eeab22/asset.js","body":"T7 asset","wakeMs":51}
+{"at":"2026-10-24T15:13:11.983Z","publish":"t7-static-8--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-8--static--web/b95d928595b12a4a8301444c54d9786f/","publishMs":75,"slept":[]}
+{"at":"2026-10-24T15:13:12.036Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-8--static--web/b95d928595b12a4a8301444c54d9786f/","body":"T7 combined static","wakeMs":52}
+{"at":"2026-10-24T15:13:12.090Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-8--static--web/b95d928595b12a4a8301444c54d9786f/asset.js","body":"T7 asset","wakeMs":54}
+{"at":"2026-10-24T15:13:12.166Z","publish":"t7-static-9--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-9--static--web/4c403aaf9954b83fc31722f8dd638dce/","publishMs":75,"slept":[]}
+{"at":"2026-10-24T15:13:12.220Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-9--static--web/4c403aaf9954b83fc31722f8dd638dce/","body":"T7 combined static","wakeMs":54}
+{"at":"2026-10-24T15:13:12.274Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-9--static--web/4c403aaf9954b83fc31722f8dd638dce/asset.js","body":"T7 asset","wakeMs":54}
+{"at":"2026-10-24T15:13:12.347Z","publish":"t7-static-10--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-10--static--web/8797d6cafd992b51144534244f30d6de/","publishMs":73,"slept":[]}
+{"at":"2026-10-24T15:13:12.397Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-10--static--web/8797d6cafd992b51144534244f30d6de/","body":"T7 combined static","wakeMs":50}
+{"at":"2026-10-24T15:13:12.452Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-10--static--web/8797d6cafd992b51144534244f30d6de/asset.js","body":"T7 asset","wakeMs":54}
+{"at":"2026-10-24T15:13:12.526Z","publish":"t7-static-11--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-11--static--web/3a090fb7f83e75649fb5dd98514900e0/","publishMs":74,"slept":[]}
+{"at":"2026-10-24T15:13:12.585Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-11--static--web/3a090fb7f83e75649fb5dd98514900e0/","body":"T7 combined static","wakeMs":59}
+{"at":"2026-10-24T15:13:12.639Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-11--static--web/3a090fb7f83e75649fb5dd98514900e0/asset.js","body":"T7 asset","wakeMs":53}
+{"at":"2026-10-24T15:13:12.713Z","publish":"t7-static-12--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-12--static--web/433fd714541573cccef007ac07e8f2e6/","publishMs":74,"slept":[]}
+{"at":"2026-10-24T15:13:12.765Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-12--static--web/433fd714541573cccef007ac07e8f2e6/","body":"T7 combined static","wakeMs":51}
+{"at":"2026-10-24T15:13:12.815Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-12--static--web/433fd714541573cccef007ac07e8f2e6/asset.js","body":"T7 asset","wakeMs":50}
+{"at":"2026-10-24T15:13:12.913Z","publish":"t7-static-13--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-13--static--web/85c59909b75f10558e65b1dc5256aee5/","publishMs":97,"slept":[]}
+{"at":"2026-10-24T15:13:12.969Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-13--static--web/85c59909b75f10558e65b1dc5256aee5/","body":"T7 combined static","wakeMs":56}
+{"at":"2026-10-24T15:13:13.017Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-13--static--web/85c59909b75f10558e65b1dc5256aee5/asset.js","body":"T7 asset","wakeMs":48}
+{"at":"2026-10-24T15:13:13.098Z","publish":"t7-static-14--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-14--static--web/30ba0677f4231b4fca898e13db495704/","publishMs":81,"slept":[]}
+{"at":"2026-10-24T15:13:13.146Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-14--static--web/30ba0677f4231b4fca898e13db495704/","body":"T7 combined static","wakeMs":48}
+{"at":"2026-10-24T15:13:13.197Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-14--static--web/30ba0677f4231b4fca898e13db495704/asset.js","body":"T7 asset","wakeMs":51}
+{"at":"2026-10-24T15:13:13.288Z","publish":"t7-static-15--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-15--static--web/819e0f4c28158c043c0377f4328ca1cf/","publishMs":90,"slept":[]}
+{"at":"2026-10-24T15:13:13.343Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-15--static--web/819e0f4c28158c043c0377f4328ca1cf/","body":"T7 combined static","wakeMs":54}
+{"at":"2026-10-24T15:13:13.398Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-15--static--web/819e0f4c28158c043c0377f4328ca1cf/asset.js","body":"T7 asset","wakeMs":55}
+{"at":"2026-10-24T15:13:13.485Z","publish":"t7-static-16--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-16--static--web/c49e5ef33ab9340c7f3c11a873a48438/","publishMs":88,"slept":[]}
+{"at":"2026-10-24T15:13:13.535Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-16--static--web/c49e5ef33ab9340c7f3c11a873a48438/","body":"T7 combined static","wakeMs":50}
+{"at":"2026-10-24T15:13:13.589Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-16--static--web/c49e5ef33ab9340c7f3c11a873a48438/asset.js","body":"T7 asset","wakeMs":53}
+{"at":"2026-10-24T15:13:13.674Z","publish":"t7-static-17--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-17--static--web/b4f46268f6594fa030e5b3b5da20ef83/","publishMs":85,"slept":[]}
+{"at":"2026-10-24T15:13:13.725Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-17--static--web/b4f46268f6594fa030e5b3b5da20ef83/","body":"T7 combined static","wakeMs":51}
+{"at":"2026-10-24T15:13:13.773Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-17--static--web/b4f46268f6594fa030e5b3b5da20ef83/asset.js","body":"T7 asset","wakeMs":48}
+{"at":"2026-10-24T15:13:13.854Z","publish":"t7-static-18--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-18--static--web/bc5cb4ab7f6690c4129c2fe5bba77f13/","publishMs":81,"slept":[]}
+{"at":"2026-10-24T15:13:13.908Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-18--static--web/bc5cb4ab7f6690c4129c2fe5bba77f13/","body":"T7 combined static","wakeMs":54}
+{"at":"2026-10-24T15:13:13.965Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-18--static--web/bc5cb4ab7f6690c4129c2fe5bba77f13/asset.js","body":"T7 asset","wakeMs":56}
+{"at":"2026-10-24T15:13:14.049Z","publish":"t7-static-19--static--web","url":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-19--static--web/78a0387453da9fe299ecf8259340bc72/","publishMs":84,"slept":[]}
+{"at":"2026-10-24T15:13:14.106Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-19--static--web/78a0387453da9fe299ecf8259340bc72/","body":"T7 combined static","wakeMs":57}
+{"at":"2026-10-24T15:13:14.159Z","open":"https://trmd-metal-2.tailff9529.ts.net:10258/s/t7-static-19--static--web/78a0387453da9fe299ecf8259340bc72/asset.js","body":"T7 asset","wakeMs":52}
+{"at":"2026-10-24T15:13:14.165Z","staticCount":20,"sharedPid":2225142,"sharedPort":39921,"sharedTailnetPort":10258,"perPreviewProcesses":0}
+{"at":"2026-10-24T15:13:15.052Z","publish":"t7-dynamic--p01--web","url":"https://trmd-metal-2.tailff9529.ts.net:35600","publishMs":877,"slept":[]}
+curl: (22) The requested URL returned error: 502
+{"at":"2026-10-24T15:13:15.245Z","cleanup":true,"appPidsGone":0,"remainingOwnedRoutes":0}
+node:internal/errors:985
+  const err = new Error(message);
+              ^
+
+Error: Command failed: curl --fail -sS --max-time 25 https://trmd-metal-2.tailff9529.ts.net:35600
+curl: (22) The requested URL returned error: 502
+
+    at genericNodeError (node:internal/errors:985:15)
+    at wrappedFn (node:internal/errors:539:14)
+    at checkExecSyncError (node:child_process:925:11)
+    at execFileSync (node:child_process:961:15)
+    at curl (file:///home/trmd/.hive/v2/cells/pws-t7-e2e-4074519ca7da/github-com-honeybeehq-nectar-2b94ee083bd1-space-4074519ca7da/test/fixtures/verify-combined.mjs:37:66)
+    at file:///home/trmd/.hive/v2/cells/pws-t7-e2e-4074519ca7da/github-com-honeybeehq-nectar-2b94ee083bd1-space-4074519ca7da/test/fixtures/verify-combined.mjs:45:172
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  status: 22,
+  signal: null,
+  output: [ null, '', 'curl: (22) The requested URL returned error: 502\n' ],
+  pid: 2225337,
+  stdout: '',
+  stderr: 'curl: (22) The requested URL returned error: 502\n'
+}
+
+Node.js v24.18.0

@@ -81,6 +81,8 @@ export async function fakeActiveOwner(directory: string): Promise<void> {
 }
 
 export async function fakeTailscale(directory: string): Promise<{ binary: string; log: string }> {
+  const lookup = await fakeExecutable(directory, "proof-lookup", `cat > /dev/null; echo '{"state":"unlinked"}'`);
+  vi.stubEnv("NECTAR_PROOF_LOOKUP", lookup);
   const log = path.join(directory, "tailscale.log");
   const binary = await fakeExecutable(
     directory,

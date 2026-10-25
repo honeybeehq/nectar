@@ -1,0 +1,4 @@
+
+> @trmd/nectar@0.0.0 build /home/trmd/.hive/v2/cells/pws-t7-e2e-4074519ca7da/github-com-honeybeehq-nectar-2b94ee083bd1-space-4074519ca7da
+> tsc -p tsconfig.build.json
+

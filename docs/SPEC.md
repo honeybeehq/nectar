@@ -245,7 +245,7 @@ navigation (`GET` with `Sec-Fetch-Dest: document`/`iframe`, or without fetch met
 the same way, at most once per env per 5 min, after forwarding and without waiting for it.
 Without nectard the mesh URL points straight at the app and only the verbs touch. Active review never
 gets reaped mid-session: `gc` skips envs touched in the last 6 h. Dev envs keep their
-separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view moves only the record's
+separate 45 min idle-stop process clock (DEV_SERVE §6); touch-on-view also records the last real HTTP request and moves the record's
 expiry, never the process clock.
 
 ### 4.5 `nectard`
@@ -675,15 +675,19 @@ Caddy imports (D21), then asks for a reload. It has three listeners:
   `prune`, `health`, and the old `add` so the Tailscale SSH control path keeps working.
 
 Authorization, all on the relay: (1) the caller's stable node ID is on `allow`;
-(2) the upstream is `https://<the caller's own MagicDNS name>:<8443–8542>`, with no
-userinfo, path or other host, and relayd stores the URL it rebuilt, not the caller's
-string; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
+(2) the upstream is `https://<the caller's own MagicDNS name>:<8443–65535>`, with no
+userinfo or other host; the only accepted path is an exact shared-static prefix
+`/s/<env-name>/<32 lowercase hex token>/`. Query strings, fragments, encoded paths and
+traversal are refused before URL normalization. Ports 443/8440/8441/8450/8451 remain
+reserved. Relayd stores the rebuilt URL; (3) PATCH, DELETE and rotate need the route's owner (403 otherwise; the admin
 socket can always remove); (4) the caller sends `name` (`<app>-<branch>`) and relayd
 sanitizes it to one DNS label of at most 54 characters, refuses reserved names (`www`,
 `api`, `app`, `auth`, `login`, `admin`, `mail`, … also as the first word) and appends 8
 random hex characters; a body naming its own `sub` is refused; (5) `gate: "none"` only
 for nodes on `ungated` (empty by default). Kill flags (relay-wide or per node) remove the
-routes they cover and refuse every PUT until `enable-all`. Hard caps: 30 days from
+routes they cover and refuse every PUT until `enable-all`.
+Static public routes require the upgraded relayd renderer. Prototype property names
+(including sanitized forms) are reserved public names. Hard caps: 30 days from
 creation for a gated route, 7 days ungated; a PATCH past the cap is clamped. relayd
 prunes expired routes hourly and at start; `nectar-relay prune` from cron asks again.
 Routes removed by `rm`, a kill flag or expiry leave a tombstone for 30 days, so
@@ -931,7 +935,7 @@ The easy, important case: embed a live branch build in the desk's Test tab.
    local object sharing via `git worktree` when the repo is local, else a shallow clone).
    Install deps if the lockfile hash changed (`pnpm install --frozen-lockfile` / npm / yarn
    detected from lockfile).
-2. Allocate an **upstream port** from the machine's range (default 4100–4199) and spawn the
+2. Allocate an **upstream port** from the machine's range (default 4100–65535) and spawn the
    recipe's `serve` with `PORT=<p>`, detached, logs to `logs/<name>/serve.log`.
 3. Register the **local name** with portless so the same-machine URL follows portless
    grammar: `agent-coupons-stack.acme.localhost`. Nectar runs the serve command itself
@@ -941,13 +945,34 @@ The easy, important case: embed a live branch build in the desk's Test tab.
 4. Poll `ready_path` on both IPv4 (`127.0.0.1`) and IPv6 (`::1`) until one returns 200;
    retain the healthy loopback origin. `ready_timeout` fails with `E_SERVE_TIMEOUT` and the
    transactional rollback described in §4.4.
-5. Expose to the mesh: allocate a **tailnet port** from 8443–8542 and run
+5. Expose to the mesh: allocate a **tailnet port** from 8443–65535 and run
    `tailscale serve --bg --https=<tport> <healthy-loopback-origin>`.
    **The 443 caveat is load-bearing**: port 443 on nectar machines belongs to the portless
    proxy (launchd), so tailscale serve must always bind non-443 — nectar never allocates
    443 and `nectar doctor` reports any existing 443 serve entry as a warning (§10.5); it never
    touches it, since portless or another service may publish there on purpose.
 6. Write the env record; emit the envelope.
+
+**On-demand dynamic web previews.** With nectard running, recipe-backed web publishes
+prepare and build the checkout, then return a stable daemon proxy URL in `warm` state.
+No app process or upstream port is retained until a real HTTP request arrives. The proxy
+holds the request until the recipe is ready, including WebSocket upgrade requests;
+concurrent requests share the wake. Memory admission applies when starting the app,
+not when registering a sleeping preview. Failed wakes return 503 with Retry-After and
+leave the URL available for another attempt. Without nectard, publish retains the
+existing eager-start behavior.
+
+The default idle window is 45 minutes (`idle_stop_ms`). Real requests update
+`last_opened_at`; metadata resolve/touch does not keep the app running. On each daemon
+cycle, idle dynamic web apps and Electron dev apps stop. Web routes retain their proxy
+and tailnet listener, release the upstream port and app process, and wake on the next
+request. Pinned/`open --keep` previews and the main bench are protected. `--keep` persists
+until the preview is removed; republish preserves it. Static previews
+are excluded. Electron `[dev]` apps have no HTTP URL and continue to wake through
+`nectar open`. Explicit stop, expiry and removal disable the HTTP route. Restarting
+nectard restores sleeping listeners without starting their apps. Local fallback URLs
+remain stable once fronted. Long-lived HTTP streams and WebSockets count as activity.
+A stopped daemon cannot serve its listeners; warm routes are retained for its restart. Port 443 is never allocated.
 
 **Republish of a live env (amendment · 2026-10-14, DECISIONS D26).** When the env is
 `serving` or `unhealthy` and Nectar owns its worktree, steps 1 and the build step (§6.1.2)
@@ -1046,7 +1071,12 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   A stopped route returns 410; a removed/unknown route returns 404. Existing TTL/touch
   and GC expire/cold/reap still own renewal and file cleanup; stopping/removing one
   preview never stops the shared listener or another preview. Public relay exposure
-  of shared paths requires updating its origin-only, 8443–8542 upstream contract.
+  accepts the exact shared-static prefix (§4.7). Its public URL stays at the origin root:
+  Caddy prepends the prefix to requests and removes it from directory Location headers.
+  Raw dot segments, encoded separators and backslashes are refused before URL
+  normalization, including public requests, so a request cannot escape its prefix.
+  Password gates and expiry apply as for dynamic previews. Root-absolute assets and
+  browser history paths resolve within this public preview; relative assets also work.
 - **Existing URLs.** Static records that already own `serve` keep their old server,
   ports and URLs, including on republish and supervisor revival, until normal retirement.
   Newly published static routes use the shared server. The envelope still supplies
@@ -1607,7 +1637,7 @@ hive integration surface. No hive API calls, no harness detection.
 ### 9.1 What the tailnet sees
 
 - Exposure = tailnet-only, on ports **8440** (pack store, read-only static) and
-  **8443–8542** (web envs). Nothing binds public interfaces; funnel is never used.
+  **8443–65535** (web envs). Nothing binds public interfaces; funnel is never used.
 - **8441** is nectard's tailnet listener, only when `remote.listen` is on (§4.5). It binds
   the node's Tailscale address only, identifies every caller with WhoIs, and serves only
   the allowlist (default: the node owner's own untagged nodes). An allowed node can run
@@ -1618,11 +1648,11 @@ hive integration surface. No hive API calls, no harness detection.
 - **8450** on the relay host is nectar-relayd's control port (§4.7). It binds the relay's
   Tailscale IPv4 only, identifies every caller with WhoIs and serves only listed stable
   node IDs; each node manages only routes to its own MagicDNS name and preview ports.
-  The ACL should let only pool hosts reach it and let the relay reach only 8443–8542 on
+  The ACL should let only pool hosts reach it and let the relay reach only 8443–65535 on
   pool hosts (design/relayd-acl-diff.md in the Project).
 - Reachability is tailscale ACL policy. **Today's tailnet is not single-user** — it includes
   a shared external node (`shared-node`, user `mbtz@`). Deploy rule (ops task, not code):
-  ACL-restrict `8440-8542` on nectar hosts to the operator's own devices. `nectar doctor`
+  ACL-restrict `8440-65535` on nectar hosts to the operator's own devices. `nectar doctor`
   reminds; it cannot verify ACLs.
 - Dev servers are dev servers: debug endpoints, sourcemaps, verbose errors. Acceptable
   inside the ACL boundary above; a nectar-side signed-token layer is the designated
@@ -1630,7 +1660,7 @@ hive integration surface. No hive API calls, no harness detection.
 - Streamed simulators (§6.5) are **interactive control surfaces** — anyone who can reach
   the port can tap, type, and drive the app under test. Same ACL boundary, but it raises
   the stakes of the ACL rule above from "can read a dev server" to "can operate a device";
-  the ios ports live in the same 8443–8542 block that rule already covers.
+  the ios ports live in the same 8443–65535 block that rule already covers.
 
 ### 9.2 Secrets
 
@@ -1702,13 +1732,30 @@ static site's files, never `.git`.
 
 | knob | default | on exceed |
 | --- | --- | --- |
-| serving web envs | Half of host RAM / 256 MiB (32 at 16 GiB, 64 at 32 GiB, 128 at 64 GiB) | Capacity estimate, not a fixed-count refusal; `E_QUOTA` only below 256 MiB free plus a reserve of min(1 GiB, RAM / 8) |
+| running dynamic web apps | Available host memory | No preview-count refusal; sleep eligible idle apps and try configured pool hosts before reporting `E_QUOTA`. Admission needs 256 MiB plus a reserve of min(1 GiB, RAM / 8); static previews bypass it |
 | streamed nectar simulators (ios) | 1 | `E_QUOTA` — serve-sim 0.1.45 cannot run two encoder instances (OQ8); raise when upstream fixes multi-instance |
-| tailnet ports | 8443–8542 | `E_PORTS` (only reachable if quota raised past range) |
-| upstream ports | 4100–4199 | `E_PORTS` |
+| tailnet ports | 8443–65535 | `E_PORTS` only when the configured range has no available port |
+| upstream ports | 4100–65535 | `E_PORTS` |
 | pack store size | 10 GB | LRU prune at `gc`, never mid-publish below 1 pack |
 | evidence per env | 500 MB | oldest recordings pruned at `gc` |
 | serve log | 10 MB × 2 | rotate |
+
+The old default 100-port ranges are expanded on read, including saved copies of those
+defaults, even if those exact values were deliberately pinned; other custom ranges
+are preserved. The allocator skips occupied listeners on any
+local interface, recorded app/proxy/dependency/mesh ports, and existing Tailscale Serve
+entries. Pack/control ports 8440, 8441, 8450 and 8451 are excluded from preview
+allocation and relay routes. Port 443 is always excluded, even with a misconfigured
+range. Upstream and
+tailnet ranges may overlap; a publish reserves its chosen upstream before choosing its
+mesh port. A supervised web preview normally needs two upstream ports (app and viewing
+proxy) and one mesh port. There is no independent preview-count refusal. Real remaining
+limits are memory admission, available TCP ports, process/file-descriptor limits, disk,
+and the host's Tailscale/ACL policy. The relay accepts preview ports through 65535;
+operators must update relay deployments and any narrower tailnet ACLs before expecting
+higher mesh ports to be reachable. Doctor never removes an unrecorded entry outside the
+legacy ranges merely because its port falls inside an expanded range (more than
+100 configured ports).
 
 ### 10.2 GC policy
 
@@ -1894,3 +1941,70 @@ Genuinely unresolved — flagged here rather than hedged inline:
 Hourly GC checks serving previews against `hive list --all --json` on the publisher's host (Tailnet SSH for remote publishers). A confirmed done, archived, or missing owner starts a persisted one-hour grace period; another confirmed inactive observation after that period reaps the environment through the existing cleanup path. Idle and stopped sessions remain active owners. Unknown owners and failed lookups are kept and logged in the GC skipped report. Pinned environments and the main bench are protected. Republish resets the grace period.
 
 The default `serving_web_limit` is now a memory-based capacity estimate; a stored legacy value of 12 reads as the new default. Stored values no longer refuse publishes by count; new web publishes require memory headroom instead. Admission includes reclaimable memory (inactive and speculative pages on macOS, MemAvailable on Linux), with free memory as a conservative fallback. Port-range exhaustion remains a separate resource constraint. The reserve and per-preview allowance are admission estimates, not a guarantee against later application memory growth.
+
+### Proof-aware GC
+
+Before GC changes an environment, it checks linked proof state, including for expired and stopped records. A waiting proof prevents GC retirement, TTL expiry and cold transitions regardless of owner session state. Unknown proof state also preserves the environment and appears in `gc.skipped`. Terminal proofs are reaped through the existing GC removal path after 24 hours from their first observed terminal state. Waiting proofs reset that grace clock. Failed reads retain the clock but block retirement until a successful read. Only confirmed unlinked previews use the existing session abandonment and TTL rules. Pinned previews and the main bench remain protected.
+
+Hosts configure `NECTAR_PROOF_LOOKUP` in nectard's environment (or the CLI environment for direct GC) to an executable path. Nectar invokes it without arguments or a shell, sends one JSON object `{ "version": 1, "ref": "nectar://...", "urls": { "local": "...", "mesh": "..." } }` on stdin, and waits at most ten seconds. The command owns authentication; credentials never appear in the request. It must return one JSON object with `state` equal to `waiting`, `terminal`, or `unlinked`. Any other result fails safe. Nectar checks again under the environment lock before applying a transition.
+
+The adapter must search all relevant Apiary proofs and Projects, including terminal Projects, by canonical URL or Nectar reference. It must match `previewUrl`, evidence `url`, and evidence `nectarRef`. Any waiting proof wins over terminal proofs. `terminal` means all linked proofs are accepted/landed, closed/refused/changes requested, or belong to a finished/dropped Project. `unlinked` requires a complete successful search finding no linked proof. A partial, unauthorized or unavailable search must fail, never claim `unlinked`.
+
+Run the isolated real-daemon fixture with `pnpm build && node test/fixtures/proof-gc.mjs`. It publishes three actual static previews, opens each local URL, then records GC output and environment listings for terminal, waiting and failing lookups. Tailscale and proof metadata are fixtures; no shared preview or host Serve entry is changed.
+
+### Capacity recovery and placement
+
+Dynamic web publish and wake retry E_QUOTA/E_PORTS by putting the least recently viewed
+eligible running app to sleep, one at a time. A view is a real request from a person or
+agent through the preview URL, including plain curl requests and ongoing request activity.
+Nectar readiness/proxy probes and wake operations themselves do not count. Recovery uses
+the freshest of live proxy activity and persisted last_viewed_at; persistence is throttled,
+but the live map updates on every request. Older records without a saved view and unvisited
+previews sort by published_at. last_opened_at remains the separate open/idle timestamp.
+Pinned/--keep previews, the
+main bench, active requests/streams/upgrades and static previews are excluded. Missing
+live activity protects a runtime. Recheck eligibility under its environment lock.
+Sleeping retains its files, stable URL listener and mesh route; a later visit wakes it.
+Capacity recovery never retires or deletes previews. Retained URL ports cannot be
+reclaimed by sleeping, so finite/custom port ranges can still exhaust.
+
+After local recovery, ordinary publishes can try configured pool hosts in least-loaded
+order, skipping unhealthy/mesh-denied hosts and retrying capacity refusals. No pool means
+an error explaining how to add one, free memory or widen custom port bounds; no automatic
+tailnet discovery. --local/--host and received shipments keep their explicit destination.
+A wake can place the exact published commit remotely and proxy HTTPS requests/upgrades
+through its original URL; the persisted remote target resets on republish. capacity.jsonl
+records every pressure decision, including refusals, with ordered candidates, their view
+times and timestamp sources, skip reasons (including active requests and held locks), and
+chosen previews. It also records wake placements (host, final remote URL) and slept preview
+names. Daemon control becomes ready after initial route restoration; Serve edits within a
+process are serialized across LocalAPI and CLI paths so concurrent restorations cannot
+leave views bypassing the proxy. Control readiness precedes app revival and initial GC,
+so slow app startup does not force callers to bypass the daemon. Recovery logs rotate at
+log_max_bytes with two previous files, using the existing recoverable log rotation.
+A wake response
+also names slept previews in x-nectar-slept-previews. Remote placement requires a reachable
+HTTPS mesh URL; local-only URLs are not accepted as remote destinations.
+
+Publish JSON includes slept_previews and top-level
+preview_url, equal to packet_fields.preview_url. Remote placement adds placed_on and
+placement_reason and returns the destination's URL directly. Human output prints the final
+`Preview: <URL>`, one `Put to sleep:` line naming any sleeping previews (which wake on a
+visit), and one `Published on <host>:` line with the placement reason. Failed publishes
+retain the exact error code and actionable message in both human and JSON output; human
+failures also name any previews put to sleep before the failure.
+Publishing never requires a free place in a preview count; do not remove previews to
+make room. Existing pool defaults and
+sticky routing still apply before local publishing. Static previews bypass runtime
+memory admission and are never capacity victims.
+
+For isolated fixture runs only, NECTAR_TEST_RUNTIME_MEMORY_BYTES gives the daemon a
+synthetic byte budget: each running dynamic web process and the next admission charge
+256 MiB. Unset/invalid values use normal host-memory admission. This does not alter the
+production reserve or add a preview-count cap.
+
+Capacity sleeping gates newly arriving requests until the transition completes. Cold
+wakes remain concurrent across environments; admission does not reserve host RAM
+atomically. A persisted remote wake target stays until republish. Local removal does
+not immediately remove the shipped copy, whose TTL is bounded by the original remaining
+TTL; a dead remote target currently requires republish to place again.

@@ -1,0 +1,39 @@
+Isolated nectard PID=2178884, Caddy PID=2178883, relayd control=35119, public HTTP=43373; private state=/home/trmd/.hive/v2/cells/pws-t10-relay-static-e3a46e5d8867/github-com-honeybeehq-nectar-2b94ee083bd1-space-e3a46e5d8867/.audit/relay-static-ofdsC8
+Relayd uses the test-supported injected publisher identity for loopback control; upstream traffic uses real tailnet HTTPS and real Caddy.
+Published via nectard: https://trmd-metal-2.tailff9529.ts.net:10252/s/t10-static--fixture--web/033ad6ca8c5e400a1ab218c4d9828b48/; exposed https://t10-static-fixture-dd300588.t10.invalid
+PASS public /: <h1>T10 static body</h1><script src="./asset.js"></script>
+PASS public /asset.js: T10 relative asset
+PASS public /nested/: T10 nested body
+PASS directory redirect: HTTP/1.1 301 Moved Permanently
+Content-Length: 6
+Content-Type: text/plain; charset=utf-8
+Date: Sat, 24 Oct 2026 14:52:59 GMT
+Location: /nested/
+Via: 2.0 Caddy
+X-Content-Type-Options: nosniff
+PASS password gate: unauthenticated HTTP 401
+PASS relayd restart reloads persisted static route and serves through Caddy
+PASS public request cannot escape prefix (HTTP 400): /../../t10-sibling--fixture--web/5d99322da1d39b40a97707554f28054a/
+PASS public request cannot escape prefix (HTTP 400): /%2e%2e/%2e%2e/t10-sibling--fixture--web/5d99322da1d39b40a97707554f28054a/
+PASS public request cannot escape prefix (HTTP 400): /..%5c..%5ct10-sibling--fixture--web/5d99322da1d39b40a97707554f28054a/
+PASS public request cannot escape prefix (HTTP 400): /..\..\t10-sibling--fixture--web/5d99322da1d39b40a97707554f28054a/
+PASS public request cannot escape prefix (HTTP 400): /%2E./.%2e/t10-sibling--fixture--web/5d99322da1d39b40a97707554f28054a/
+PASS refused https://other.ts.net:31000: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream must be on your own MagicDNS name (trmd-metal-2.tailff9529.ts.net)","rule":"upstream_host"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:443: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream port must be a Nectar preview port (8443–65535)","rule":"upstream_port"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:8440: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream port must be a Nectar preview port (8443–65535)","rule":"upstream_port"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:8441: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream port must be a Nectar preview port (8443–65535)","rule":"upstream_port"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:8450: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream port must be a Nectar preview port (8443–65535)","rule":"upstream_port"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:8451: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream port must be a Nectar preview port (8443–65535)","rule":"upstream_port"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:10252/s/t10-static--fixture--web/033ad6ca8c5e400a1ab218c4d9828b48/../: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream must be on your own MagicDNS name (trmd-metal-2.tailff9529.ts.net)","rule":"upstream_host"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:10252/s/t10-static--fixture--web/033ad6ca8c5e400a1ab218c4d9828b48/%2e%2e/: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream must be on your own MagicDNS name (trmd-metal-2.tailff9529.ts.net)","rule":"upstream_host"}}}
+PASS refused https://trmd-metal-2.tailff9529.ts.net:31000/s/../aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/: {"status":403,"body":{"ok":false,"error":{"code":"E_FORBIDDEN","message":"upstream must be on your own MagicDNS name (trmd-metal-2.tailff9529.ts.net)","rule":"upstream_host"}}}
+PASS refused name constructor: HTTP 403
+PASS refused name __proto__: HTTP 403
+PASS refused name prototype: HTTP 403
+PASS refused name toString: HTTP 403
+PASS refused name hasOwnProperty: HTTP 403
+PASS dynamic https://trmd-metal-2.tailff9529.ts.net:31003 -> https://t10-dynamic-main-df8b215c.t10.invalid: T10 dynamic body
+PASS widened port 8543: HTTP 201
+PASS widened port 65535: HTTP 201
+PASS all checks
+Stopped only owned previews and fixture processes; production relay untouched.

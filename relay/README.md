@@ -49,7 +49,7 @@ Then add each publishing node to the allowlist (relayd re-reads it on every requ
 ```
 
 The tailnet ACL should let only those nodes reach the relay on tcp:8450, and let the relay
-reach them only on 8443–8542.
+reach them only on 8443–65535.
 
 ## Point nectar at it
 

@@ -964,3 +964,133 @@ record. Each request reads and validates that record's token, status and expiry,
 Shared static routes do not enter the dynamic proxy hub. Public relay origin validation
 currently accepts only origin URLs in the old port range; shared paths require a relay
 contract update before public exposure can support them.
+
+## Proof-aware retirement (2026-10-24)
+
+GC retains previews while any linked proof waits for Tormod, independently of publisher session state and TTL. Terminal proofs receive 24 hours from the first successful terminal observation, persisted as `proof_terminal_since`. Waiting proofs reset that clock, so a reopened proof receives a fresh grace period. Failed reads preserve the clock but prevent retirement until a successful read. Unlinked previews retain the existing one-hour inactive-owner rule. Pinned and main bench previews remain protected.
+
+Apiary currently offers scoped Project reads and a Champion waiting list, neither a complete host-level preview lookup. Until it supplies that interface, `NECTAR_PROOF_LOOKUP` names an executable adapter, invoked directly without a shell. It receives versioned preview identity on stdin and returns a complete aggregate state. No adapter, timeout, invalid JSON or nonzero exit keeps the preview and records a reason. A missing service must cost storage rather than a reviewer's preview.
+
+## D36 — Keep dynamic preview listeners while their apps sleep
+
+**Chose:** extend nectard's existing per-env HTTP proxy with a serialized wake before
+forwarding. A warm web record retains its proxy/tailnet ports, has zero pid/pgid and
+no upstream port. Dynamic web publishes are lazy when nectard is present; standalone
+publish remains eager. The existing 45-minute idle window applies to web and dev,
+with real HTTP traffic recording activity. Pinned previews and the bench stay running.
+**Alternatives:** another front-door service, redirecting sleeping URLs, or keeping
+apps alive forever.
+**Why:** the existing listener already supports HTTP streaming and WebSocket upgrades,
+and preserves current URLs without another service or startup-page redirect. Static
+routes remain independently pluggable. Sleeping previews consume no app admission or app upstream ports. Each retained proxy
+listener still uses a loopback port from the configured pool; widening that pool is the
+companion capacity change. Requests read the current record without taking its lock
+while serving; only a cold wake takes the lock. Activity writes remain throttled. Failed publishes release their route; the URL may
+change on the next publish, as before.
+
+
+## D36 — Available TCP ports, not 100-port preview slots
+
+**Chose:** widen the default upstream range to 4100–65535 and mesh range to
+8443–65535, migrating saved old defaults on read while preserving custom ranges.
+The relay accepts the expanded preview range. Allocation checks for listeners on all local interfaces,
+reserves recorded ports across both ranges and existing Serve entries, and never
+allocates 443 or the pack/control ports 8440, 8441, 8450 and 8451. The relay
+refuses these service ports too. Outside the legacy ranges, an absent env record leaves a Serve entry
+ambiguous: a wide range alone cannot prove Nectar owns it.
+
+**Alternatives:** retain 100 ports; multiplex applications behind a path prefix;
+choose random ephemeral ports. **Why:** the original 12-preview count appears in the
+first specification without a resource calculation. Memory admission already replaced
+it. A real isolated nectard run on metal-2 reached exactly 50 supervised static previews
+with 100 upstream ports, then refused the 51st with E_PORTS. Each used an app port and a
+viewing proxy port. TCP has many more available ports; the hundred-port boundary had
+no resource reason. Sequential available-port allocation keeps existing low-port URLs
+and respects occupied ports without adding a second allocation mechanism. The TCP
+port number ceiling is real; memory and application costs remain real and variable.
+Shared static serving, demand-started dev servers and placement are separate changes.
+
+**Deployment:** upgrade Nectar and relayd, and widen narrower ACLs deliberately. This
+change does not edit live host configuration, ACL policy or other previews.
+
+The expanded relay range still authorizes only the caller's own MagicDNS host. It
+is not evidence that a service belongs to Nectar. Hosts trusted to publish arbitrary
+recipes can already proxy other services on their own host; restricting port numbers
+is not a substitute for that trust boundary. Deployment ACLs remain operator policy.
+
+
+### Shared static public exposure (T10, 2026-10-24)
+
+Keep public URLs at their existing origin root. Accept only T2's literal
+`/s/<env>/<32 lowercase hex token>/` upstream prefix, validated before URL parsing;
+prepend it with Caddy's rewrite and strip it from directory Location headers. Caddy
+reverse_proxy still receives only the HTTPS origin. This preserves relative assets,
+directory navigation and password gating without letting callers submit arbitrary
+paths, credentials, queries, fragments or traversal. Rebuilt upstreams still require
+the caller's own MagicDNS host and ports 8443–65535 excluding the reserved service
+ports. Prototype property names and sanitized forms are refused as public names.
+Persisted routes and admin imports understand the same exact static path shape;
+legacy origin routes continue to render unchanged. Production requires a relayd
+upgrade, route rerender/reload, and ACL reachability for expanded preview ports.
+
+The shared server rejects raw dot segments, encoded slashes and backslashes before
+WHATWG URL normalization. Otherwise a public request could climb out of its rewritten
+prefix into a sibling preview with a known token. Real Caddy reproduced this escape
+and then refused literal, encoded and mixed-case variants after the fix.
+
+Rollback: old relayd treats a static upstream as unreadable state and refuses startup
+for the whole state file. Before downgrading, remove static public routes through the
+upgraded admin API/CLI; retain origin routes. Do not edit live state manually. Directory
+Location rewriting handles relative headers as emitted by the shared server today.
+## D37 — Available TCP ports across the full configured ranges
+## D39 — Reclaim idle runtime capacity before refusing a preview
+
+On memory admission or TCP exhaustion, retry after sleeping the least recently viewed
+running dynamic web preview. The daemon's live proxy activity wins over throttled
+on-disk view timestamps. Count requests before wake begins; active responses, streams
+and upgrades, pinned/keep previews and the main bench cannot be selected. Recheck under
+the environment lock. Unknown activity is protected. Keep files, listeners, routes and
+URLs; never delete or retire for capacity, and never select static previews. Sleeping
+cannot recover retained listener/tailnet ports, so true custom-range exhaustion can remain.
+
+If local recovery is exhausted, use only configured pool hosts, ordered by the existing
+least-loaded chooser, with its dependency and mesh-denied filters. Retry another host
+on capacity refusal; preserve sticky placement. Explicit --local/--host and received
+publishes do not bounce between hosts. No configured pool means an actionable capacity
+error naming `nectar pool add <host>`, memory and custom port bounds. We deliberately do
+not discover arbitrary tailnet hosts: reachability is not permission to ship code there.
+
+A wake may ship its exact published commit to the pool and retain the original URL as
+an HTTPS proxy to the returned mesh URL. Persist that target until republish; record
+host and URL in capacity.jsonl. Local runtime recovery records slept names there and
+returns them in x-nectar-slept-previews. Publish results include slept_previews,
+placed_on/placement_reason when moved and a top-level preview_url (also retained in
+packet_fields). Agents can copy that URL directly into proof.
+
+The explicit NECTAR_TEST_RUNTIME_MEMORY_BYTES daemon environment override replaces
+memory admission with a deterministic byte budget, charging 256 MiB for each actual
+running dynamic process plus the requested one. It is a fixture control, never a default
+count limit. Production continues to measure reclaimable host memory and its reserve.
+
+Concurrent cold wakes retain per-environment concurrency rather than holding a host-wide
+lock throughout app/dependency boot. Requests arriving during a capacity sleep wait
+before forwarding. Concurrent admissions can reclaim more than one runtime; memory
+admission remains a headroom estimate rather than an atomic memory reservation.
+Remote wake targets remain sticky until republish; recovery after a dead remote target
+and immediate remote teardown on local removal are not provided. The shipped copy has
+the remaining original TTL. The remote wake/HTTPS path requires a real cross-host check
+before rollout; this task could not start an isolated remote daemon due to SSH denial.
+running dynamic web preview. Views are real preview-URL requests from people or agents,
+including plain curl and ongoing request activity, excluding Nectar's readiness/proxy probes.
+Use the freshest live or persisted last_viewed_at; update the live map on every request
+while keeping disk writes throttled. last_opened_at stays separate, so opening metadata
+or waking an app cannot move its view order. Without a saved view, including older records,
+use published_at. Count active requests before wake begins; active responses, streams
+host and URL in capacity.jsonl. Every local pressure decision records its ordered candidates,
+view times/sources, skip reasons and chosen previews, even when none can sleep. Preserve
+the existing slept_previews envelope. Restore routes before exposing daemon control, and
+serialize in-process Serve edits across LocalAPI and CLI: concurrent startup edits otherwise exhaust ETag retries,
+leaving some URLs pointed at apps directly and losing their views. Open control before
+app revival/GC, so their latency does not cause callers to bypass the daemon. Rotate
+capacity.jsonl with log_max_bytes and two previous files through the existing log rotation.
+Recovery records slept names there and

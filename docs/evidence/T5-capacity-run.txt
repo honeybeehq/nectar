@@ -1,0 +1,18 @@
+{"isolatedDaemon":2212413,"state":"/home/trmd/.hive/v2/cells/pws-t5-neverfail-b24544ab088e/github-com-honeybeehq-nectar-2b94ee083bd1-space-b24544ab088e/.audit/recovery-1792854209102/state"}
+{"publish":1,"url":"https://trmd-metal-2.tailff9529.ts.net:33400","status":200}
+{"publish":2,"url":"https://trmd-metal-2.tailff9529.ts.net:33401","status":200}
+{"publish":3,"url":"https://trmd-metal-2.tailff9529.ts.net:33402","status":200}
+{"publish":4,"url":"https://trmd-metal-2.tailff9529.ts.net:33403","status":200}
+{"publish":5,"url":"https://trmd-metal-2.tailff9529.ts.net:33404","status":200}
+{"publish":6,"url":"https://trmd-metal-2.tailff9529.ts.net:33405","status":200}
+{"publish":7,"url":"https://trmd-metal-2.tailff9529.ts.net:33406","status":200}
+{"publish":8,"url":"https://trmd-metal-2.tailff9529.ts.net:33407","status":200}
+{"publish":9,"url":"https://trmd-metal-2.tailff9529.ts.net:33408","status":200}
+{"publish":10,"url":"https://trmd-metal-2.tailff9529.ts.net:33409","status":200}
+{"publish":11,"url":"https://trmd-metal-2.tailff9529.ts.net:33410","status":200}
+{"publish":12,"url":"https://trmd-metal-2.tailff9529.ts.net:33411","status":200}
+{"thirteenthPublish":{"ok":true,"result":{"eid":"61d5","env":"recovery--p13--web","mode":"web","branch":"p13","branch_source":"flag","commit":"699164d7","ref":"nectar://trmd-metal-2/recovery--p13--web","urls":{"local":"http://127.0.0.1:33105","mesh":"https://trmd-metal-2.tailff9529.ts.net:33412","public":null},"packet_fields":{"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33412","testpack_ref":null,"dev_ref":null,"shell_recipe":null,"public_url":null},"preview_url":"https://trmd-metal-2.tailff9529.ts.net:33412","evidence":[],"expires_at":"2026-10-31T15:03:45.981Z","warnings":[],"mesh_error":null,"deps":null,"slept_previews":["recovery--p03--web"],"via":"nectard"}}}
+{"wakeResponse":"HTTP/2 200 \r\ndate: Sat, 24 Oct 2026 15:03:47 GMT\r\nx-nectar-slept-previews: recovery--p04--web\r\n\r\nawake:recovery--p03--web"}
+{"sleptUrlWakes":"https://trmd-metal-2.tailff9529.ts.net:33402","status":200,"capacityEvents":"{\"event\":\"wake_capacity\",\"env\":\"recovery--p03--web\",\"slept_previews\":[\"recovery--p04--web\"],\"at\":\"2026-10-24T15:03:47.915Z\"}\n"}
+{"noEligibleRuntime":{"ok":false,"error":{"code":"E_PORTS","message":"No free port in 33100-33123; no idle dynamic runtime can be put to sleep. Configure nectar pool add <host>, free host memory, or widen custom port ranges"}}}
+{"cleanup":"own previews stopped; own daemon exited","remainingRoutes":[],"startedPidsGone":14,"root":"/home/trmd/.hive/v2/cells/pws-t5-neverfail-b24544ab088e/github-com-honeybeehq-nectar-2b94ee083bd1-space-b24544ab088e/.audit/recovery-1792854209102"}

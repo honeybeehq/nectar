@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import type { Socket } from "node:net";
 import { pipeline } from "node:stream";
 
@@ -8,6 +9,8 @@ const UPSTREAM_HEADER = "x-nectar-upstream";
 export const DEFAULT_TOUCH_EVERY_MS = 5 * 60_000;
 
 export interface Upstream {
+  protocol?: "https:";
+  slept_previews?: string[];
   host: string;
   port: number;
 }
@@ -39,6 +42,11 @@ function headerBlock(statusCode: number, statusMessage: string, rawHeaders: stri
 
 export class EnvProxy {
   private readonly server: http.Server;
+  private preparing: Promise<Upstream> | undefined;
+  private active = 0;
+
+  get busy(): boolean { return this.active > 0; }
+  private heartbeat: NodeJS.Timeout | undefined;
   private readonly agent = new http.Agent({ keepAlive: true });
 
   constructor(
@@ -46,9 +54,10 @@ export class EnvProxy {
     readonly port: number,
     public upstream: Upstream,
     private readonly onView: () => void,
+    private readonly prepare?: () => Promise<Upstream>,
   ) {
-    this.server = http.createServer({ requestTimeout: 0 }, (request, response) => this.forward(request, response));
-    this.server.on("upgrade", (request: http.IncomingMessage, socket: Socket, head: Buffer) => this.tunnel(request, socket, head));
+    this.server = http.createServer({ requestTimeout: 0 }, (request, response) => { void this.forward(request, response); });
+    this.server.on("upgrade", (request: http.IncomingMessage, socket: Socket, head: Buffer) => { void this.tunnel(request, socket, head); });
     this.server.on("clientError", (_error, socket: Socket) => socket.destroy());
   }
 
@@ -63,26 +72,72 @@ export class EnvProxy {
   }
 
   async close(): Promise<void> {
+    if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
     this.agent.destroy();
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  private forward(request: http.IncomingMessage, response: http.ServerResponse): void {
+  private track(finished: (done: () => void) => void): void {
+    this.active += 1;
+    this.heartbeat ??= setInterval(() => this.onView(), 1_000);
+    let ended = false;
+    finished(() => {
+      if (ended) return;
+      ended = true;
+      this.active -= 1;
+      if (this.active === 0 && this.heartbeat !== undefined) {
+        clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
+      }
+    });
+  }
+
+  private async ready(): Promise<Upstream> {
+    this.preparing ??= (async () => {
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        try {
+          return await this.prepare!();
+        } catch (error) {
+          if (!(error instanceof Error) || !("code" in error) || error.code !== "E_BUSY" || Date.now() >= deadline) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+    })().finally(() => { this.preparing = undefined; });
+    return this.preparing;
+  }
+
+  private async forward(request: http.IncomingMessage, response: http.ServerResponse, retried = false): Promise<void> {
     if (request.headers[PROXY_HEADER] !== undefined) {
       response.writeHead(204, { [PROXY_HEADER]: this.env, [UPSTREAM_HEADER]: String(this.upstream.port) });
       response.end();
       return;
     }
-    if (isView(request)) this.onView();
-    const outbound = http.request(
-      { ...this.upstream, method: request.method, path: request.url, headers: request.headers, agent: this.agent },
+    if (!retried) this.track((done) => { response.once("finish", done); response.once("close", done); });
+    try {
+      if (this.prepare !== undefined) this.upstream = await this.ready();
+    } catch (error) {
+      response.writeHead(503, { "content-type": "text/plain; charset=utf-8", "retry-after": "2" });
+      const capacity = error instanceof Error && "code" in error && ["E_QUOTA", "E_PORTS"].includes(String(error.code));
+      response.end(capacity ? `Nectar: ${error.message}\n` : `Nectar: ${this.env} could not wake; retry shortly.\n`);
+      return;
+    }
+    if (response.destroyed) return;
+    if (this.upstream.slept_previews?.length) response.setHeader("x-nectar-slept-previews", this.upstream.slept_previews.join(","));
+    if (!retried && (this.prepare !== undefined || isView(request))) this.onView();
+    const outbound = (this.upstream.protocol === "https:" ? https : http).request(
+      { ...this.upstream, method: request.method, path: request.url, headers: this.upstream.protocol === "https:" ? { ...request.headers, host: `${this.upstream.host}:${this.upstream.port}` } : request.headers, agent: this.upstream.protocol === "https:" ? false : this.agent },
       (inbound) => {
         response.writeHead(inbound.statusCode ?? 502, inbound.statusMessage, inbound.rawHeaders);
         pipeline(inbound, response, () => undefined);
       },
     );
     outbound.on("error", () => {
+      if (this.prepare !== undefined && !retried && !response.headersSent && !response.destroyed && (request.method === "GET" || request.method === "HEAD") && request.headers["content-length"] === undefined && request.headers["transfer-encoding"] === undefined) {
+        setTimeout(() => { void this.forward(request, response, true); }, 100);
+        return;
+      }
       if (response.headersSent) {
         response.destroy();
         return;
@@ -93,12 +148,22 @@ export class EnvProxy {
     response.on("close", () => {
       if (!response.writableFinished) outbound.destroy();
     });
-    request.pipe(outbound);
+    if (request.readableEnded) outbound.end();
+    else request.pipe(outbound);
   }
 
-  private tunnel(request: http.IncomingMessage, socket: Socket, head: Buffer): void {
+  private async tunnel(request: http.IncomingMessage, socket: Socket, head: Buffer, retried = false): Promise<void> {
     socket.on("error", () => socket.destroy());
-    const outbound = http.request({ ...this.upstream, method: request.method, path: request.url, headers: request.headers, agent: false });
+    if (!retried) this.track((done) => { socket.once("close", done); });
+    try {
+      if (this.prepare !== undefined) this.upstream = await this.ready();
+    } catch {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
+    if (socket.destroyed) return;
+    this.onView();
+    const outbound = (this.upstream.protocol === "https:" ? https : http).request({ ...this.upstream, method: request.method, path: request.url, headers: this.upstream.protocol === "https:" ? { ...request.headers, host: `${this.upstream.host}:${this.upstream.port}` } : request.headers, agent: false });
     outbound.on("upgrade", (inbound, upstreamSocket: Socket, upstreamHead: Buffer) => {
       upstreamSocket.on("error", () => socket.destroy());
       socket.on("close", () => upstreamSocket.destroy());
@@ -113,7 +178,13 @@ export class EnvProxy {
       socket.write(headerBlock(inbound.statusCode ?? 502, inbound.statusMessage ?? "", inbound.rawHeaders));
       pipeline(inbound, socket, () => undefined);
     });
-    outbound.on("error", () => socket.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"));
+    outbound.on("error", () => {
+      if (!retried && !socket.destroyed) {
+        setTimeout(() => { void this.tunnel(request, socket, head, true); }, 100);
+        return;
+      }
+      socket.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    });
     outbound.end();
   }
 }

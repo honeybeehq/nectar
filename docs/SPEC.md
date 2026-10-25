@@ -1055,8 +1055,8 @@ nectar publish --mode static --name shell # force it where a recipe would otherw
   and URLs ending `/s/<env>/<token>/`. Recipes preserve a literal root argument in
   `static_root`, recomputed from the current worktree on every publish. Republish keeps
   the token and URL. The loopback
-  port is OS-assigned outside configured env port ranges; one shared tailnet port is
-  allocated outside those ranges, scanning from 10240. Neither uses 443. Concurrent
+  port is OS-assigned; one shared tailnet port is allocated scanning from 10240.
+  Both avoid recorded env ports and reserved service ports, including 443. Concurrent
   publishes serialize singleton startup; foreign tailnet entries are left untouched.
 - **Assets.** GET/HEAD only; `/dir/` serves `dir/index.html`, `/dir` redirects with the
   preview prefix preserved. Relative assets resolve beneath the trailing-slash URL.

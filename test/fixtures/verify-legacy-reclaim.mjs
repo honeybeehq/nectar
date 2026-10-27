@@ -77,6 +77,10 @@ try {
   assert(pidAlive(decoy.pid));
   const refusedDoctor = await service.doctor({ noDaemon: true });
   assert.equal(refusedDoctor.checks.find(c => c.name === 'process-ownership').details.find(d => d.env === wrong.name).action, 'detach');
+  await update(wrong.name, r => { r.exposure = { target: 'missing', kind: 'relay', sub: 'fixture', url: 'https://fixture.invalid', gate: 'none', expires_at: r.expires_at }; });
+  await assert.rejects(call('rm', { env: wrong.name, detach: true }), /cannot confirm route removal/);
+  assert(pidAlive(decoy.pid)); assert(await service.store.maybeEnv(wrong.name));
+  await update(wrong.name, r => { delete r.exposure; });
   const detached = await call('rm', { env: wrong.name, detach: true });
   assert.equal(detached.pgid, decoy.pgid); assert(pidAlive(decoy.pid));
   const audit = JSON.parse(await readFile(detached.audit_path, 'utf8'));
@@ -91,8 +95,22 @@ try {
   const dead = await publish('dead');
   await call('stop', { env: dead.name });
   await update(dead.name, r => { r.status = 'publishing'; delete r.serve.start_time; });
-  await call('ls', {});
+  const broken = structuredClone(await service.store.readEnv(dead.name));
+  broken.name = 'aaa--broken--web'; broken.status = 'publishing';
+  broken.exposure = { target: 'broken', kind: 'relay', control: 'relayd', sub: 'fixture', url: 'https://fixture.invalid', gate: 'none', expires_at: broken.expires_at };
+  await service.store.writeConfig({ ...await service.store.readConfig(), exposures: { broken: { kind: 'relay', control: 'relayd' } } });
+  await service.store.writeEnv(broken);
+  for (let i = 0; ; i++) {
+    await call('ls', {});
+    if ((await readFile(path.join(state, 'recovery.jsonl'), 'utf8').catch(() => '')).includes('publishing_recovery_failed') && (await service.store.readEnv(dead.name)).status === 'stopped') break;
+    assert(i < 100, 'recovery timeout'); await new Promise(r => setTimeout(r, 50));
+  }
   assert.equal((await service.store.readEnv(dead.name)).status, 'stopped');
+  assert.equal((await service.store.readEnv(broken.name)).status, 'publishing');
+  assert((await readFile(path.join(state, 'recovery.jsonl'), 'utf8')).includes('publishing_recovery_failed'));
+  await update(broken.name, r => { delete r.exposure; });
+  for (let i = 0; ; i++) { await call('ls', {}); if ((await service.store.readEnv(broken.name)).status === 'stopped') break; assert(i < 100, 'repaired recovery timeout'); await new Promise(r => setTimeout(r, 50)); }
+  say({ recoveryFailure: 'logged per record; ls and recovery of other records continue' });
   say({ deadPublishing: 'automatically stopped', PASS: true });
 } finally {
   for (const r of records.reverse()) { const current = await service.store.maybeEnv(r.name); if (decoy && current?.serve?.pid === decoy.pid) await update(r.name, x => { x.serve = r.serve; }); await service.stop(r.name).catch(() => {}); }

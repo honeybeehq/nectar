@@ -1124,3 +1124,12 @@ Rejected: guessing ownership from PID, port, command substring or environment;
 blind termination; and deleting an unverifiable record without an audit trail.
 Run `pnpm build && node test/fixtures/verify-legacy-reclaim.mjs` on Linux to exercise
 an isolated nectard, adoption, decoy refusal, detach, republish and dead publishing.
+
+After a daemon restart most pre-upgrade runtimes require detach: their daemon parent
+has gone and an exec-optimized shell no longer has the exact recorded shell argv.
+This intentional refusal is safer than reconstructing or guessing the command.
+The timestamp condition is a lower bound, not a standalone proof against PID reuse;
+all the other identity conditions must also hold. Detach reports retained worktrees,
+dependencies, logs and inbox resources; a later publish may reuse those dependencies.
+Recovery failures are retained in `recovery.jsonl` and do not block other envs or
+supervisor inspection. Plain remote removal omits new flags for older peers.

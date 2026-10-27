@@ -1239,15 +1239,19 @@ export class NectarService {
     if (this.readOnly !== undefined) return;
     for (const snapshot of await this.store.listEnvs()) {
       if (snapshot.status !== "publishing" || (snapshot.serve !== undefined && (pidAlive(snapshot.serve.pid) || groupAlive(snapshot.serve.pgid)))) continue;
-      await this.store.updateEnv(snapshot.name, async (record) => {
-        if (record.status !== "publishing" || (record.serve !== undefined && (pidAlive(record.serve.pid) || groupAlive(record.serve.pgid)))) return;
-        await this.stopRuntime(record);
-        await this.tearDownExposure(record);
-        record.status = "stopped";
-        record.urls = { local: null, mesh: null, public: null };
-        delete record.serve;
-        delete record.liveness;
-      }, { bestEffort: true });
+      try {
+        await this.store.updateEnv(snapshot.name, async (record) => {
+          if (record.status !== "publishing" || (record.serve !== undefined && (pidAlive(record.serve.pid) || groupAlive(record.serve.pgid)))) return;
+          await this.stopRuntime(record);
+          await this.tearDownExposure(record);
+          record.status = "stopped";
+          record.urls = { local: null, mesh: null, public: null };
+          delete record.serve;
+          delete record.liveness;
+        }, { bestEffort: true });
+      } catch (error) {
+        await appendFile(path.join(this.paths.root, "recovery.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event: "publishing_recovery_failed", env: snapshot.name, message: asNectarError(error).message })}\n`, { mode: 0o600 }).catch(() => undefined);
+      }
     }
   }
 
@@ -3335,7 +3339,7 @@ export class NectarService {
     if (isRef(name)) {
       const parsed = parseRef(name);
       if (!(await this.isLocalHost(parsed.host))) {
-        const removed = await this.remote(parsed.host, "rm", { env: parsed.env, force, detach }, ["rm", parsed.env, ...(force ? ["--force"] : []), ...(detach ? ["--detach"] : []), "--json"]);
+        const removed = await this.remote(parsed.host, "rm", { env: parsed.env, ...(force ? { force } : {}), ...(detach ? { detach } : {}) }, ["rm", parsed.env, ...(force ? ["--force"] : []), ...(detach ? ["--detach"] : []), "--json"]);
         if (this.readOnly === undefined) await this.forgetPlacement(parsed.host, parsed.env);
         return removed;
       }
@@ -3345,14 +3349,16 @@ export class NectarService {
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
       if (detach) {
-        await this.tearDownExposure(record);
+        const archived = structuredClone(record);
+        if (record.exposure !== undefined && record.exposure.revoked_at === undefined && (await this.store.readConfig()).exposures?.[record.exposure.target] === undefined) throw new NectarError("E_BUSY", "Exposure target unavailable; detach cannot confirm route removal");
         if (record.serve !== undefined && !(await this.releaseServeEntry(record.serve))) throw new NectarError("E_BUSY", "Route ownership unknown; detach refused");
+        await this.tearDownExposure(record);
         const auditDir = path.join(this.paths.root, "detached");
         await mkdir(auditDir, { recursive: true });
         const auditPath = path.join(auditDir, `${record.name}-${crypto.randomUUID()}.json`);
-        await writeFile(auditPath, JSON.stringify({ status: "stale", detached_at: new Date().toISOString(), record }, null, 2), { mode: 0o600, flag: "wx" });
+        await writeFile(auditPath, JSON.stringify({ status: "stale", detached_at: new Date().toISOString(), record: archived }, null, 2), { mode: 0o600, flag: "wx" });
         await this.store.deleteEnvFile(record.name);
-        return { env: record.name, detached: true, pid: record.serve?.pid ?? null, pgid: record.serve?.pgid ?? null, audit_path: auditPath, hint: "Processes were left untouched; verify the reported PGID before stopping it manually" };
+        return { env: record.name, detached: true, pid: record.serve?.pid ?? null, pgid: record.serve?.pgid ?? null, audit_path: auditPath, retained: { worktree: record.worktree, dependencies: Object.keys(record.deps ?? {}), logs: path.join(this.paths.logs, record.name), inbox: true }, hint: "Processes and dependency resources were left untouched; verify the reported PGID before stopping it manually" };
       }
       if (holdsRuntime(record.status) && !force) {
         throw new NectarError("E_USAGE", `Environment '${name}' is ${record.status}; pass --force to stop and remove it`);

@@ -517,7 +517,7 @@ case "$1" in
       if [ "$left" -le 0 ]; then rm -f '${unloading}' '${loaded}'; else echo $((left - 1)) > '${unloading}'; fi
     fi
     [ -f '${loaded}' ] || exit 113
-    printf '"PID" = %s;\n' "$PPID" ;;
+    printf '%s 0 com.honeybeehq.nectard\n' "$PPID" ;;
   bootstrap)
     left=$(cat '${failures}')
     if [ -f '${loaded}' ] || [ "$left" -gt 0 ]; then
@@ -545,7 +545,7 @@ exit 0`,
     await uninstallUnit(paths, "darwin");
     await expect(access(file)).rejects.toThrow();
     const uid = process.getuid?.() ?? 0;
-    const print = `launchctl list com.honeybeehq.nectard`;
+    const print = `launchctl list`;
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
       print,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,

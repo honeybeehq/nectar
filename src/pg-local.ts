@@ -3,7 +3,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { runCommand, readProcessIdentity, ownershipRefusal, type ProcessIdentity, type CommandResult } from "./commands.js";
+import { runCommand, pidAlive, readProcessIdentity, ownershipRefusal, type ProcessIdentity, type CommandResult } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { portAvailable } from "./ports.js";
 
@@ -284,6 +284,15 @@ export async function ensureCluster(root: string, install: PgInstall, options: E
   });
   await superuserSql(root, install, port, HARDEN_SQL);
   return port;
+}
+
+export async function clusterOwnershipWarning(root: string, major: number): Promise<{ reason: string; hint: string } | undefined> {
+  const files = clusterFiles(root, major);
+  const pid = Number((await readFile(path.join(files.data, "postmaster.pid"), "utf8").catch(() => "")).split("\n")[0]);
+  if (!pidAlive(pid)) return undefined;
+  const state = await readState(files);
+  const reason = state.process === undefined ? "record has no process start time; left alone" : state.process.pid !== pid ? "process PID differs from record; left alone" : ownershipRefusal(state.process);
+  return reason === undefined ? undefined : { reason, hint: `Verify PID ${pid} with ps -o pid,pgid,lstart -p ${pid}; after confirming ownership, run pg_ctl stop -D ${files.data}, then retry cleanup` };
 }
 
 export async function stopCluster(root: string, install: PgInstall): Promise<boolean> {

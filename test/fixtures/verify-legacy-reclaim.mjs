@@ -113,7 +113,7 @@ try {
   say({ recoveryFailure: 'logged per record; ls and recovery of other records continue' });
   say({ deadPublishing: 'automatically stopped', PASS: true });
 } finally {
-  for (const r of records.reverse()) { const current = await service.store.maybeEnv(r.name); if (decoy && current?.serve?.pid === decoy.pid) await update(r.name, x => { x.serve = r.serve; }); await service.stop(r.name).catch(() => {}); }
+  for (const r of records.reverse()) { const current = await service.store.maybeEnv(r.name); if (decoy && current?.serve?.pid === decoy.pid) await update(r.name, x => { x.serve = r.serve; }); else if (current?.serve?.pid === r.serve?.pid && current?.serve?.start_time === undefined && r.serve?.start_time) await update(r.name, x => { x.serve.start_time = r.serve.start_time; }); await service.stop(r.name).catch(() => {}); }
   if (decoy) await stopEnvGroup(decoy);
   if (shellIdentity && pidAlive(shellIdentity.pid)) await stopEnvGroup(shellIdentity);
   daemon.kill('SIGTERM'); await new Promise(resolve => daemon.once('exit', resolve)); await log.close();

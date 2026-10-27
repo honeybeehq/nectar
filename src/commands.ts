@@ -94,7 +94,8 @@ export function spawnDetached(command: string, cwd: string, env: NodeJS.ProcessE
     });
     if (child.pid === undefined) throw new NectarError("E_CHECKOUT", `Could not start serve command '${command}'`);
     child.unref();
-    return { pid: child.pid, pgid: child.pid, ...readProcessIdentity(child.pid) };
+    const identity = readProcessIdentity(child.pid);
+    return { pid: child.pid, pgid: child.pid, ...(identity?.pgid === child.pid ? { start_time: identity.start_time } : {}) };
   } finally {
     closeSync(log);
   }
@@ -117,7 +118,8 @@ export function spawnDetachedExecutable(
     });
     if (child.pid === undefined) throw new NectarError("E_CHECKOUT", `Could not start ${file}`);
     child.unref();
-    return { pid: child.pid, pgid: child.pid, ...readProcessIdentity(child.pid) };
+    const identity = readProcessIdentity(child.pid);
+    return { pid: child.pid, pgid: child.pid, ...(identity?.pgid === child.pid ? { start_time: identity.start_time } : {}) };
   } finally {
     closeSync(log);
   }
@@ -161,6 +163,7 @@ export function readProcessIdentity(pid: number): { pgid: number; start_time: st
 }
 
 export function ownershipRefusal(record: ProcessIdentity): string | undefined {
+  if (!Number.isInteger(record.pid) || record.pid <= 1 || record.pid !== record.pgid) return "record has no dedicated process group; left alone";
   if (record.start_time === undefined) return "record has no process start time; left alone";
   const current = readProcessIdentity(record.pid);
   if (current === undefined) return "process identity unavailable; left alone";
@@ -232,4 +235,8 @@ export function currentPublisher(): { hive_bee?: string; hive_session?: string; 
   const hiveBee = process.env.HIVE_BEE ?? process.env.HIVE_BEE_ID;
   const hiveSession = process.env.HIVE_SESSION ?? process.env.HIVE_SESSION_ID ?? (process.env.HIVE_BEE === undefined ? undefined : process.env.HIVE_BEE_ID);
   return {
-    ...(hiveBee === undefined ? {} : { hive_bee
+    ...(hiveBee === undefined ? {} : { hive_bee: hiveBee }),
+    ...(hiveSession === undefined ? {} : { hive_session: hiveSession }),
+    user: os.userInfo().username,
+  };
+}

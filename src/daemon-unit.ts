@@ -271,7 +271,7 @@ export async function installUnit(
 }
 
 async function agentLoaded(): Promise<boolean> {
-  return (await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`])).exitCode === 0;
+  return (await safely(launchctl(), ["list", LAUNCHD_LABEL])).exitCode === 0;
 }
 
 async function bootout(settleMs: number): Promise<{ unloaded: boolean; waited_ms: number }> {
@@ -316,7 +316,7 @@ export async function uninstallUnit(
     const settleMs = options.settleMs ?? LAUNCHD_SETTLE_MS;
     unload = await bootout(settleMs);
     if (!unload.unloaded) {
-      warnings.push(`launchctl print still finds ${LAUNCHD_LABEL} ${settleMs / 1_000}s after bootout; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL}`);
+      warnings.push(`launchctl list still finds ${LAUNCHD_LABEL} ${settleMs / 1_000}s after bootout; run launchctl bootout ${launchdDomain()}/${LAUNCHD_LABEL}`);
     }
   } else {
     await safely(systemctl(), ["--user", "disable", "--now", SYSTEMD_UNIT]);
@@ -342,11 +342,11 @@ function livePid(value: string | undefined): number | undefined {
 
 async function managerState(kind: UnitPlatform): Promise<ManagerState> {
   if (kind === "darwin") {
-    const printed = await safely(launchctl(), ["print", `${launchdDomain()}/${LAUNCHD_LABEL}`]);
+    const printed = await safely(launchctl(), ["list", LAUNCHD_LABEL]);
     if (printed.exitCode !== 0) return { active: "not-loaded", pid: undefined };
     return {
-      active: /^\s*state = (.+)$/m.exec(printed.stdout)?.[1]?.trim() ?? "loaded",
-      pid: livePid(/^\s*pid = (\d+)/m.exec(printed.stdout)?.[1]),
+      active: /"PID"\s*=\s*\d+/.test(printed.stdout) ? "running" : "loaded",
+      pid: livePid(/"PID"\s*=\s*(\d+)/.exec(printed.stdout)?.[1]),
     };
   }
   const shown = await safely(systemctl(), ["--user", "show", "--property=ActiveState", "--property=MainPID", SYSTEMD_UNIT]);

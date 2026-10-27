@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { existsSync } from "node:fs";
-import { appendFile, copyFile, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, appendFile, copyFile, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import {
   archiveCommit,
   currentBranch,
@@ -3970,6 +3970,18 @@ export class NectarService {
           : { hint: "Remove by hand with `tailscale serve --https=<port> off` once you know whose it is", details: found.map(detail) }),
       });
     }
+    const auxiliary: Array<{ runtime: string; reason: string; hint: string }> = [];
+    const shared = await readFile(path.join(this.paths.root, "shared-static.json"), "utf8").then((text) => JSON.parse(text) as { pid: number; pgid: number; start_time?: string }).catch(() => undefined);
+    const auxiliaryRecords = [
+      ...(shared === undefined ? [] : [{ runtime: "shared static", ...shared }]),
+      ...(config.pack_server_pid === undefined ? [] : [{ runtime: "pack server", pid: config.pack_server_pid, pgid: config.pack_server_pgid ?? 0, ...(config.pack_server_start_time === undefined ? {} : { start_time: config.pack_server_start_time }) }]),
+    ];
+    for (const runtime of auxiliaryRecords) {
+      if (!pidAlive(runtime.pid)) continue;
+      const reason = ownershipRefusal(runtime);
+      if (reason !== undefined) auxiliary.push({ runtime: runtime.runtime, reason, hint: `Verify PID ${runtime.pid} and PGID ${runtime.pgid} with ps -o pid,pgid,lstart -p ${runtime.pid}; after confirming ownership, stop the runtime manually, then retry` });
+    }
+    checks.push({ name: "auxiliary-ownership", status: auxiliary.length === 0 ? "pass" : "warn", message: auxiliary.length === 0 ? "Auxiliary process identities match" : "Auxiliary runtime ownership unknown; left alone", details: auxiliary });
     const clusterWarnings = (await Promise.all((await clusterMajors(this.paths.root)).map(async (major) => {
       const warning = await clusterOwnershipWarning(this.paths.root, major);
       return warning === undefined ? [] : [{ major, ...warning }];

@@ -198,10 +198,10 @@ export function groupBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
 
 export async function stopEnvGroup(record: ProcessIdentity): Promise<boolean> {
   if (record.pid === 0 && record.pgid === 0) return false;
-  if (!Number.isInteger(record.pgid) || record.pgid <= 1) throw new NectarError("E_BUSY", "Runtime ownership unknown: record has no dedicated process group; left alone");
+  if (!Number.isInteger(record.pgid) || record.pgid <= 1) throw new NectarError("E_BUSY", "Runtime ownership unknown: record has no dedicated process group; left alone", { ownership_refusal: true });
   if (!groupAlive(record.pgid)) return false;
   const refusal = ownershipRefusal(record);
-  if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { hint: `Verify PID ${record.pid} and PGID ${record.pgid} with ps -o pid,pgid,lstart -p ${record.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
+  if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { ownership_refusal: true, hint: `Verify PID ${record.pid} and PGID ${record.pgid} with ps -o pid,pgid,lstart -p ${record.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
   await stopProcessGroup(record.pgid, 2_000, record);
   return true;
 }
@@ -232,7 +232,7 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000, identity?: 
   if (groupAlive()) {
     if (identity !== undefined) {
       const refusal = ownershipRefusal(identity);
-      if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { hint: `Verify PID ${identity.pid} and PGID ${identity.pgid} with ps -o pid,pgid,lstart -p ${identity.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
+      if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { ownership_refusal: true, hint: `Verify PID ${identity.pid} and PGID ${identity.pgid} with ps -o pid,pgid,lstart -p ${identity.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
     }
     try {
       process.kill(-pgid, "SIGKILL");

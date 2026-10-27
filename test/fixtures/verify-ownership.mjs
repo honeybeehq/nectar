@@ -55,9 +55,11 @@ try {
   say({ ownedGcReap: 'stopped and removed', pid: reaped.serve.pid });
   const fixed = await publish('doctor');
   await service.store.updateEnv(fixed.name, r => { r.proof_terminal_since = new Date(Date.now() - 26 * 3600000).toISOString(); });
-  await service.doctor({ fix: true, noDaemon: true }); assert(!pidAlive(fixed.serve.pid)); assert.equal((await service.store.readEnv(fixed.name)).status, 'serving');
-  say({ ownedDoctorFix: 'stopped owned runtime; retained record', PASS: true });
+  await service.doctor({ fix: true, noDaemon: true }); assert(!pidAlive(fixed.serve.pid)); assert(!await service.store.maybeEnv(fixed.name));
+  say({ ownedDoctorFix: 'stopped and removed', PASS: true });
 } finally {
   await stopEnvGroup(decoy);
+  const config = await service.store.readConfig();
+  if (config.pack_server_pid && config.pack_server_start_time) await stopEnvGroup({ pid: config.pack_server_pid, pgid: config.pack_server_pgid, start_time: config.pack_server_start_time });
   for (const r of records) { if (await service.store.maybeEnv(r.name)) { await service.store.updateEnv(r.name, current => { current.serve = r.serve; }); await service.stop(r.name); } }
 }

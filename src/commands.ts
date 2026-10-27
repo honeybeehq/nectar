@@ -236,6 +236,8 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000, identity?: 
     }
     try {
       process.kill(-pgid, "SIGKILL");
+      const killedDeadline = Date.now() + waitMs;
+      while (groupAlive() && Date.now() < killedDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ESRCH" && code !== "EPERM") throw error;

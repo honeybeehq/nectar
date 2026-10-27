@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile, readFile, open, chmod } from 'node:fs/promis
 import path from 'node:path';
 import { NectarService } from '../../dist/service.js';
 import { daemonHello, callDaemon } from '../../dist/control.js';
-import { pidAlive } from '../../dist/commands.js';
+import { pidAlive, stopEnvGroup } from '../../dist/commands.js';
 import { portOpen } from '../../dist/ports.js';
 import { serveEntries, serveStatus, stopServe } from '../../dist/tailscale.js';
 const root = path.resolve(process.argv[2] ?? `.audit/combined-${Date.now()}`);
@@ -79,7 +79,7 @@ try{
  const gc=await service.gc();say({gc});assert(gc.transitions.some(t=>t.env===proofs[0].env&&t.action==='reap'));assert(!await service.store.maybeEnv(proofs[0].env));
  assert(gc.skipped.some(t=>t.env===proofs[1].env&&t.reason.includes('waiting')));assert(gc.skipped.some(t=>t.env===proofs[2].env&&t.reason.includes('exited 1')));
  for(const r of proofs.slice(1))await curl(r.preview_url,'T7 combined static');
- const oldShared=shared.pid;await halt();process.kill(oldShared,'SIGTERM');await until(async()=>!pidAlive(oldShared));delete process.env.NECTAR_PROOF_LOOKUP;await start();
+ const oldShared=shared.pid;await halt();await stopEnvGroup(shared);await until(async()=>!pidAlive(oldShared));delete process.env.NECTAR_PROOF_LOOKUP;await start();
  await until(async()=>{const info=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));return info.pid!==oldShared&&pidAlive(info.pid);});shared=JSON.parse(await readFile(path.join(state,'shared-static.json'),'utf8'));
  await service.store.updateEnv(statics[0].env,r=>{r.expires_at=new Date(Date.now()-1000).toISOString();});
  await curl(statics[0].preview_url,'T7 combined static');const noAdapter=await service.gc();assert(noAdapter.skipped.some(r=>r.env===statics[0].env&&r.reason.includes('not configured')));say({noAdapterExpiredStatic:200,gcRetained:true,skipReason:noAdapter.skipped.find(r=>r.env===statics[0].env)?.reason,singletonRestartRequiredForAdapterChange:true});
@@ -88,7 +88,7 @@ try{
  const records=await service.store.listEnvs();for(const r of records)if(r.serve?.pid>1)pids.add(r.serve.pid);
  for(const r of records){await until(async()=>{try{await service.stop(r.name);return true;}catch(e){if(e.code!=='E_BUSY')throw e;return false;}});}
  if(daemon?.exitCode===null&&daemon.signalCode===null)await halt();
- if(shared){const owned=serveEntries(await serveStatus()).filter(e=>e.tailnetPort===shared.tailnetPort);assert(owned.every(e=>e.target===shared.tailnetTarget));await stopServe(shared.tailnetPort);if(pidAlive(shared.pid))process.kill(shared.pid,'SIGTERM');}
+ if(shared){const owned=serveEntries(await serveStatus()).filter(e=>e.tailnetPort===shared.tailnetPort);assert(owned.every(e=>e.target===shared.tailnetTarget));await stopServe(shared.tailnetPort);if(pidAlive(shared.pid))await stopEnvGroup(shared);}
  await log.close();await until(async()=>[...pids].every(pid=>!pidAlive(pid)));
  const remaining=serveEntries(await serveStatus()).filter(e=>records.some(r=>r.serve?.tailnet_port===e.tailnetPort)||e.tailnetPort===shared?.tailnetPort);assert.equal(remaining.length,0);say({cleanup:true,appPidsGone:pids.size,remainingOwnedRoutes:0});
 }

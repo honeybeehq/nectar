@@ -365,7 +365,7 @@ describe("supervisor against the real service", () => {
     const after = await service.store.readEnv(published.env);
     expect(pidAlive(sleeper.pid)).toBe(true);
     expect(after.status).toBe("serving");
-    expect(after.serve?.pid).not.toBe(sleeper.pid);
+    expect(after.serve?.pid).toBe(sleeper.pid);
   });
 
   it("gives up on a crash loop: marks the env, removes its tailscale entry, keeps the record", async () => {

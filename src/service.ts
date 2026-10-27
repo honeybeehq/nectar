@@ -2604,6 +2604,7 @@ export class NectarService {
       const serve = record.serve;
       if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
       const identity = await this.identity();
+      if (groupAlive(serve.pgid) && ownershipRefusal(serve) !== undefined) await stopEnvGroup(serve);
       if (options.kill) await stopEnvGroup(serve);
       const isStatic = serve.cmd.includes("static-server.js");
       const recipe = isStatic
@@ -3793,6 +3794,7 @@ export class NectarService {
       pack_server_port: port,
       pack_server_pid: child.pid,
       pack_server_pgid: child.pgid,
+      ...(child.start_time === undefined ? {} : { pack_server_start_time: child.start_time }),
     };
     await this.store.writeConfig(updated);
     return { config: updated, started: true };

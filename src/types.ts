@@ -265,6 +265,7 @@ export interface MachineConfig {
   pack_server_port: number;
   pack_server_pid?: number;
   pack_server_pgid?: number;
+  pack_server_start_time?: string;
   tailnet_host?: string;
   tailnet_dns_name?: string;
   last_gc_at?: string;

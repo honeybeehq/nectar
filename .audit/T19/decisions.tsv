@@ -1,3 +1,4 @@
 ts	phase	decision	why	evidence	result
 2026-10-27T15:11:30Z	ownership	Use PID plus dedicated PGID plus OS start identity	Avoid reading process environments and refuse ambiguous cleanup	src/commands.ts	implementation in progress
 2026-10-27T15:16:03Z	review	Add a persistent runtime leader and preserve fail-closed legacy refusal	Reviewer found backgrounding wrappers could lose their leader; orchestrator confirmed no force bypass	src/runtime-launcher.ts	verification in progress
+2026-10-27T15:20:51Z	verification	Demand and ownership fixtures pass; combined restart fixture needs group-aware stop	Stable leader PID represents the launcher rather than the HTTP worker	.audit/T19/demand-final.log; .audit/T19/ownership-final.log	PASS for demand and ownership; combined rerunning

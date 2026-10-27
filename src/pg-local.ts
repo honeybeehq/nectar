@@ -3,7 +3,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { runCommand, type CommandResult } from "./commands.js";
+import { runCommand, readProcessIdentity, ownershipRefusal, type ProcessIdentity, type CommandResult } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { portAvailable } from "./ports.js";
 
@@ -213,9 +213,9 @@ async function tool(install: PgInstall, name: (typeof PG_TOOLS)[number], args: s
   });
 }
 
-async function readState(files: ClusterFiles): Promise<{ port?: number }> {
+async function readState(files: ClusterFiles): Promise<{ port?: number; process?: ProcessIdentity }> {
   try {
-    return JSON.parse(await readFile(files.state, "utf8")) as { port?: number };
+    return JSON.parse(await readFile(files.state, "utf8")) as { port?: number; process?: ProcessIdentity };
   } catch {
     return {};
   }
@@ -277,6 +277,9 @@ export async function ensureCluster(root: string, install: PgInstall, options: E
         log_tail: [...tail(result), ...(await logTail(files.log))].slice(-40),
       });
     }
+    const pid = Number((await readFile(path.join(files.data, "postmaster.pid"), "utf8").catch(() => "")).split("\n")[0]);
+    const identity = readProcessIdentity(pid);
+    await writePrivate(files.state, `${JSON.stringify({ port: chosen, bindir: install.bindir, version: install.version, ...(identity === undefined ? {} : { process: { pid, ...identity } }) }, null, 2)}\n`);
     return chosen;
   });
   await superuserSql(root, install, port, HARDEN_SQL);
@@ -286,6 +289,10 @@ export async function ensureCluster(root: string, install: PgInstall, options: E
 export async function stopCluster(root: string, install: PgInstall): Promise<boolean> {
   if (!(await clusterRunning(root, install))) return false;
   const files = clusterFiles(root, install.major);
+  const state = await readState(files);
+  const currentPid = Number((await readFile(path.join(files.data, "postmaster.pid"), "utf8").catch(() => "")).split("\n")[0]);
+  const refusal = state.process !== undefined && currentPid !== state.process.pid ? "process PID differs from record; left alone" : state.process === undefined ? "record has no process start time; left alone" : ownershipRefusal(state.process);
+  if (refusal !== undefined) throw new NectarError("E_BUSY", `Local Postgres ownership unknown: ${refusal}`);
   const result = await tool(install, "pg_ctl", ["stop", "-D", files.data, "-m", "fast", "-w", "-t", String(START_TIMEOUT_S)]);
   if (result.exitCode !== 0) throw new NectarError("E_DEPS", `Could not stop the local Postgres ${install.major} cluster at ${files.data}`, { log_tail: tail(result) });
   return true;

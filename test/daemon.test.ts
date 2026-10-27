@@ -406,15 +406,15 @@ describe("supervisor against the real service", () => {
 });
 
 describe("process ownership", () => {
-  it("recognises a process by the NECTAR_ENV it was started with", async () => {
+  it("recognises only the recorded process start identity", async () => {
     const dir = await tempDir("daemon-owner");
     const child = spawnDetached("exec sleep 30", dir, { ...process.env, NECTAR_ENV: "demo--main--web" }, path.join(dir, "log"));
     try {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(await processBelongsToEnv(child.pid, "demo--main--web")).toBe(true);
-      expect(await processBelongsToEnv(child.pid, "other--main--web")).toBe(false);
-      expect(await processBelongsToEnv(process.pid, "demo--main--web")).toBe(false);
-      expect(await processBelongsToEnv(999_999_999, "demo--main--web")).toBe(false);
+      expect(await processBelongsToEnv(child)).toBe(true);
+      expect(await processBelongsToEnv({ ...child, start_time: "stale" })).toBe(false);
+      expect(await processBelongsToEnv({ pid: process.pid, pgid: process.pid })).toBe(false);
+      expect(await processBelongsToEnv({ pid: 999_999_999, pgid: 999_999_999 })).toBe(false);
     } finally {
       await stopProcessGroup(child.pgid);
     }
@@ -511,13 +511,13 @@ describe("service units", () => {
         `echo "launchctl $*" >> '${calls}'
 case "$1" in
   bootout) [ -f '${loaded}' ] && echo ${options.unloadPrints ?? 0} > '${unloading}' ;;
-  print)
+  list)
     if [ -f '${unloading}' ]; then
       left=$(cat '${unloading}')
       if [ "$left" -le 0 ]; then rm -f '${unloading}' '${loaded}'; else echo $((left - 1)) > '${unloading}'; fi
     fi
     [ -f '${loaded}' ] || exit 113
-    printf 'state = running\npid = %s\n' "$PPID" ;;
+    printf '"PID" = %s;\n' "$PPID" ;;
   bootstrap)
     left=$(cat '${failures}')
     if [ -f '${loaded}' ] || [ "$left" -gt 0 ]; then
@@ -545,7 +545,7 @@ exit 0`,
     await uninstallUnit(paths, "darwin");
     await expect(access(file)).rejects.toThrow();
     const uid = process.getuid?.() ?? 0;
-    const print = `launchctl print gui/${uid}/com.honeybeehq.nectard`;
+    const print = `launchctl list com.honeybeehq.nectard`;
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
       print,
       `launchctl bootout gui/${uid}/com.honeybeehq.nectard`,
@@ -558,13 +558,13 @@ exit 0`,
     ]);
   });
 
-  it("uninstall waits until launchctl print no longer finds the agent and reports it", async () => {
+  it("uninstall waits until launchctl list no longer finds the agent and reports it", async () => {
     const { home, calls, file } = await fakeLaunchd({ loaded: true, unloadPrints: 3 });
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, "<plist>installed</plist>");
     const removed = await uninstallUnit(getPaths(path.join(home, ".nectar")), "darwin");
     expect(removed).toMatchObject({ removed: true, unloaded: true, warnings: [] });
-    expect(await launchctlCalls(calls, "print")).toHaveLength(4);
+    expect(await launchctlCalls(calls, "list")).toHaveLength(4);
   });
 
   it("uninstall gives up waiting after its bound and says the agent is still loaded", async () => {
@@ -633,7 +633,7 @@ exit 0`,
     await expect(failed).rejects.toThrow("left it failed");
   });
 
-  it("daemon status reads the live pid from launchctl print right after install", async () => {
+  it("daemon status reads the live pid from launchctl list right after install", async () => {
     const { home } = await fakeLaunchd();
     const paths = getPaths(path.join(home, ".nectar"));
     expect(await installUnit(paths, "darwin")).toMatchObject({ active: "running", pid: process.pid, pid_source: "launchctl" });

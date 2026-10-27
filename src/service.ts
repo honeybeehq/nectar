@@ -3969,9 +3969,9 @@ export class NectarService {
     }
     const unknown = (await this.store.listEnvs()).flatMap((record) => {
       const serve = record.serve;
-      if (serve === undefined || serve.pid === 0) return [];
+      if (serve === undefined || serve.pid === 0 || (!groupAlive(serve.pgid) && serve.start_time !== undefined)) return [];
       const reason = ownershipRefusal(serve);
-      return reason === undefined ? [] : [{ env: record.name, reason }];
+      return reason === undefined ? [] : [{ env: record.name, pid: serve.pid, pgid: serve.pgid, reason, hint: `Verify with ps -o pid,pgid,lstart -p ${serve.pid}; after confirming ownership, stop PGID ${serve.pgid} manually, then retry nectar stop ${record.name} or nectar rm ${record.name} --force` }];
     });
     checks.push({ name: "process-ownership", status: unknown.length === 0 ? "pass" : "warn", message: unknown.length === 0 ? "All recorded process identities match" : "Runtime ownership unknown; left alone", details: unknown });
     const gcPlan = await this.gc({ dryRun: true });

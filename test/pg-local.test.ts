@@ -12,6 +12,8 @@ import {
   pgIdentifier,
   quoteIdent,
   quoteLiteral,
+  clusterMajors,
+  clusterFiles,
 } from "../src/pg-local.js";
 import { loadRecipe } from "../src/recipe.js";
 import { NectarService } from "../src/service.js";
@@ -26,6 +28,11 @@ afterEach(async () => {
       const record = await item.service.store.maybeEnv(env).catch(() => undefined);
       if (record?.serve !== undefined) await stopProcessGroup(record.serve.pgid).catch(() => undefined);
     }
+    for (const major of await clusterMajors(item.service.paths.root)) {
+      const files = clusterFiles(item.service.paths.root, major);
+      const pid = Number(await readFile(path.join(files.data, "postmaster.pid"), "utf8").catch(() => ""));
+      if (pid > 1) await stopProcessGroup(pid).catch(() => undefined);
+    }
     const config = await item.service.store.readConfig().catch(() => undefined);
     if (config?.pack_server_pgid !== undefined) await stopProcessGroup(config.pack_server_pgid).catch(() => undefined);
   }
@@ -39,7 +46,7 @@ async function fakePg(directory: string, major: number, log: string, tools = ["i
   const scripts: Record<string, string> = {
     postgres: `echo "postgres (PostgreSQL) ${major}.4"`,
     initdb: `${dataArg}\nmkdir -p "$D" && echo ${major} > "$D/PG_VERSION" && touch "$D/postgresql.conf"\necho "initdb ${major} $*" >> ${log}`,
-    pg_ctl: `${dataArg}\ncase "$1" in\n  status) [ -f "$D/fake-running" ] ;;\n  start) touch "$D/fake-running"; echo "pg_ctl start ${major}" >> ${log} ;;\n  stop) rm -f "$D/fake-running"; echo "pg_ctl stop ${major}" >> ${log} ;;\nesac`,
+    pg_ctl: `${dataArg}\ncase "$1" in\n  status) [ -f "$D/fake-running" ] ;;\n  start) ${process.execPath} -e 'const{spawn}=require("node:child_process");const{writeFileSync}=require("node:fs");const c=spawn("sleep",["300"],{detached:true,stdio:"ignore"});writeFileSync(process.argv[1]+"/postmaster.pid",String(c.pid));c.unref();' "$D"; touch "$D/fake-running"; echo "pg_ctl start ${major}" >> ${log} ;;\n  stop) kill "$(cat "$D/postmaster.pid")"; rm -f "$D/fake-running"; echo "pg_ctl stop ${major}" >> ${log} ;;\nesac`,
     psql: `port=""; prev=""; for arg in "$@"; do [ "$prev" = "-p" ] && port="$arg"; prev="$arg"; done\nsql=$(cat)\nprintf 'psql ${major} port=%s\\n%s\\n' "$port" "$sql" >> ${log}\ncase "$(cat ${log}.fail 2>/dev/null):$sql" in\n  1:*"CREATE ROLE"*) printf 'ERROR: boom as %s\\nLINE 3: %s\\n' "$PGPASSWORD" "$sql" >&2; exit 3 ;;\nesac`,
   };
   for (const tool of tools) await fakeExecutable(bindir, tool, scripts[tool] ?? "");

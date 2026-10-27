@@ -271,7 +271,7 @@ export async function installUnit(
 }
 
 async function agentLoaded(): Promise<boolean> {
-  return (await safely(launchctl(), ["list", LAUNCHD_LABEL])).exitCode === 0;
+  return (await managerState("darwin")).active !== "not-loaded";
 }
 
 async function bootout(settleMs: number): Promise<{ unloaded: boolean; waited_ms: number }> {
@@ -342,12 +342,11 @@ function livePid(value: string | undefined): number | undefined {
 
 async function managerState(kind: UnitPlatform): Promise<ManagerState> {
   if (kind === "darwin") {
-    const printed = await safely(launchctl(), ["list", LAUNCHD_LABEL]);
-    if (printed.exitCode !== 0) return { active: "not-loaded", pid: undefined };
-    return {
-      active: /"PID"\s*=\s*\d+/.test(printed.stdout) ? "running" : "loaded",
-      pid: livePid(/"PID"\s*=\s*(\d+)/.exec(printed.stdout)?.[1]),
-    };
+    const listed = await safely(launchctl(), ["list"]);
+    const row = listed.stdout.split("\n").map((line) => line.trim().split(/\s+/)).find((fields) => fields[2] === LAUNCHD_LABEL);
+    if (listed.exitCode !== 0 || row === undefined) return { active: "not-loaded", pid: undefined };
+    const pid = livePid(row[0]);
+    return { active: pid === undefined ? "loaded" : "running", pid };
   }
   const shown = await safely(systemctl(), ["--user", "show", "--property=ActiveState", "--property=MainPID", SYSTEMD_UNIT]);
   if (shown.exitCode !== 0) return { active: "unknown", pid: undefined };

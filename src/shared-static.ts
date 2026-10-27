@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { pidAlive, runCommand, scrubbedEnvironment, spawnDetachedExecutable, stopProcessGroup } from "./commands.js";
+import { pidAlive, readProcessIdentity, scrubbedEnvironment, spawnDetachedExecutable, stopEnvGroup } from "./commands.js";
 import { NectarError } from "./errors.js";
 import { getPaths } from "./paths.js";
 import { allocatePort, portAvailable } from "./ports.js";
@@ -15,6 +15,8 @@ import { serveEntries, rootMount, serveStatus, serveWeb, statusPorts } from "./t
 
 interface SharedStatic {
   pid: number;
+  pgid: number;
+  start_time?: string;
   port: number;
   secret: string;
   tailnetPort?: number;
@@ -58,11 +60,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
       if (info !== undefined && pidAlive(info.pid)) {
         const current = await metadata(store);
         if (current?.pid !== info.pid || current.secret !== info.secret) throw new NectarError("E_BUSY", "Shared static server changed during recovery");
-        const command = await runCommand("ps", ["-o", "args=", "-p", String(info.pid)], { timeoutMs: 2_000 });
-        if (!command.stdout.includes(info.secret) || !command.stdout.includes("shared-static.") || !command.stdout.includes(store.paths.root)) {
-          throw new NectarError("E_SERVE_TIMEOUT", "Shared static server PID no longer identifies Nectar's process; left alone");
-        }
-        await stopProcessGroup(info.pid);
+        await stopEnvGroup(info);
         for (let attempt = 0; attempt < 20 && pidAlive(info.pid); attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
@@ -190,7 +188,7 @@ async function run(root: string, port: number, secret: string): Promise<void> {
   }
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Missing shared static listener");
-  await atomicJson(metadataFile(store), { pid: process.pid, port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
+  await atomicJson(metadataFile(store), { pid: process.pid, ...readProcessIdentity(process.pid), port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
   process.stdout.write(`shared static server pid=${process.pid} port=${address.port}\n`);
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => server.close(() => process.exit(0)));
 }

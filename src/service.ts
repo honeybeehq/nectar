@@ -36,14 +36,12 @@ import {
   groupBelongsToEnv,
   ownershipRefusal,
   groupAlive,
-  processBelongsToEnv,
   runCommand,
   runShell,
   scrubbedEnvironment,
   spawnDetached,
   spawnDetachedExecutable,
   stopEnvGroup,
-  stopProcessGroup,
 } from "./commands.js";
 import { expiresAt, formatRemaining, parseDuration } from "./duration.js";
 import { asNectarError, isErrorCode, NectarError } from "./errors.js";
@@ -1219,7 +1217,8 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      await Promise.all([stopEnvGroup(record.serve), this.releaseServeEntry(record.serve)]);
+      await stopEnvGroup(record.serve);
+      await this.releaseServeEntry(record.serve);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
   }
@@ -1247,6 +1246,7 @@ export class NectarService {
       );
       if (!processCleanup.ok) {
         cleanupErrors.push(`process group ${owned.pgid}: ${String(processCleanup.error)}`);
+        return cleanupErrors;
       }
       if (owned.tailnet_port !== undefined) {
         if (await this.foreignServeAt(owned)) {
@@ -1475,6 +1475,7 @@ export class NectarService {
       await stopEnvGroup(old.serve);
       record.serve.pid = 0;
       record.serve.pgid = 0;
+      delete record.serve.start_time;
       delete record.serve.upstream_port;
     } else {
       await this.stopRuntime(old);
@@ -1787,7 +1788,7 @@ export class NectarService {
     record: EnvRecord,
     identity: MachineIdentity,
     old: EnvRecord | undefined,
-    spawnCommand: (upstreamPort: number) => { pid: number; pgid: number; cmd: string },
+    spawnCommand: (upstreamPort: number) => { pid: number; pgid: number; start_time?: string; cmd: string },
   ): Promise<{ upstreamPort: number; tailnetPort: number; foreignPort?: number }> {
     return this.store.withLock(PORTS_LOCK, async () => {
       const live = await this.store.listEnvs();
@@ -1833,6 +1834,7 @@ export class NectarService {
         cmd: spawned.cmd,
         pid: spawned.pid,
         pgid: spawned.pgid,
+        ...(spawned.start_time === undefined ? {} : { start_time: spawned.start_time }),
         upstream_port: upstreamPort,
         tailnet_port: tailnetPort,
         ...(proxyPort === undefined ? {} : { proxy_port: proxyPort }),
@@ -1940,6 +1942,7 @@ export class NectarService {
       await this.stopDeps(record);
       record.serve.pid = 0;
       record.serve.pgid = 0;
+      delete record.serve.start_time;
       delete record.serve.upstream_port;
       record.urls.local = `http://127.0.0.1:${record.serve.proxy_port}`;
     } else {
@@ -2159,7 +2162,7 @@ export class NectarService {
       ...(target === undefined ? {} : { NECTAR_OPEN_TARGET: target }),
     });
     const child = spawnDetached(recipe.run, record.worktree, childEnv, log);
-    record.serve = { cmd: recipe.run, pid: child.pid, pgid: child.pgid };
+    record.serve = { cmd: recipe.run, ...child };
     record.status = "publishing";
     await this.store.writeEnv(record);
     if (!(await this.waitDevReady(readyFile, child.pid, recipe.readyTimeoutMs))) {
@@ -2601,7 +2604,7 @@ export class NectarService {
       const serve = record.serve;
       if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
       const identity = await this.identity();
-      if (options.kill && (await processBelongsToEnv(serve))) await stopProcessGroup(serve.pgid);
+      if (options.kill) await stopEnvGroup(serve);
       const isStatic = serve.cmd.includes("static-server.js");
       const recipe = isStatic
         ? staticWebRecipe()
@@ -2647,7 +2650,7 @@ export class NectarService {
       await this.store.writeEnv(record);
       const readyUrl = await this.waitReady(serve.upstream_port, readyPath, readyTimeoutMs);
       if (readyUrl === undefined) {
-        await stopProcessGroup(spawned.pgid);
+        await stopEnvGroup(spawned);
         return fail("E_SERVE_TIMEOUT", `Serve did not return HTTP 200 at ${readyPath} within ${readyTimeoutMs}ms`);
       }
       if (record.serve !== undefined) record.serve.upstream_host = readyUrl.hostname.replace(/^\[|\]$/g, "");
@@ -3214,7 +3217,7 @@ export class NectarService {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       if (!(await portOpen(port))) {
-        await stopProcessGroup(child.pgid);
+        await stopEnvGroup(child);
         return { ax_warning: "AX bridge did not start; see ax-bridge log" };
       }
       return { ax_url: `http://127.0.0.1:${port}/ax`, ax_pid: child.pid };
@@ -3648,7 +3651,7 @@ export class NectarService {
           const currentAction = transition(record);
           if (currentAction === undefined) return;
           if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve))) {
-            throw new NectarError("E_BUSY", "Runtime ownership unresolved; left alone");
+            throw new NectarError("E_BUSY", `Runtime ownership unknown: ${ownershipRefusal(record.serve)}`);
           }
           if (currentAction === "idle-stop") {
             await this.sleepRuntime(record);
@@ -3780,7 +3783,7 @@ export class NectarService {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     if (!(await portOpen(port))) {
-      await stopProcessGroup(child.pgid);
+      await stopEnvGroup(child);
       throw new NectarError("E_INTERNAL", `Read-only pack server did not start on 127.0.0.1:${port}`, {
         log_tail: await logTail(this.paths, "pack-store"),
       });
@@ -3964,6 +3967,13 @@ export class NectarService {
           : { hint: "Remove by hand with `tailscale serve --https=<port> off` once you know whose it is", details: found.map(detail) }),
       });
     }
+    const unknown = (await this.store.listEnvs()).flatMap((record) => {
+      const serve = record.serve;
+      if (serve === undefined || serve.pid === 0) return [];
+      const reason = ownershipRefusal(serve);
+      return reason === undefined ? [] : [{ env: record.name, reason }];
+    });
+    checks.push({ name: "process-ownership", status: unknown.length === 0 ? "pass" : "warn", message: unknown.length === 0 ? "All recorded process identities match" : "Runtime ownership unknown; left alone", details: unknown });
     const gcPlan = await this.gc({ dryRun: true });
     const holders = await this.deadHolders(status);
     const pending = gcPlan.transitions.filter((item) => item.action !== "idle-stop");

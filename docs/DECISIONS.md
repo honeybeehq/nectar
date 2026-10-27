@@ -961,17 +961,15 @@ breaking proof links. New static publishes (including static-server recipes) do 
 allocate per-preview ports/processes or enter memory admission. Stop affects only the
 record. Each request reads and validates that record's token, status and expiry, returns
 410 with an explicit message after expiry, and leaves cleanup to GC's expire/cold/reap.
-Shared static routes do not enter the dynamic proxy hub. Public relay origin validation
-currently accepts only origin URLs in the old port range; shared paths require a relay
-contract update before public exposure can support them.
+Shared static routes do not enter the dynamic proxy hub.
 
-## Proof-aware retirement (2026-10-24)
+## D37 — Proof-aware retirement (2026-10-24)
 
 GC retains previews while any linked proof waits for Tormod, independently of publisher session state and TTL. Terminal proofs receive 24 hours from the first successful terminal observation, persisted as `proof_terminal_since`. Waiting proofs reset that clock, so a reopened proof receives a fresh grace period. Failed reads preserve the clock but prevent retirement until a successful read. Unlinked previews retain the existing one-hour inactive-owner rule. Pinned and main bench previews remain protected.
 
 Apiary currently offers scoped Project reads and a Champion waiting list, neither a complete host-level preview lookup. Until it supplies that interface, `NECTAR_PROOF_LOOKUP` names an executable adapter, invoked directly without a shell. It receives versioned preview identity on stdin and returns a complete aggregate state. No adapter, timeout, invalid JSON or nonzero exit keeps the preview and records a reason. A missing service must cost storage rather than a reviewer's preview.
 
-## D36 — Keep dynamic preview listeners while their apps sleep
+## D38 — Keep dynamic preview listeners while their apps sleep
 
 **Chose:** extend nectard's existing per-env HTTP proxy with a serialized wake before
 forwarding. A warm web record retains its proxy/tailnet ports, has zero pid/pgid and
@@ -989,7 +987,7 @@ while serving; only a cold wake takes the lock. Activity writes remain throttled
 change on the next publish, as before.
 
 
-## D36 — Available TCP ports, not 100-port preview slots
+## D39 — Available TCP ports, not 100-port preview slots
 
 **Chose:** widen the default upstream range to 4100–65535 and mesh range to
 8443–65535, migrating saved old defaults on read while preserving custom ranges.
@@ -1042,8 +1040,7 @@ Rollback: old relayd treats a static upstream as unreadable state and refuses st
 for the whole state file. Before downgrading, remove static public routes through the
 upgraded admin API/CLI; retain origin routes. Do not edit live state manually. Directory
 Location rewriting handles relative headers as emitted by the shared server today.
-## D37 — Available TCP ports across the full configured ranges
-## D39 — Reclaim idle runtime capacity before refusing a preview
+## D40 — Reclaim idle runtime capacity before refusing a preview
 
 On memory admission or TCP exhaustion, retry after sleeping the least recently viewed
 running dynamic web preview. The daemon's live proxy activity wins over throttled

@@ -235,8 +235,8 @@ export async function installUnit(
       await bootstrapAgent(file);
     }
   } else {
-    const session = await safely(systemctl(), ["--user", "show-environment"]);
-    if (session.exitCode !== 0) {
+    const session = await safely(systemctl(), ["--user", "is-system-running"]);
+    if (!["running", "degraded", "starting", "initializing"].includes(session.stdout.trim())) {
       throw new NectarError("E_PLATFORM", `No systemd --user session for this user (${session.stderr.trim()}); log in once or run loginctl enable-linger ${os.userInfo().username}`);
     }
     await writeFile(file, systemdUnit(spec), { mode: 0o644 });

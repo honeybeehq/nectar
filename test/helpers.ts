@@ -134,6 +134,7 @@ export async function fakeServiceManager(directory: string): Promise<{ calls: st
       "systemctl",
       `echo "systemctl $*" >> '${calls}'
 case "$2" in
+  is-system-running) echo running ;;
   restart) : > '${state}' ;;
   disable) rm -f '${state}' ;;
   is-active) if [ -f '${state}' ]; then echo active; else echo inactive; exit 3; fi ;;

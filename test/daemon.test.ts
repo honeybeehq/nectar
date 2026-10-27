@@ -467,7 +467,7 @@ describe("service units", () => {
     vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
     vi.stubEnv(
       "NECTAR_SYSTEMCTL_BIN",
-      await fakeExecutable(fakeDir, "systemctl", `echo "systemctl $*" >> ${calls}; [ "$2" = "show" ] && printf 'ActiveState=active\\nMainPID=${process.pid}\\n'; exit 0`),
+      await fakeExecutable(fakeDir, "systemctl", `echo "systemctl $*" >> ${calls}; [ "$2" = "is-system-running" ] && echo running; [ "$2" = "show" ] && printf 'ActiveState=active\\nMainPID=${process.pid}\\n'; exit 0`),
     );
     vi.stubEnv("NECTAR_LOGINCTL_BIN", await fakeExecutable(fakeDir, "loginctl", `echo "Linger=no"`));
     const paths = getPaths(path.join(home, ".nectar"));
@@ -481,7 +481,7 @@ describe("service units", () => {
     await expect(access(file)).rejects.toThrow();
     const show = "systemctl --user show --property=ActiveState --property=MainPID nectard.service";
     expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
-      "systemctl --user show-environment",
+      "systemctl --user is-system-running",
       "systemctl --user daemon-reload",
       "systemctl --user enable nectard.service",
       "systemctl --user restart nectard.service",
@@ -627,7 +627,7 @@ exit 0`,
     const fakeDir = await tempDir("daemon-systemctl");
     vi.stubEnv("HOME", home);
     vi.stubEnv("XDG_CONFIG_HOME", path.join(home, ".config"));
-    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `[ "$2" = "show" ] && printf 'ActiveState=failed\nMainPID=0\n'; exit 0`));
+    vi.stubEnv("NECTAR_SYSTEMCTL_BIN", await fakeExecutable(fakeDir, "systemctl", `[ "$2" = "is-system-running" ] && echo running; [ "$2" = "show" ] && printf 'ActiveState=failed\nMainPID=0\n'; exit 0`));
     const failed = installUnit(getPaths(path.join(home, ".nectar")), "linux");
     await expect(failed).rejects.toMatchObject({ code: "E_PLATFORM" });
     await expect(failed).rejects.toThrow("left it failed");

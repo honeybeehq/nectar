@@ -1103,7 +1103,7 @@ this state directory or exact shell `-c` argv matching the recorded command, a c
 matching the recorded worktree, and an OS start later than the earliest recorded
 publication/touch/runtime timestamp. Linux reads only the recorded PID's stat,
 cmdline and cwd, plus boot metadata and clock ticks. macOS uses `ps` and `lsof`.
-Missing or unreadable metadata refuses adoption. Identity is read again after
+macOS adoption is unverified here; missing or unreadable metadata refuses adoption. Identity is read again after
 verification and persisted before the normal start-identity guarded stop path.
 No environment is read; observed argv and cwd are compared in memory and never
 persisted or included in diagnostics.

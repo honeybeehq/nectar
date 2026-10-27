@@ -3698,7 +3698,7 @@ export class NectarService {
         });
       } catch (error) {
         const nectarError = asNectarError(error);
-        skipped.push({ env: snapshot.name, reason: nectarError.code === "E_BUSY" ? "busy" : nectarError.message });
+        skipped.push({ env: snapshot.name, reason: nectarError.code === "E_BUSY" && nectarError.details.ownership_refusal !== true && !nectarError.message.startsWith("Runtime ownership unknown:") ? "busy" : nectarError.message });
       }
     }
     if (!options.dryRun && report.length > 0) {

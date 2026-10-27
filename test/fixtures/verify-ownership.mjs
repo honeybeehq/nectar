@@ -39,14 +39,14 @@ try {
   const injected = { ...candidate.serve, ...decoy, start_time: 'stale-start' };
   await service.store.updateEnv(candidate.name, r => { r.serve = injected; r.proof_terminal_since = new Date(Date.now() - 26 * 3600000).toISOString(); });
   await assert.rejects(service.stop(candidate.name), /process start time differs/);
-  let gc = await service.gc(); assert(gc.skipped.some(x => x.env === candidate.name)); assert(pidAlive(decoy.pid));
+  let gc = await service.gc(); assert(gc.skipped.some(x => x.env === candidate.name && x.reason.includes("process start time differs"))); assert(pidAlive(decoy.pid));
   const doctor = await service.doctor({ fix: true, noDaemon: true });
   assert(doctor.checks.some(x => x.name === 'process-ownership' && x.details.some(d => d.env === candidate.name)));
   assert(pidAlive(decoy.pid)); assert.deepEqual((await service.store.readEnv(candidate.name)).serve, injected);
   say({ staleStart: 'stop, gc reap and doctor --fix refused', decoyAlive: true, recordPreserved: true });
   await service.store.updateEnv(candidate.name, r => { delete r.serve.start_time; });
   await assert.rejects(service.stop(candidate.name), /no process start time/);
-  gc = await service.gc(); assert(gc.skipped.some(x => x.env === candidate.name)); assert(pidAlive(decoy.pid));
+  gc = await service.gc(); assert(gc.skipped.some(x => x.env === candidate.name && x.reason.includes("no process start time"))); assert(pidAlive(decoy.pid));
   const cluster = path.join(state, 'pg', '99');
   await mkdir(path.join(cluster, 'data'), { recursive: true });
   await writeFile(path.join(cluster, 'data', 'postmaster.pid'), String(decoy.pid));

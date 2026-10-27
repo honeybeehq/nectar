@@ -70,6 +70,7 @@ import {
 } from "./deps.js";
 import {
   clusterMajors,
+  clusterOwnershipWarning,
   createDatabaseSql,
   dropDatabaseSql,
   ensureCluster,
@@ -3969,6 +3970,11 @@ export class NectarService {
           : { hint: "Remove by hand with `tailscale serve --https=<port> off` once you know whose it is", details: found.map(detail) }),
       });
     }
+    const clusterWarnings = (await Promise.all((await clusterMajors(this.paths.root)).map(async (major) => {
+      const warning = await clusterOwnershipWarning(this.paths.root, major);
+      return warning === undefined ? [] : [{ major, ...warning }];
+    }))).flat();
+    checks.push({ name: "dependency-ownership", status: clusterWarnings.length === 0 ? "pass" : "warn", message: clusterWarnings.length === 0 ? "Local dependency process identities match" : "Local Postgres ownership unknown; left alone", details: clusterWarnings });
     const unknown = (await this.store.listEnvs()).flatMap((record) => {
       const serve = record.serve;
       if (serve === undefined || serve.pid === 0 || (!groupAlive(serve.pgid) && serve.start_time !== undefined)) return [];

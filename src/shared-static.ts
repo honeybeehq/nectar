@@ -189,7 +189,10 @@ async function run(root: string, port: number, secret: string): Promise<void> {
   }
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Missing shared static listener");
-  await atomicJson(metadataFile(store), { pid: readProcessIdentity(process.pid)?.pgid ?? process.pid, ...readProcessIdentity(readProcessIdentity(process.pid)?.pgid ?? process.pid), port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
+  const workerIdentity = readProcessIdentity(process.pid);
+  const leaderPid = workerIdentity?.pgid ?? process.pid;
+  const leaderIdentity = readProcessIdentity(leaderPid);
+  await atomicJson(metadataFile(store), { pid: leaderPid, ...leaderIdentity, port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
   process.stdout.write(`shared static server pid=${process.pid} port=${address.port}\n`);
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => server.close(() => process.exit(0)));
 }

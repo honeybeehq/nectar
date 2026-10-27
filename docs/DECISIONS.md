@@ -940,8 +940,8 @@ state home and one tailnet Serve entry. Their URL is
 `https://<machine>:<shared-port>/s/<env>/<128-bit-random-token>/`. The token survives
 republish. The singleton owns its PID and ports in `shared-static.json`; env records
 carry only `static_route`, their files, URLs and the existing TTL. Its loopback port
-comes from the OS outside configured env ranges; the shared tailnet port is allocated
-outside those ranges, scanning from 10240. Port 443 remains untouched. A machine-wide
+is OS-assigned; one shared tailnet port is allocated scanning from 10240. Both avoid
+recorded env ports and reserved service ports, including 443. A machine-wide
 startup lock and a private health identity prevent duplicate servers in concurrent
 publishes. Nectard restores a dead singleton on its existing port, or moves only the
 loopback port if occupied while preserving the canonical tailnet URL. Three failed

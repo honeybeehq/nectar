@@ -60,7 +60,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
       if (info !== undefined && pidAlive(info.pid)) {
         const current = await metadata(store);
         if (current?.pid !== info.pid || current.secret !== info.secret) throw new NectarError("E_BUSY", "Shared static server changed during recovery");
-        if (info.pgid === undefined) throw new NectarError("E_BUSY", "Shared static ownership unknown: record has no dedicated process group; left alone", { hint: "Stop the recorded runtime manually after verifying its identity, then retry cleanup" });
+        if (info.pgid === undefined) throw new NectarError("E_BUSY", "Shared static ownership unknown: record has no dedicated process group; left alone", { ownership_refusal: true, hint: "Stop the recorded runtime manually after verifying its identity, then retry cleanup" });
         await stopEnvGroup(info);
         for (let attempt = 0; attempt < 20 && pidAlive(info.pid); attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -116,7 +116,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
     try {
       return await ensure();
     } catch (error) {
-      if (!(error instanceof NectarError) || error.code !== "E_BUSY" || Date.now() >= deadline) throw error;
+      if (!(error instanceof NectarError) || error.code !== "E_BUSY" || error.details.ownership_refusal === true || Date.now() >= deadline) throw error;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }

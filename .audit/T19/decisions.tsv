@@ -1,0 +1,3 @@
+ts	phase	decision	why	evidence	result
+2026-10-27T15:11:30Z	ownership	Use PID plus dedicated PGID plus OS start identity	Avoid reading process environments and refuse ambiguous cleanup	src/commands.ts	implementation in progress
+2026-10-27T15:16:03Z	review	Add a persistent runtime leader and preserve fail-closed legacy refusal	Reviewer found backgrounding wrappers could lose their leader; orchestrator confirmed no force bypass	src/runtime-launcher.ts	verification in progress

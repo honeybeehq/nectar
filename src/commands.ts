@@ -1,6 +1,7 @@
 import os from "node:os";
-import { openSync, closeSync, readFileSync } from "node:fs";
+import { openSync, closeSync, readFileSync, existsSync } from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { SpawnOptions } from "node:child_process";
 import { NectarError } from "./errors.js";
 
@@ -82,11 +83,16 @@ export async function runShell(
   return runCommand(shell, ["-c", command], { cwd, env, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 }
 
+function runtimeLauncher(): string {
+  const built = fileURLToPath(new URL("./runtime-launcher.js", import.meta.url));
+  return existsSync(built) ? built : fileURLToPath(new URL("../dist/runtime-launcher.js", import.meta.url));
+}
+
 export function spawnDetached(command: string, cwd: string, env: NodeJS.ProcessEnv, logFile: string): ProcessIdentity {
   const log = openSync(logFile, "a", 0o600);
   try {
     const shell = process.env.SHELL ?? "/bin/sh";
-    const child = spawn(shell, ["-c", command], {
+    const child = spawn(process.execPath, [runtimeLauncher(), shell, "-c", command], {
       cwd,
       env,
       detached: true,
@@ -110,7 +116,7 @@ export function spawnDetachedExecutable(
 ): ProcessIdentity {
   const log = openSync(logFile, "a", 0o600);
   try {
-    const child = spawn(file, args, {
+    const child = spawn(process.execPath, [runtimeLauncher(), file, ...args], {
       cwd,
       env,
       detached: true,
@@ -172,8 +178,8 @@ export function ownershipRefusal(record: ProcessIdentity): string | undefined {
   return undefined;
 }
 
-export async function processBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
-  return ownershipRefusal(record) === undefined;
+export function processBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
+  return Promise.resolve(ownershipRefusal(record) === undefined);
 }
 
 export function groupAlive(pgid: number): boolean {
@@ -186,19 +192,21 @@ export function groupAlive(pgid: number): boolean {
   }
 }
 
-export async function groupBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
-  return groupAlive(record.pgid) && ownershipRefusal(record) === undefined;
+export function groupBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
+  return Promise.resolve(groupAlive(record.pgid) && ownershipRefusal(record) === undefined);
 }
 
 export async function stopEnvGroup(record: ProcessIdentity): Promise<boolean> {
+  if (record.pid === 0 && record.pgid === 0) return false;
+  if (!Number.isInteger(record.pgid) || record.pgid <= 1) throw new NectarError("E_BUSY", "Runtime ownership unknown: record has no dedicated process group; left alone");
   if (!groupAlive(record.pgid)) return false;
   const refusal = ownershipRefusal(record);
-  if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`);
-  await stopProcessGroup(record.pgid);
+  if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { hint: `Verify PID ${record.pid} and PGID ${record.pgid} with ps -o pid,pgid,lstart -p ${record.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
+  await stopProcessGroup(record.pgid, 2_000, record);
   return true;
 }
 
-export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<void> {
+export async function stopProcessGroup(pgid: number, waitMs = 2_000, identity?: ProcessIdentity): Promise<void> {
   const groupAlive = (): boolean => {
     try {
       process.kill(-pgid, 0);
@@ -222,6 +230,10 @@ export async function stopProcessGroup(pgid: number, waitMs = 2_000): Promise<vo
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   if (groupAlive()) {
+    if (identity !== undefined) {
+      const refusal = ownershipRefusal(identity);
+      if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`, { hint: `Verify PID ${identity.pid} and PGID ${identity.pgid} with ps -o pid,pgid,lstart -p ${identity.pid}; after confirming ownership, stop that group manually, then retry nectar stop or nectar rm --force` });
+    }
     try {
       process.kill(-pgid, "SIGKILL");
     } catch (error) {

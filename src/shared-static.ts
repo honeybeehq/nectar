@@ -60,6 +60,7 @@ export async function ensureSharedStatic(store: StateStore, dnsName?: string): P
       if (info !== undefined && pidAlive(info.pid)) {
         const current = await metadata(store);
         if (current?.pid !== info.pid || current.secret !== info.secret) throw new NectarError("E_BUSY", "Shared static server changed during recovery");
+        if (info.pgid === undefined) throw new NectarError("E_BUSY", "Shared static ownership unknown: record has no dedicated process group; left alone", { hint: "Stop the recorded runtime manually after verifying its identity, then retry cleanup" });
         await stopEnvGroup(info);
         for (let attempt = 0; attempt < 20 && pidAlive(info.pid); attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -188,7 +189,7 @@ async function run(root: string, port: number, secret: string): Promise<void> {
   }
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Missing shared static listener");
-  await atomicJson(metadataFile(store), { pid: process.pid, ...readProcessIdentity(process.pid), port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
+  await atomicJson(metadataFile(store), { pid: readProcessIdentity(process.pid)?.pgid ?? process.pid, ...readProcessIdentity(readProcessIdentity(process.pid)?.pgid ?? process.pid), port: address.port, secret, ...(previous?.tailnetPort === undefined ? {} : { tailnetPort: previous.tailnetPort }), ...(previous?.tailnetTarget === undefined ? {} : { tailnetTarget: previous.tailnetTarget }) });
   process.stdout.write(`shared static server pid=${process.pid} port=${address.port}\n`);
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => server.close(() => process.exit(0)));
 }

@@ -34,6 +34,7 @@ import {
   currentPublisher,
   pidAlive,
   groupBelongsToEnv,
+  ownershipRefusal,
   groupAlive,
   processBelongsToEnv,
   runCommand,
@@ -273,6 +274,7 @@ interface DeadHolder {
   status: EnvStatus;
   expires_at: string;
   process: boolean;
+  ownership_refusal?: string;
   pgid: number;
   serve_entry: number | null;
 }
@@ -1217,7 +1219,7 @@ export class NectarService {
 
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
-      await Promise.all([stopEnvGroup(record.serve.pgid, record.name), this.releaseServeEntry(record.serve)]);
+      await Promise.all([stopEnvGroup(record.serve), this.releaseServeEntry(record.serve)]);
     }
     if (record.mode === "ios" && record.sim_udid !== undefined) await shutdownSim(record.sim_udid);
   }
@@ -1239,7 +1241,7 @@ export class NectarService {
     const cleanupErrors: string[] = [];
     if (record.serve !== undefined) {
       const owned = record.serve;
-      const processCleanup = await Promise.resolve(stopEnvGroup(owned.pgid, record.name)).then(
+      const processCleanup = await Promise.resolve(stopEnvGroup(owned)).then(
         () => ({ ok: true as const }),
         (error: unknown) => ({ ok: false as const, error }),
       );
@@ -1310,7 +1312,7 @@ export class NectarService {
             : upstream.upstreamHost === "localhost"
               ? await portAnswers(upstream.upstreamPort)
               : await portOpenOnHost(upstream.upstreamPort, upstream.upstreamHost);
-        const ownerAlive = owner?.serve === undefined ? false : await groupBelongsToEnv(owner.serve.pgid, owner.name);
+        const ownerAlive = owner?.serve === undefined ? false : await groupBelongsToEnv(owner.serve);
         const appAnswers =
           !answering && owner?.serve?.upstream_port !== undefined && upstream?.upstreamPort === owner.serve.proxy_port
             ? await portAnswers(owner.serve.upstream_port)
@@ -1470,7 +1472,7 @@ export class NectarService {
       record.serve = { ...old.serve };
       record.urls = { ...old.urls };
       await this.store.writeEnv(record);
-      await stopEnvGroup(old.serve.pgid, old.name);
+      await stopEnvGroup(old.serve);
       record.serve.pid = 0;
       record.serve.pgid = 0;
       delete record.serve.upstream_port;
@@ -1915,7 +1917,7 @@ export class NectarService {
           await this.startDeps(record);
           await this.startWeb(record, recipe, await this.identity(), old, await this.depEnv(record));
         } catch (error) {
-          if (record.serve !== undefined && record.serve.pid > 1) await stopEnvGroup(record.serve.pgid, record.name);
+          if (record.serve !== undefined && record.serve.pid > 1) await stopEnvGroup(record.serve);
           await this.stopDeps(record);
           record.serve = old.serve!;
           record.urls = old.urls;
@@ -1933,7 +1935,7 @@ export class NectarService {
   private async sleepRuntime(record: EnvRecord): Promise<void> {
     if (record.mode === "web" && record.serve?.proxy_port !== undefined) {
       if ((await runningDaemonPid(this.paths)) === undefined) return;
-      await stopEnvGroup(record.serve.pgid, record.name);
+      await stopEnvGroup(record.serve);
       if (groupAlive(record.serve.pgid)) throw new NectarError("E_BUSY", "Preview process still running");
       await this.stopDeps(record);
       record.serve.pid = 0;
@@ -2599,7 +2601,7 @@ export class NectarService {
       const serve = record.serve;
       if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
       const identity = await this.identity();
-      if (options.kill && (await processBelongsToEnv(serve.pid, record.name))) await stopProcessGroup(serve.pgid);
+      if (options.kill && (await processBelongsToEnv(serve))) await stopProcessGroup(serve.pgid);
       const isStatic = serve.cmd.includes("static-server.js");
       const recipe = isStatic
         ? staticWebRecipe()
@@ -2635,13 +2637,13 @@ export class NectarService {
         NECTAR_ENV: record.name,
         NECTAR_ENV_DIR: record.worktree,
       });
-      let spawned: { pid: number; pgid: number };
+      let spawned: ReturnType<typeof spawnDetached>;
       try {
         spawned = spawnDetached(cmd, record.worktree, childEnv, log);
       } catch (error) {
         return fail("E_CHECKOUT", asNectarError(error).message);
       }
-      record.serve = { ...serve, cmd, pid: spawned.pid, pgid: spawned.pgid, started_at: new Date().toISOString() };
+      record.serve = { ...serve, cmd, ...spawned, started_at: new Date().toISOString() };
       await this.store.writeEnv(record);
       const readyUrl = await this.waitReady(serve.upstream_port, readyPath, readyTimeoutMs);
       if (readyUrl === undefined) {
@@ -3645,7 +3647,7 @@ export class NectarService {
           }
           const currentAction = transition(record);
           if (currentAction === undefined) return;
-          if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve.pgid, record.name))) {
+          if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve))) {
             throw new NectarError("E_BUSY", "Runtime ownership unresolved; left alone");
           }
           if (currentAction === "idle-stop") {
@@ -4143,17 +4145,19 @@ export class NectarService {
         const serve = record.serve;
         const dead = DEAD_STATUSES.has(record.status) || Date.parse(record.expires_at) <= nowMs;
         if (serve === undefined || !dead) return undefined;
-        const processHeld = await groupBelongsToEnv(serve.pgid, record.name);
+        const processHeld = await groupBelongsToEnv(serve);
         const entryHeld =
           serve.tailnet_port !== undefined &&
           serve.upstream_port !== undefined &&
           entries.some((entry) => entry.tailnetPort === serve.tailnet_port && ownsLoopbackPort(serve, loopbackProxy(entry.target)?.upstreamPort));
-        if (!processHeld && !entryHeld) return undefined;
+        const refusal = groupAlive(serve.pgid) ? ownershipRefusal(serve) : undefined;
+        if (!processHeld && !entryHeld && refusal === undefined) return undefined;
         return {
           env: record.name,
           status: record.status,
           expires_at: record.expires_at,
           process: processHeld,
+          ...(refusal === undefined ? {} : { ownership_refusal: refusal }),
           pgid: serve.pgid,
           serve_entry: entryHeld ? (serve.tailnet_port ?? null) : null,
         };

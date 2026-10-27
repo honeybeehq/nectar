@@ -1,5 +1,5 @@
 import os from "node:os";
-import { openSync, closeSync, readFileSync, existsSync } from "node:fs";
+import { openSync, closeSync, readFileSync, existsSync, readlinkSync, realpathSync } from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { SpawnOptions } from "node:child_process";
@@ -165,6 +165,49 @@ export function readProcessIdentity(pid: number): { pgid: number; start_time: st
     return { pgid: Number(match[1]), start_time: match[2]! };
   } catch {
     return undefined;
+  }
+}
+
+export function legacyProcessIdentity(record: ProcessIdentity & { cmd: string }, worktree: string, earliest: number, daemonPid?: number): { start_time?: string; reason?: string } {
+  try {
+    const before = readProcessIdentity(record.pid);
+    if (!pidAlive(record.pid) || record.pid !== record.pgid || before?.pgid !== record.pid) return { reason: "PID is not a live process group leader" };
+    let parent: number;
+    let cwd: string;
+    let matches: boolean;
+    let started: number;
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${record.pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      if (fields[0] === "Z") return { reason: "process is a zombie" };
+      parent = Number(fields[1]);
+      const argv = readFileSync(`/proc/${record.pid}/cmdline`, "utf8").split("\0");
+      if (argv.at(-1) === "") argv.pop();
+      matches = argv.length === 3 && ["/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh"].includes(argv[0]!) && argv[1] === "-c" && argv[2] === record.cmd;
+      cwd = readlinkSync(`/proc/${record.pid}/cwd`);
+      const boot = /^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"));
+      const hz = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 2_000 }).trim());
+      started = (Number(boot?.[1]) + Number(fields[19]) / hz) * 1_000;
+      if (!boot || !Number.isFinite(hz) || hz <= 0) return { reason: "OS start time unavailable" };
+    } else if (process.platform === "darwin") {
+      const ps = (field: string): string => execFileSync("ps", ["-ww", "-o", `${field}=`, "-p", String(record.pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" } }).trim();
+      parent = Number(ps("ppid"));
+      const args = ps("args");
+      matches = ["/bin/sh", "/bin/bash", "/bin/zsh"].some(shell => args === `${shell} -c ${record.cmd}`);
+      const listed = execFileSync("lsof", ["-a", "-p", String(record.pid), "-d", "cwd", "-Fn"], { encoding: "utf8", timeout: 2_000 });
+      const names = listed.split("\n").filter(line => line.startsWith("n"));
+      if (names.length !== 1) return { reason: "cwd unavailable" };
+      cwd = names[0]!.slice(1);
+      started = Date.parse(ps("lstart"));
+    } else return { reason: "legacy verification unsupported on this OS" };
+    if (!(daemonPid !== undefined && parent === daemonPid) && !matches) return { reason: "parent and serve argv do not match" };
+    if (realpathSync(cwd) !== realpathSync(worktree)) return { reason: "cwd differs from work dir" };
+    if (!Number.isFinite(earliest) || !Number.isFinite(started) || started <= earliest) return { reason: "OS start time is not later than record timestamp" };
+    const after = readProcessIdentity(record.pid);
+    if (after?.pgid !== before.pgid || after?.start_time !== before.start_time) return { reason: "process changed during verification" };
+    return { start_time: before.start_time };
+  } catch {
+    return { reason: "process metadata unreadable" };
   }
 }
 

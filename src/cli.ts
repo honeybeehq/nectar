@@ -211,8 +211,9 @@ program
   .command("rm <env-or-ref>")
   .description("stop and trash an environment")
   .option("--force", "confirm removal of a serving environment")
-  .action(async (input: string, options: { force?: boolean }) =>
-    execute("rm", async () => routed("rm", { env: input, force: options.force }, async (service) => service.remove(input, options.force ?? false), isRef(input))),
+  .option("--detach", "retire the record and routes without signalling any process")
+  .action(async (input: string, options: { force?: boolean; detach?: boolean }) =>
+    execute("rm", async () => routed("rm", { env: input, force: options.force, detach: options.detach }, async (service) => service.remove(input, options.force ?? false, options.detach ?? false), isRef(input))),
   );
 
 program

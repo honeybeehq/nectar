@@ -69,7 +69,7 @@ const ARG_SPECS: Record<ControlOp, { spec: ArgSpec; required: string[] }> = {
   resolve: { spec: { target: "string" }, required: ["target"] },
   touch: { spec: { target: "string", ttl: "string" }, required: ["target"] },
   stop: { spec: { env: "string" }, required: ["env"] },
-  rm: { spec: { env: "string", force: "boolean" }, required: ["env"] },
+  rm: { spec: { env: "string", force: "boolean", detach: "boolean" }, required: ["env"] },
   expose: {
     spec: { env: "string", to: "string", gate: "string", password: "string", public: "boolean", ttl: "string", expose_interactive: "boolean", rotate: "boolean" },
     required: ["env"],
@@ -189,7 +189,7 @@ async function dispatch(op: ControlOp, args: Record<string, string | boolean>, c
     case "stop":
       return service.stop(target);
     case "rm":
-      return service.remove(target, flag("force") ?? false);
+      return service.remove(target, flag("force") ?? false, flag("detach") ?? false);
     case "expose": {
       const gate = text("gate");
       if (gate !== undefined && gate !== "password" && gate !== "none") throw new NectarError("E_USAGE", "gate must be 'password' or 'none'");

@@ -1094,3 +1094,33 @@ leaving some URLs pointed at apps directly and losing their views. Open control 
 app revival/GC, so their latency does not cause callers to bypass the daemon. Rotate
 capacity.jsonl with log_max_bytes and two previous files through the existing log rotation.
 Recovery records slept names there and
+
+## D40 — Verify legacy runtime identities, or explicitly detach
+
+Records predating process start identities can be adopted only after verifying a live
+PID that leads its recorded process group, a parent equal to the running nectard for
+this state directory or exact shell `-c` argv matching the recorded command, a cwd
+matching the recorded worktree, and an OS start later than the earliest recorded
+publication/touch/runtime timestamp. Linux reads only the recorded PID's stat,
+cmdline and cwd, plus boot metadata and clock ticks. macOS uses `ps` and `lsof`.
+Missing or unreadable metadata refuses adoption. Identity is read again after
+verification and persisted before the normal start-identity guarded stop path.
+No environment is read; observed argv and cwd are compared in memory and never
+persisted or included in diagnostics.
+
+`nectar rm <env> --detach` is the explicit escape hatch when adoption is unsafe.
+It removes owned routes, archives the record under `detached/` marked stale, and
+removes the active record so its name and port reservations can be used again.
+It never signals runtimes, dependencies or simulators and never deletes worktrees.
+The result reports PID, PGID and the audit path for manual investigation. An occupied
+OS port still cannot be allocated. If route release cannot be confirmed, detach
+refuses instead of forgetting a potentially live route.
+
+Automatic daemon sweeps and `ls` clear interrupted publishing records with no live
+PID or group under the env lock. Doctor reports `adoptable` (stop verifies again,
+adopts and stops) or `detach`; it never adopts merely to diagnose a record.
+
+Rejected: guessing ownership from PID, port, command substring or environment;
+blind termination; and deleting an unverifiable record without an audit trail.
+Run `pnpm build && node test/fixtures/verify-legacy-reclaim.mjs` on Linux to exercise
+an isolated nectard, adoption, decoy refusal, detach, republish and dead publishing.

@@ -260,6 +260,7 @@ export class Supervisor {
   async sweep(restore: boolean): Promise<void> {
     let records: EnvRecord[];
     try {
+      await this.service.clearDeadPublishing();
       records = await this.service.store.listEnvs();
     } catch (error) {
       this.log({ event: "error", phase: "sweep", message: asNectarError(error).message });

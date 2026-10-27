@@ -35,6 +35,7 @@ import {
   pidAlive,
   groupBelongsToEnv,
   ownershipRefusal,
+  legacyProcessIdentity,
   groupAlive,
   runCommand,
   runShell,
@@ -1216,8 +1217,43 @@ export class NectarService {
     else record.install_hash = installHash;
   }
 
+  private async legacyIdentity(record: EnvRecord): Promise<{ start_time?: string; reason?: string }> {
+    const serve = record.serve;
+    if (serve === undefined) return { reason: "no runtime" };
+    const { daemonHello } = await import("./control.js");
+    const hello = await daemonHello().catch(() => undefined);
+    const daemonPid = hello?.nectar_home === this.paths.root ? hello.pid : undefined;
+    const timestamps = [record.published_at, record.last_touched_at, serve.started_at].filter((value): value is string => value !== undefined).map(Date.parse);
+    return legacyProcessIdentity(serve, record.worktree, Math.min(...timestamps), daemonPid);
+  }
+
+  private async adoptLegacy(record: EnvRecord): Promise<void> {
+    if (record.serve === undefined || record.serve.start_time !== undefined || !groupAlive(record.serve.pgid)) return;
+    const verified = await this.legacyIdentity(record);
+    if (verified.start_time === undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${verified.reason}`, { ownership_refusal: true, hint: `nectar rm ${record.name} --detach retires the record without signalling PGID ${record.serve.pgid}` });
+    record.serve.start_time = verified.start_time;
+    await this.store.writeEnv(record);
+  }
+
+  async clearDeadPublishing(): Promise<void> {
+    if (this.readOnly !== undefined) return;
+    for (const snapshot of await this.store.listEnvs()) {
+      if (snapshot.status !== "publishing" || (snapshot.serve !== undefined && (pidAlive(snapshot.serve.pid) || groupAlive(snapshot.serve.pgid)))) continue;
+      await this.store.updateEnv(snapshot.name, async (record) => {
+        if (record.status !== "publishing" || (record.serve !== undefined && (pidAlive(record.serve.pid) || groupAlive(record.serve.pgid)))) return;
+        await this.stopRuntime(record);
+        await this.tearDownExposure(record);
+        record.status = "stopped";
+        record.urls = { local: null, mesh: null, public: null };
+        delete record.serve;
+        delete record.liveness;
+      }, { bestEffort: true });
+    }
+  }
+
   private async stopRuntime(record: EnvRecord): Promise<void> {
     if (record.serve !== undefined) {
+      await this.adoptLegacy(record);
       await stopEnvGroup(record.serve);
       await this.releaseServeEntry(record.serve);
     }
@@ -1240,6 +1276,7 @@ export class NectarService {
   private async cleanupRuntime(record: EnvRecord): Promise<string[]> {
     const cleanupErrors: string[] = [];
     if (record.serve !== undefined) {
+      await this.adoptLegacy(record);
       const owned = record.serve;
       const processCleanup = await Promise.resolve(stopEnvGroup(owned)).then(
         () => ({ ok: true as const }),
@@ -1472,6 +1509,8 @@ export class NectarService {
     if (old.serve?.proxy_port !== undefined && (await runningDaemonPid(this.paths)) !== undefined) {
       record.serve = { ...old.serve };
       record.urls = { ...old.urls };
+      await this.adoptLegacy(old);
+      record.serve = { ...old.serve };
       await this.store.writeEnv(record);
       await stopEnvGroup(old.serve);
       record.serve.pid = 0;
@@ -1938,6 +1977,7 @@ export class NectarService {
   private async sleepRuntime(record: EnvRecord): Promise<void> {
     if (record.mode === "web" && record.serve?.proxy_port !== undefined) {
       if ((await runningDaemonPid(this.paths)) === undefined) return;
+      await this.adoptLegacy(record);
       await stopEnvGroup(record.serve);
       if (groupAlive(record.serve.pgid)) throw new NectarError("E_BUSY", "Preview process still running");
       await this.stopDeps(record);
@@ -2602,6 +2642,7 @@ export class NectarService {
       if (record.mode !== "web" || !hasProbeableServe(record) || record.serve.pid !== options.expectPid) {
         return { revived: false, reason: "record_changed" };
       }
+      await this.adoptLegacy(record);
       const serve = record.serve;
       if (serve.upstream_port === undefined) return { revived: false, reason: "no_upstream_port" };
       const identity = await this.identity();
@@ -2776,6 +2817,7 @@ export class NectarService {
       const flags = [...(options.mode === undefined ? [] : ["--mode", options.mode]), ...(options.status === undefined ? [] : ["--status", options.status])];
       return this.remote(options.host, "ls", Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined)), ["ls", ...flags, "--json"]);
     }
+    await this.clearDeadPublishing();
     const refreshed = await Promise.all((await this.store.listEnvs()).map(async (record) => this.refreshLiveness(record)));
     const envs = refreshed
       .filter((record) => options.mode === undefined || record.mode === options.mode)
@@ -3289,11 +3331,11 @@ export class NectarService {
     return { env: record.name, status: record.status };
   }
 
-  async remove(name: string, force = false): Promise<Record<string, unknown>> {
+  async remove(name: string, force = false, detach = false): Promise<Record<string, unknown>> {
     if (isRef(name)) {
       const parsed = parseRef(name);
       if (!(await this.isLocalHost(parsed.host))) {
-        const removed = await this.remote(parsed.host, "rm", force ? { env: parsed.env, force } : { env: parsed.env }, ["rm", parsed.env, ...(force ? ["--force"] : []), "--json"]);
+        const removed = await this.remote(parsed.host, "rm", { env: parsed.env, force, detach }, ["rm", parsed.env, ...(force ? ["--force"] : []), ...(detach ? ["--detach"] : []), "--json"]);
         if (this.readOnly === undefined) await this.forgetPlacement(parsed.host, parsed.env);
         return removed;
       }
@@ -3302,6 +3344,16 @@ export class NectarService {
     this.assertWritable("rm");
     return this.store.withLock(validateEnvName(name), async () => {
       const record = await this.store.readEnv(name);
+      if (detach) {
+        await this.tearDownExposure(record);
+        if (record.serve !== undefined && !(await this.releaseServeEntry(record.serve))) throw new NectarError("E_BUSY", "Route ownership unknown; detach refused");
+        const auditDir = path.join(this.paths.root, "detached");
+        await mkdir(auditDir, { recursive: true });
+        const auditPath = path.join(auditDir, `${record.name}-${crypto.randomUUID()}.json`);
+        await writeFile(auditPath, JSON.stringify({ status: "stale", detached_at: new Date().toISOString(), record }, null, 2), { mode: 0o600, flag: "wx" });
+        await this.store.deleteEnvFile(record.name);
+        return { env: record.name, detached: true, pid: record.serve?.pid ?? null, pgid: record.serve?.pgid ?? null, audit_path: auditPath, hint: "Processes were left untouched; verify the reported PGID before stopping it manually" };
+      }
       if (holdsRuntime(record.status) && !force) {
         throw new NectarError("E_USAGE", `Environment '${name}' is ${record.status}; pass --force to stop and remove it`);
       }
@@ -3652,6 +3704,7 @@ export class NectarService {
           }
           const currentAction = transition(record);
           if (currentAction === undefined) return;
+          await this.adoptLegacy(record);
           if (currentAction === "reap" && record.serve !== undefined && groupAlive(record.serve.pgid) && !(await groupBelongsToEnv(record.serve))) {
             throw new NectarError("E_BUSY", `Runtime ownership unknown: ${ownershipRefusal(record.serve)}`);
           }
@@ -3987,12 +4040,17 @@ export class NectarService {
       return warning === undefined ? [] : [{ major, ...warning }];
     }))).flat();
     checks.push({ name: "dependency-ownership", status: clusterWarnings.length === 0 ? "pass" : "warn", message: clusterWarnings.length === 0 ? "Local dependency process identities match" : "Local Postgres ownership unknown; left alone", details: clusterWarnings });
-    const unknown = (await this.store.listEnvs()).flatMap((record) => {
+    const unknown = (await Promise.all((await this.store.listEnvs()).map(async (record) => {
       const serve = record.serve;
       if (serve === undefined || serve.pid === 0 || (!groupAlive(serve.pgid) && serve.start_time !== undefined)) return [];
+      if (serve.start_time === undefined) {
+        const verified = await this.legacyIdentity(record);
+        const action = verified.start_time === undefined ? "detach" : "adoptable";
+        return [{ env: record.name, pid: serve.pid, pgid: serve.pgid, action, reason: verified.reason ?? "legacy runtime verified", hint: action === "adoptable" ? `nectar stop ${record.name} verifies again, adopts and stops the runtime` : `nectar rm ${record.name} --detach leaves PGID ${serve.pgid} untouched` }];
+      }
       const reason = ownershipRefusal(serve);
-      return reason === undefined ? [] : [{ env: record.name, pid: serve.pid, pgid: serve.pgid, reason, hint: `Verify with ps -o pid,pgid,lstart -p ${serve.pid}; after confirming ownership, stop PGID ${serve.pgid} manually, then retry nectar stop ${record.name} or nectar rm ${record.name} --force` }];
-    });
+      return reason === undefined ? [] : [{ env: record.name, pid: serve.pid, pgid: serve.pgid, action: "detach", reason, hint: `nectar rm ${record.name} --detach leaves PGID ${serve.pgid} untouched` }];
+    }))).flat();
     checks.push({ name: "process-ownership", status: unknown.length === 0 ? "pass" : "warn", message: unknown.length === 0 ? "All recorded process identities match" : "Runtime ownership unknown; left alone", details: unknown });
     const gcPlan = await this.gc({ dryRun: true });
     const holders = await this.deadHolders(status);

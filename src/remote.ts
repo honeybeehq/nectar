@@ -161,7 +161,7 @@ const ARG_SPECS: Record<RemoteOp, { spec: ArgSpec; required: string[] }> = {
   resolve: { spec: { target: "string" }, required: ["target"] },
   touch: { spec: { target: "string", ttl: "string" }, required: ["target"] },
   stop: { spec: { env: "string" }, required: ["env"] },
-  rm: { spec: { env: "string", force: "boolean" }, required: ["env"] },
+  rm: { spec: { env: "string", force: "boolean", detach: "boolean" }, required: ["env"] },
 };
 
 function checkArgs(op: RemoteOp, args: unknown): Record<string, string | boolean> {
@@ -440,7 +440,7 @@ async function remoteDispatch(
       return service.stop(target());
     case "rm":
       await owns(service.store, target(), caller, true);
-      return service.remove(target(), args.force === true);
+      return service.remove(target(), args.force === true, args.detach === true);
   }
 }
 

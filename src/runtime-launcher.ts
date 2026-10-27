@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const [file, ...args] = process.argv.slice(2);
 if (file === undefined) process.exit(1);
@@ -10,10 +10,11 @@ const check = (): void => {
   polling = true;
   const timer = setInterval(() => {
     try {
-      const listed = execFileSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 2_000 });
-      const others = listed.split("\n").some((line) => {
+      const listed = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 2_000 });
+      if (listed.status !== 0) return;
+      const others = listed.stdout.split("\n").some((line) => {
         const [pid, pgid, state] = line.trim().split(/\s+/);
-        return Number(pgid) === process.pid && Number(pid) !== process.pid && !state?.startsWith("Z");
+        return Number(pgid) === process.pid && Number(pid) !== process.pid && Number(pid) !== listed.pid && !state?.startsWith("Z");
       });
       if (exited && !others) {
         clearInterval(timer);

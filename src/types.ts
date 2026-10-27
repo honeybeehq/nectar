@@ -103,6 +103,7 @@ export interface ServeRecord {
   cmd: string;
   pid: number;
   pgid: number;
+  start_time?: string;
   upstream_port?: number;
   upstream_host?: string;
   capacity_remote_url?: string;

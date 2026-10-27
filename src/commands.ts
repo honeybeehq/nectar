@@ -1,7 +1,6 @@
 import os from "node:os";
-import { openSync, closeSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { openSync, closeSync, readFileSync } from "node:fs";
+import { spawn, execFileSync } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
 import { NectarError } from "./errors.js";
 
@@ -83,7 +82,7 @@ export async function runShell(
   return runCommand(shell, ["-c", command], { cwd, env, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 }
 
-export function spawnDetached(command: string, cwd: string, env: NodeJS.ProcessEnv, logFile: string): { pid: number; pgid: number } {
+export function spawnDetached(command: string, cwd: string, env: NodeJS.ProcessEnv, logFile: string): ProcessIdentity {
   const log = openSync(logFile, "a", 0o600);
   try {
     const shell = process.env.SHELL ?? "/bin/sh";
@@ -95,7 +94,7 @@ export function spawnDetached(command: string, cwd: string, env: NodeJS.ProcessE
     });
     if (child.pid === undefined) throw new NectarError("E_CHECKOUT", `Could not start serve command '${command}'`);
     child.unref();
-    return { pid: child.pid, pgid: child.pid };
+    return { pid: child.pid, pgid: child.pid, ...readProcessIdentity(child.pid) };
   } finally {
     closeSync(log);
   }
@@ -107,7 +106,7 @@ export function spawnDetachedExecutable(
   cwd: string,
   env: NodeJS.ProcessEnv,
   logFile: string,
-): { pid: number; pgid: number } {
+): ProcessIdentity {
   const log = openSync(logFile, "a", 0o600);
   try {
     const child = spawn(file, args, {
@@ -118,7 +117,7 @@ export function spawnDetachedExecutable(
     });
     if (child.pid === undefined) throw new NectarError("E_CHECKOUT", `Could not start ${file}`);
     child.unref();
-    return { pid: child.pid, pgid: child.pid };
+    return { pid: child.pid, pgid: child.pid, ...readProcessIdentity(child.pid) };
   } finally {
     closeSync(log);
   }
@@ -134,15 +133,44 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-export async function processBelongsToEnv(pid: number, env: string): Promise<boolean> {
-  if (!pidAlive(pid)) return false;
-  const marker = `NECTAR_ENV=${env}`;
-  if (process.platform === "linux") {
-    const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
-    return environ.split("\0").includes(marker);
+export interface ProcessIdentity {
+  pid: number;
+  pgid: number;
+  start_time?: string;
+}
+
+export function readProcessIdentity(pid: number): { pgid: number; start_time: string } | undefined {
+  if (!Number.isInteger(pid) || pid <= 1) return undefined;
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const pgid = Number(fields[2]);
+      const ticks = fields[19];
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (!Number.isInteger(pgid) || pgid <= 1 || ticks === undefined || !/^\d+$/.test(ticks) || !boot) return undefined;
+      return { pgid, start_time: `${boot}:${ticks}` };
+    }
+    const output = execFileSync("ps", ["-o", "pgid=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" } }).trim();
+    const match = /^(\d+)\s+(.+)$/.exec(output);
+    if (match === null) return undefined;
+    return { pgid: Number(match[1]), start_time: match[2]! };
+  } catch {
+    return undefined;
   }
-  const listed = await runCommand("ps", ["eww", "-o", "command=", "-p", String(pid)]).catch(() => undefined);
-  return listed?.stdout.split(/\s+/).includes(marker) ?? false;
+}
+
+export function ownershipRefusal(record: ProcessIdentity): string | undefined {
+  if (record.start_time === undefined) return "record has no process start time; left alone";
+  const current = readProcessIdentity(record.pid);
+  if (current === undefined) return "process identity unavailable; left alone";
+  if (current.pgid !== record.pgid) return "process group differs from record; left alone";
+  if (current.start_time !== record.start_time) return "process start time differs from record; left alone";
+  return undefined;
+}
+
+export async function processBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
+  return ownershipRefusal(record) === undefined;
 }
 
 export function groupAlive(pgid: number): boolean {
@@ -155,22 +183,15 @@ export function groupAlive(pgid: number): boolean {
   }
 }
 
-export async function groupBelongsToEnv(pgid: number, env: string): Promise<boolean> {
-  if (!groupAlive(pgid)) return false;
-  if (await processBelongsToEnv(pgid, env)) return true;
-  const listed = await runCommand("ps", ["-A", "-o", "pid=,pgid="], { timeoutMs: 5_000 }).catch(() => undefined);
-  const members = (listed?.stdout ?? "")
-    .split("\n")
-    .map((line) => line.trim().split(/\s+/).map(Number))
-    .filter(([pid, group]) => group === pgid && pid !== pgid && pid !== undefined && Number.isInteger(pid))
-    .map(([pid]) => pid as number);
-  for (const pid of members) if (await processBelongsToEnv(pid, env)) return true;
-  return false;
+export async function groupBelongsToEnv(record: ProcessIdentity): Promise<boolean> {
+  return groupAlive(record.pgid) && ownershipRefusal(record) === undefined;
 }
 
-export async function stopEnvGroup(pgid: number, env: string): Promise<boolean> {
-  if (!(await groupBelongsToEnv(pgid, env))) return false;
-  await stopProcessGroup(pgid);
+export async function stopEnvGroup(record: ProcessIdentity): Promise<boolean> {
+  if (!groupAlive(record.pgid)) return false;
+  const refusal = ownershipRefusal(record);
+  if (refusal !== undefined) throw new NectarError("E_BUSY", `Runtime ownership unknown: ${refusal}`);
+  await stopProcessGroup(record.pgid);
   return true;
 }
 
@@ -211,8 +232,4 @@ export function currentPublisher(): { hive_bee?: string; hive_session?: string; 
   const hiveBee = process.env.HIVE_BEE ?? process.env.HIVE_BEE_ID;
   const hiveSession = process.env.HIVE_SESSION ?? process.env.HIVE_SESSION_ID ?? (process.env.HIVE_BEE === undefined ? undefined : process.env.HIVE_BEE_ID);
   return {
-    ...(hiveBee === undefined ? {} : { hive_bee: hiveBee }),
-    ...(hiveSession === undefined ? {} : { hive_session: hiveSession }),
-    user: os.userInfo().username,
-  };
-}
+    ...(hiveBee === undefined ? {} : { hive_bee

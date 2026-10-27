@@ -4,7 +4,7 @@ import { mkdir, writeFile, mkdtemp, open, readFile, chmod } from 'node:fs/promis
 import path from 'node:path';
 import { NectarService } from '../../dist/service.js';
 import { daemonHello, callDaemon } from '../../dist/control.js';
-import { spawnDetached, stopEnvGroup, pidAlive } from '../../dist/commands.js';
+import { spawnDetached, stopEnvGroup, pidAlive, readProcessIdentity } from '../../dist/commands.js';
 const root = path.resolve(process.argv[2] ?? `test/fixtures/.runs/legacy-${Date.now()}`);
 await mkdir(root, { recursive: true });
 const tailscale = path.join(root, 'tailscale');
@@ -36,6 +36,7 @@ const call = (op, args) => retry(() => callDaemon(process.env.NECTAR_SOCKET, op,
 const update = (name, fn) => retry(() => service.store.updateEnv(name, fn));
 const records = [];
 let decoy;
+let shellIdentity;
 const say = value => console.log(JSON.stringify(value));
 const publish = async branch => { git('branch', branch); const p = await call('publish', { path: repo, branch, mode: 'web', local: true }); let r = await service.store.readEnv(p.env); assert.equal(await (await fetch(r.urls.local)).text(), 'fixture'); r = await service.store.readEnv(p.env); assert(r.serve.pid > 1); records.push(r); return r; };
 try {
@@ -49,6 +50,25 @@ try {
   assert.equal((await service.store.readEnv(owned.name)).serve.start_time, owned.serve.start_time);
   assert(!pidAlive(owned.serve.pid));
   say({ legacyOwned: 'adopted identity persisted and stopped normally' });
+  await new Promise(r => setTimeout(r, 1_100));
+  const cmd = "trap 'wait; exit' TERM; sleep 300 & wait";
+  const shell = spawn('/bin/sh', ['-c', cmd], { cwd: owned.worktree, detached: true, stdio: 'ignore' });
+  shellIdentity = { pid: shell.pid, ...readProcessIdentity(shell.pid) };
+  assert(shellIdentity.start_time);
+  const original = await service.store.readEnv(owned.name);
+  const injectShell = async overrides => update(owned.name, r => { Object.assign(r, original, overrides); r.status = 'publishing'; r.serve = { cmd, pid: shell.pid, pgid: shell.pid }; });
+  await injectShell({ published_at: new Date(Date.now() + 60_000).toISOString(), last_touched_at: new Date(Date.now() + 60_000).toISOString() });
+  await assert.rejects(call('stop', { env: owned.name }), /OS start time/); assert(pidAlive(shell.pid));
+  await injectShell({ worktree: root });
+  await assert.rejects(call('stop', { env: owned.name }), /cwd differs/); assert(pidAlive(shell.pid));
+  await injectShell({});
+  await update(owned.name, r => { r.serve.cmd = 'different command'; });
+  await assert.rejects(call('stop', { env: owned.name }), /argv do not match/); assert(pidAlive(shell.pid));
+  await injectShell({});
+  await call('stop', { env: owned.name });
+  assert.equal((await service.store.readEnv(owned.name)).serve.start_time, shellIdentity.start_time);
+  assert(!pidAlive(shell.pid));
+  say({ exactArgv: 'adopted without daemon parent', refusals: 'newer record timestamp, wrong cwd, wrong argv; process remained alive until verified stop' });
   const wrong = await publish('decoy');
   await call('stop', { env: wrong.name });
   decoy = spawnDetached('exec sleep 300', root, process.env, path.join(root, 'decoy.log'));
@@ -77,5 +97,6 @@ try {
 } finally {
   for (const r of records.reverse()) { const current = await service.store.maybeEnv(r.name); if (decoy && current?.serve?.pid === decoy.pid) await update(r.name, x => { x.serve = r.serve; }); await service.stop(r.name).catch(() => {}); }
   if (decoy) await stopEnvGroup(decoy);
+  if (shellIdentity && pidAlive(shellIdentity.pid)) await stopEnvGroup(shellIdentity);
   daemon.kill('SIGTERM'); await new Promise(resolve => daemon.once('exit', resolve)); await log.close();
 }

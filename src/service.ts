@@ -1917,6 +1917,27 @@ export class NectarService {
   }
 
   async wakeWeb(name: string): Promise<Upstream> {
+    validateEnvName(name);
+    try {
+      return await this.wakeWebRuntime(name);
+    } catch (error) {
+      const failure = asNectarError(error);
+      if (failure.code === "E_BUSY" && failure.details.timeout_ms === undefined) throw error;
+      const record = await this.store.maybeEnv(name);
+      if (record !== undefined) {
+        const log = await prepareLog(this.paths, name, (await this.store.readConfig()).log_max_bytes);
+        await appendFile(log, `${new Date().toISOString()} Wake failed: ${failure.code}: ${failure.message}\n`);
+        const log_tail = await logTail(this.paths, name);
+        await this.store.updateEnv(name, (current) => {
+          if (current.status !== "warm" || current.published_at !== record.published_at) return;
+          current.failure = { code: failure.code, message: failure.message, failed_at: new Date().toISOString(), log_tail };
+        }, { bestEffort: true });
+      }
+      throw error;
+    }
+  }
+
+  private async wakeWebRuntime(name: string): Promise<Upstream> {
     const current = await this.store.readEnv(validateEnvName(name));
     if (capacitySleeping.has(`${this.paths.root}\0${name}`)) throw new NectarError("E_BUSY", "Preview is being put to sleep; retry");
     const remoteUpstream = (url: string): Upstream => {

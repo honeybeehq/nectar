@@ -3,6 +3,13 @@ import os from "node:os";
 import { NectarError } from "./errors.js";
 
 export const RESERVED_SERVICE_PORTS: ReadonlySet<number> = new Set([443, 8440, 8441, 8450, 8451]);
+const BLOCKED_HTTP_PORTS: ReadonlySet<number> = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
+  101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179,
+  389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601,
+  636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+  6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
 
 async function portAvailableOnHost(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -67,7 +74,7 @@ export async function allocatePort(options: {
     if (port !== options.preferred) candidates.push(port);
   }
   for (const port of candidates) {
-    if (port < options.start || port > options.end || options.reserved.has(port) || RESERVED_SERVICE_PORTS.has(port) || port > 65535) continue;
+    if (port < options.start || port > options.end || options.reserved.has(port) || RESERVED_SERVICE_PORTS.has(port) || BLOCKED_HTTP_PORTS.has(port) || port > 65535) continue;
     if (await portAvailable(port)) return port;
   }
   throw new NectarError("E_PORTS", `No available TCP port in configured range ${options.start}-${options.end}; widen custom port bounds or publish with --host <host>`);

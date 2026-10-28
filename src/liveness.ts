@@ -19,7 +19,7 @@ export function hasProbeableServe(record: EnvRecord): record is EnvRecord & { se
 const GIVEN_UP_CODES: ReadonlySet<string> = new Set(["E_CRASH_LOOP", "E_PORTS"]);
 
 export function givenUp(record: EnvRecord): boolean {
-  return GIVEN_UP_CODES.has(record.failure?.code ?? "");
+  return record.status !== "warm" && GIVEN_UP_CODES.has(record.failure?.code ?? "");
 }
 
 export function holdsRuntime(status: EnvStatus): boolean {

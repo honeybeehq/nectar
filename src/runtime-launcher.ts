@@ -44,5 +44,5 @@ function watch(): void {
 process.on("SIGTERM", watch);
 process.on("SIGINT", watch);
 const child = spawn(file, args, { stdio: "inherit" });
-child.on("error", () => { exited = true; watch(); });
+child.on("error", (error) => { console.error(`Nectar: could not launch ${file}: ${error.message}`); exited = true; watch(); });
 child.on("exit", (code) => { exited = true; exitCode = code ?? 1; watch(); });

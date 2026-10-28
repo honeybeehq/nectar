@@ -15,26 +15,22 @@ async function portAvailableOnHost(port: number, host: string): Promise<boolean>
   return new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
-    server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EADDRNOTAVAIL" || error.code === "EAFNOSUPPORT"));
-    server.listen({ host, port, exclusive: true }, () => {
+    server.once("error", () => resolve(false));
+    server.listen({ host, port, exclusive: true, ipv6Only: net.isIPv6(host) }, () => {
       server.close(() => resolve(true));
     });
   });
 }
 
 export async function portAvailable(port: number): Promise<boolean> {
-  // macOS can allow a second bind beside a wildcard listener (for example a
-  // process using SO_REUSEPORT), so bind-only probing can call an actively
-  // served port "free". A successful connection is definitive occupancy.
-  if (await portOpen(port)) return false;
-  const interfaces = Object.values(os.networkInterfaces()).flatMap((addresses) => addresses ?? []);
-  const addresses = [...new Set(interfaces.filter((address) => !address.internal).map((address) => address.address))];
-  if ((await Promise.all(addresses.map((address) => portOpenOnHost(port, address)))).some(Boolean)) return false;
-  const [ipv4, ipv6] = await Promise.all([
-    portAvailableOnHost(port, "127.0.0.1"),
-    portAvailableOnHost(port, "::1"),
-  ]);
-  return ipv4 && ipv6;
+  const interfaces = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
+    (addresses ?? []).map((address) => address.family === "IPv6" && address.scopeid !== 0 && !address.address.includes("%") ? `${address.address}%${name}` : address.address),
+  );
+  const addresses = new Set(["0.0.0.0", "::", "127.0.0.1", "::1", ...interfaces]);
+  for (const address of addresses) {
+    if (!(await portAvailableOnHost(port, address))) return false;
+  }
+  return true;
 }
 
 export async function portOpenOnHost(port: number, host: string, timeoutMs = 300): Promise<boolean> {

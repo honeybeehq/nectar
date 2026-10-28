@@ -1,6 +1,7 @@
 import net from "node:net";
+import os from "node:os";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { allocatePort, portAvailable } from "../src/ports.js";
 
 const servers: net.Server[] = [];
@@ -42,15 +43,54 @@ async function freeBase(span: number): Promise<number> {
 }
 
 describe("port allocator (F5)", () => {
-  it("treats a connectable wildcard listener as occupied", async () => {
-    const base = await freeBase(0);
-    const server = net.createServer();
+  it.each([
+    { host: "0.0.0.0", ipv6Only: false, reusePort: false },
+    { host: "127.0.0.1", ipv6Only: false, reusePort: false },
+    ...Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
+      (addresses ?? []).filter((address) => !address.internal).map((address) => ({
+        host: address.family === "IPv6" && address.scopeid !== 0 && !address.address.includes("%") ? `${address.address}%${name}` : address.address,
+        ipv6Only: address.family === "IPv6",
+        reusePort: false,
+      })),
+    ),
+    { host: "::", ipv6Only: true, reusePort: false },
+    { host: "::1", ipv6Only: true, reusePort: false },
+    { host: "::", ipv6Only: false, reusePort: false },
+    { host: "0.0.0.0", ipv6Only: false, reusePort: true },
+    { host: "127.0.0.1", ipv6Only: false, reusePort: true },
+    { host: "::", ipv6Only: true, reusePort: true },
+    { host: "::1", ipv6Only: true, reusePort: true },
+  ].filter((options) => !options.reusePort || process.platform === "linux"))("skips an occupied candidate without connecting: %j", async (options) => {
+    const connected = vi.fn((socket: net.Socket) => socket.destroy());
+    const server = net.createServer(connected);
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen({ port: base }, resolve);
+      server.listen({ ...options, port: 0 }, resolve);
     });
     servers.push(server);
-    expect(await portAvailable(base)).toBe(false);
+    const base = (server.address() as AddressInfo).port;
+    const connect = vi.spyOn(net, "createConnection").mockImplementation(() => {
+      throw new Error("Availability must not connect");
+    });
+    try {
+      expect(await portAvailable(base)).toBe(false);
+      await expect(allocatePort({ start: base, end: base, reserved: new Set(), preferred: base })).rejects.toMatchObject({ code: "E_PORTS" });
+      expect(connect).not.toHaveBeenCalled();
+      expect(connected).not.toHaveBeenCalled();
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
+  it.runIf(process.platform === "darwin")("reports that Node reusePort is unavailable on macOS", async () => {
+    const server = net.createServer();
+    await expect(new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ host: "127.0.0.1", port: 0, reusePort: true }, () => {
+        servers.push(server);
+        resolve();
+      });
+    })).rejects.toMatchObject({ code: "ENOTSUP" });
   });
 
   it("skips occupied and reserved ports and honors a free preferred port", async () => {

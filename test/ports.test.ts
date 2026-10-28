@@ -97,6 +97,16 @@ describe("port allocator (F5)", () => {
     }
   });
 
+  it("refuses allocation when no interface addresses are assigned", async () => {
+    const interfaces = vi.spyOn(os, "networkInterfaces").mockReturnValue({});
+    try {
+      expect(await portAvailable(4100)).toBe(false);
+      await expect(allocatePort({ start: 4100, end: 4100, reserved: new Set() })).rejects.toMatchObject({ code: "E_PORTS" });
+    } finally {
+      interfaces.mockRestore();
+    }
+  });
+
   it.runIf(process.platform === "darwin")("reports that Node reusePort is unavailable on macOS", async () => {
     const server = net.createServer();
     await expect(new Promise<void>((resolve, reject) => {

@@ -5,6 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { allocatePort, portAvailable } from "../src/ports.js";
 
 const servers: net.Server[] = [];
+const assigned = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
+  (addresses ?? []).map((address) => ({
+    host: address.family === "IPv6" && address.scopeid !== 0 && !address.address.includes("%") ? `${address.address}%${name}` : address.address,
+    ipv6Only: address.family === "IPv6",
+    reusePort: false,
+  })),
+);
 
 afterEach(async () => {
   for (const server of servers.splice(0)) {
@@ -46,13 +53,7 @@ describe("port allocator (F5)", () => {
   it.each([
     { host: "0.0.0.0", ipv6Only: false, reusePort: false },
     { host: "127.0.0.1", ipv6Only: false, reusePort: false },
-    ...Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
-      (addresses ?? []).filter((address) => !address.internal).map((address) => ({
-        host: address.family === "IPv6" && address.scopeid !== 0 && !address.address.includes("%") ? `${address.address}%${name}` : address.address,
-        ipv6Only: address.family === "IPv6",
-        reusePort: false,
-      })),
-    ),
+    ...assigned.filter((address) => address.host !== "127.0.0.1" && address.host !== "::1"),
     { host: "::", ipv6Only: true, reusePort: false },
     { host: "::1", ipv6Only: true, reusePort: false },
     { host: "::", ipv6Only: false, reusePort: false },
@@ -60,7 +61,7 @@ describe("port allocator (F5)", () => {
     { host: "127.0.0.1", ipv6Only: false, reusePort: true },
     { host: "::", ipv6Only: true, reusePort: true },
     { host: "::1", ipv6Only: true, reusePort: true },
-  ].filter((options) => !options.reusePort || process.platform === "linux"))("skips an occupied candidate without connecting: %j", async (options) => {
+  ].filter((options) => (!options.reusePort || process.platform === "linux") && assigned.some((address) => options.host === "0.0.0.0" || options.host === "::" ? net.isIPv6(address.host) === net.isIPv6(options.host) : address.host === options.host)))("skips an occupied candidate without connecting: %j", async (options) => {
     const connected = vi.fn((socket: net.Socket) => socket.destroy());
     const server = net.createServer(connected);
     await new Promise<void>((resolve, reject) => {
@@ -79,6 +80,20 @@ describe("port allocator (F5)", () => {
       expect(connected).not.toHaveBeenCalled();
     } finally {
       connect.mockRestore();
+    }
+  });
+
+  it("allocates on an IPv4-only host", async () => {
+    const server = await occupy(0);
+    const port = (server.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const interfaces = vi.spyOn(os, "networkInterfaces").mockReturnValue({
+      lo: [{ address: "127.0.0.1", family: "IPv4", netmask: "255.0.0.0", mac: "00:00:00:00:00:00", internal: true, cidr: "127.0.0.1/8" }],
+    });
+    try {
+      expect(await allocatePort({ start: port, end: port, reserved: new Set() })).toBe(port);
+    } finally {
+      interfaces.mockRestore();
     }
   });
 

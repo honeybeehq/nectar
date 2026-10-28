@@ -26,7 +26,7 @@ export async function portAvailable(port: number): Promise<boolean> {
   const interfaces = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
     (addresses ?? []).map((address) => address.family === "IPv6" && address.scopeid !== 0 && !address.address.includes("%") ? `${address.address}%${name}` : address.address),
   );
-  const addresses = new Set(["0.0.0.0", "::", "127.0.0.1", "::1", ...interfaces]);
+  const addresses = new Set([...interfaces.map((address) => net.isIPv6(address) ? "::" : "0.0.0.0"), ...interfaces]);
   for (const address of addresses) {
     if (!(await portAvailableOnHost(port, address))) return false;
   }

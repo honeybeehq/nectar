@@ -1923,16 +1923,18 @@ export class NectarService {
     } catch (error) {
       const failure = asNectarError(error);
       if (failure.code === "E_BUSY" && failure.details.timeout_ms === undefined) throw error;
-      const record = await this.store.maybeEnv(name);
-      if (record !== undefined) {
-        const log = await prepareLog(this.paths, name, (await this.store.readConfig()).log_max_bytes);
-        await appendFile(log, `${new Date().toISOString()} Wake failed: ${failure.code}: ${failure.message}\n`);
-        const log_tail = await logTail(this.paths, name);
-        await this.store.updateEnv(name, (current) => {
-          if (current.status !== "warm" || current.published_at !== requested.published_at) return;
-          current.failure = { code: failure.code, message: failure.message, failed_at: new Date().toISOString(), log_tail };
-        }, { bestEffort: true });
-      }
+      await (async () => {
+        const record = await this.store.maybeEnv(name);
+        if (record !== undefined) {
+          const log = await prepareLog(this.paths, name, (await this.store.readConfig()).log_max_bytes);
+          await appendFile(log, `${new Date().toISOString()} Wake failed: ${failure.code}: ${failure.message}\n`);
+          const log_tail = await logTail(this.paths, name);
+          await this.store.updateEnv(name, (current) => {
+            if (current.status !== "warm" || current.published_at !== requested.published_at) return;
+            current.failure = { code: failure.code, message: failure.message, failed_at: new Date().toISOString(), log_tail };
+          }, { bestEffort: true });
+        }
+      })().catch(() => undefined);
       throw error;
     }
   }

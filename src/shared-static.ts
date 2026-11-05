@@ -158,7 +158,13 @@ async function run(root: string, port: number, secret: string): Promise<void> {
         response.end();
         return;
       }
-      if (match[3] === "/.well-known/nectar-creator") {
+      let relative: string;
+      try {
+        relative = decodeURIComponent(match[3]).replace(/^\/+/, "/");
+      } catch {
+        return reply(response, 400, "Invalid static preview path.\n");
+      }
+      if (relative === "/.well-known/nectar-creator") {
         response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
         response.end(JSON.stringify({ creator: previewCreator(record) }));
         return;

@@ -245,10 +245,18 @@ For shared static previews, anyone with the preview URL can GET
 query and fragment). The JSON response is `{ "creator": ... }`, with the same
 shape as resolve. An incorrect token returns 404; unavailable previews retain their
 normal 410 response. Query parameters never set creator identity. This endpoint is
-reserved by Nectar and cannot be overridden by a site's files. Dynamic previews
+reserved by Nectar and cannot be overridden by a site's files. Publishing this
+metadata intentionally discloses the session claim and node to preview holders,
+including public visitors when the preview is exposed publicly. Dynamic previews
 use the ref read. Preview URL formats and ordinary asset handling are unchanged.
 
 The recorded node is a hostname or remote publisher node value, not proof of a
 session. A future verified record requires an audience-bound attestation from a
 trusted Honeybee/Apiary issuer; session ids from environment variables, URL fields
 or session-existence lookups cannot provide that authentication.
+
+After building, run `node test/fixtures/verify-preview-creator.mjs` from this
+checkout for a real daemon-backed, tailnet HTTPS creator check. It uses isolated
+state/socket, exercises forged claims, legacy records and metadata paths, writes
+`.proof/browser-comments-t3a/` evidence, and removes its preview records and
+processes afterward. It requires normal Nectar/Tailscale publishing access.

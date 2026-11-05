@@ -1,3 +1,4 @@
+import { previewCreator } from "./creator.js";
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -155,6 +156,11 @@ async function run(root: string, port: number, secret: string): Promise<void> {
       if (match[3] === undefined) {
         response.writeHead(301, { location: `${url.pathname}/${url.search}` });
         response.end();
+        return;
+      }
+      if (match[3] === "/.well-known/nectar-creator") {
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        response.end(JSON.stringify({ creator: previewCreator(record) }));
         return;
       }
       request.url = `${match[3].replace(/^\/+/, "/")}${url.search}`;

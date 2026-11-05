@@ -1,3 +1,4 @@
+import { publisherCreator, previewCreator } from "./creator.js";
 import crypto from "node:crypto";
 import { runningDaemonPid } from "./daemon.js";
 import { upstreamOf, type Upstream } from "./proxy.js";
@@ -1159,6 +1160,7 @@ export class NectarService {
       expires_at: expiresAt(now, options.ttlMs),
       last_touched_at: now.toISOString(),
       publisher: this.publisher ?? currentPublisher(),
+      creator: publisherCreator(this.publisher ?? currentPublisher()),
       ...(options.packet === undefined ? {} : { packet_hint: options.packet }),
       ttl_ms: options.ttlMs,
       ...(old?.static_route === undefined ? {} : { static_route: old.static_route }),
@@ -2953,6 +2955,7 @@ export class NectarService {
       const dead = packetFields.preview_url !== null && DEAD_STATUSES.has(record.status);
       resolutions.push({
         env: record.name,
+        creator: previewCreator(record),
         ref: record.ref,
         mode: record.mode,
         commit: record.commit,

@@ -164,6 +164,12 @@ export interface PublishFailure {
   cleanup_errors?: string[];
 }
 
+export interface PreviewCreator {
+  session_id: string;
+  node: string | null;
+  verified: false;
+}
+
 export interface Publisher {
   hive_bee?: string;
   hive_session?: string;
@@ -241,6 +247,7 @@ export interface EnvRecord {
   last_touched_at: string;
   ttl_ms?: number;
   publisher: Publisher;
+  creator?: PreviewCreator | null;
   packet_hint?: string;
   evidence: string[];
   install_hash?: string;
@@ -297,6 +304,7 @@ export interface RemoteConfig {
 }
 
 export interface ResolveResult {
+  creator?: PreviewCreator | null;
   env: string;
   ref: string;
   mode: Mode;

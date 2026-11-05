@@ -225,3 +225,30 @@ fixture-backed integration tests.
 - [docs/FUTURE-nctr-cloud.md](docs/FUTURE-nctr-cloud.md) ·
   [docs/FUTURE-productization.md](docs/FUTURE-productization.md) — hosted & multi-tenant
 - [relay/](relay/) — the public-preview relay
+
+## Preview creator claims
+
+New publishes record `creator` as `{session_id, node, verified:false}` when the
+publisher supplies a Honeybee session; otherwise it is `null`. These are **unverified
+claims**, including when Tailscale authenticates the publishing node. Never use them
+for automatic comment routing. Nectar currently has no trusted Honeybee session
+attestation verifier. Champion and Project identities are not inferred from claims.
+
+`nectar resolve nectar://<host>/<env> --json` returns `result.creator` through the
+existing cross-machine listener (tailnet port 8441 by default, subject to its allow
+policy) or SSH fallback. Older records return `null`; older servers may omit the
+field, which readers must also treat as none.
+
+For shared static previews, anyone with the preview URL can GET
+`<preview-root>.well-known/nectar-creator` on the same HTTPS origin, where
+`preview-root` is the existing `/s/<env>/<token>/` prefix (discard any asset path,
+query and fragment). The JSON response is `{ "creator": ... }`, with the same
+shape as resolve. An incorrect token returns 404; unavailable previews retain their
+normal 410 response. Query parameters never set creator identity. This endpoint is
+reserved by Nectar and cannot be overridden by a site's files. Dynamic previews
+use the ref read. Preview URL formats and ordinary asset handling are unchanged.
+
+The recorded node is a hostname or remote publisher node value, not proof of a
+session. A future verified record requires an audience-bound attestation from a
+trusted Honeybee/Apiary issuer; session ids from environment variables, URL fields
+or session-existence lookups cannot provide that authentication.

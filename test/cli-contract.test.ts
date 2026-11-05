@@ -124,6 +124,7 @@ describe("cli --json contract", () => {
           "ref",
           "mode",
           "commit",
+          "creator",
           "current_commit",
           "stale",
           "is_self",

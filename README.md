@@ -233,8 +233,9 @@ publisher supplies a Honeybee session; otherwise it is `null`. These are **unver
 claims**, including when Tailscale authenticates the publishing node. Apiary may
 use them as a visible, editable default comment target only; they must never cause
 an automatic send. A same-uid process could claim another creator; it affects only
-the default target. Nectar currently has no trusted Honeybee session attestation
-verifier. Champion and Project identities are not inferred from claims.
+the default target. Any process allowed to publish could make a false claim,
+including on another allowed node. Nectar currently has no trusted Honeybee session
+attestation verifier. Nectar does not infer Champion or Project identities from claims.
 
 `nectar resolve nectar://<host>/<env> --json` returns `result.creator` through the
 existing cross-machine listener (tailnet port 8441 by default, subject to its allow

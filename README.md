@@ -230,9 +230,11 @@ fixture-backed integration tests.
 
 New publishes record `creator` as `{session_id, node, verified:false}` when the
 publisher supplies a Honeybee session; otherwise it is `null`. These are **unverified
-claims**, including when Tailscale authenticates the publishing node. Never use them
-for automatic comment routing. Nectar currently has no trusted Honeybee session
-attestation verifier. Champion and Project identities are not inferred from claims.
+claims**, including when Tailscale authenticates the publishing node. Apiary may
+use them as a visible, editable default comment target only; they must never cause
+an automatic send. A same-uid process could claim another creator; it affects only
+the default target. Nectar currently has no trusted Honeybee session attestation
+verifier. Champion and Project identities are not inferred from claims.
 
 `nectar resolve nectar://<host>/<env> --json` returns `result.creator` through the
 existing cross-machine listener (tailnet port 8441 by default, subject to its allow
@@ -253,7 +255,9 @@ use the ref read. Preview URL formats and ordinary asset handling are unchanged.
 The recorded node is a hostname or remote publisher node value, not proof of a
 session. A future verified record requires an audience-bound attestation from a
 trusted Honeybee/Apiary issuer; session ids from environment variables, URL fields
-or session-existence lookups cannot provide that authentication.
+or session-existence lookups cannot provide that authentication. Signed statements
+are a follow-up for when T11 resumes, with the groundwork in the Project file
+`t3-trust.md`; they are not required for this default-target contract.
 
 After building, run `node test/fixtures/verify-preview-creator.mjs` from this
 checkout for a real daemon-backed, tailnet HTTPS creator check. It uses isolated

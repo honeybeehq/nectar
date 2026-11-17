@@ -31,7 +31,7 @@ else
   [[ $EUID -eq 0 ]] || { echo "run as root on the relay host, or pass --root <scratch dir>" >&2; exit 1; }
 fi
 
-FILES=(relayd-cli.js relayd.js localapi.js commands.js errors.js)
+FILES=(relayd-cli.js relayd.js localapi.js commands.js errors.js ports.js)
 for file in "${FILES[@]}"; do
   [[ -f "$DIST/$file" ]] || { echo "$DIST/$file is missing; run pnpm build first" >&2; exit 1; }
 done
